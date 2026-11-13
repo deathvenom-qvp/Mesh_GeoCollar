@@ -1,0 +1,162 @@
+<!doctype html>
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>GeoCollar</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet.draw/1.0.4/leaflet.draw.css">
+<style>
+  :root { --bg: #ffffff; --fg: #1d1d1f; --muted: #6e6e73; --line: #d2d2d7; --accent: #2f6feb; --bad: #c62828; --warn: #b26a00; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #161618; --fg: #f2f2f2; --muted: #a1a1a6; --line: #3a3a3c; --accent: #6ea8ff; --bad: #ff6b6b; --warn: #ffb74d; } }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.4 system-ui, sans-serif; background: var(--bg); color: var(--fg); display: grid; grid-template-columns: 320px 1fr; height: 100vh; }
+  aside { border-right: 1px solid var(--line); padding: 16px; overflow-y: auto; }
+  #map { height: 100vh; }
+  h1 { font-size: 18px; margin: 0 0 4px; }
+  .muted { color: var(--muted); font-size: 12px; }
+  .collar { border: 1px solid var(--line); border-radius: 8px; padding: 10px; margin: 10px 0; cursor: pointer; }
+  .collar.selected { border-color: var(--accent); }
+  .state-LOST, .state-OUTSIDE { color: var(--bad); font-weight: 600; }
+  .state-WARNING { color: var(--warn); font-weight: 600; }
+  button, input, select { font: inherit; }
+  button { border: 1px solid var(--line); background: transparent; color: var(--fg); border-radius: 6px; padding: 4px 10px; margin: 2px 2px 2px 0; cursor: pointer; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  input, select { width: 100%; padding: 5px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--fg); margin: 2px 0 6px; }
+  fieldset { border: 1px solid var(--line); border-radius: 8px; margin: 12px 0; }
+  @media (max-width: 700px) { body { grid-template-columns: 1fr; grid-template-rows: auto 60vh; height: auto; } #map { height: 60vh; } aside { border-right: 0; } }
+</style>
+</head>
+<body>
+<aside>
+  <h1>GeoCollar</h1>
+  <div class="muted" id="health">Checking radio…</div>
+
+  <div id="collars"></div>
+
+  <fieldset>
+    <legend>Add a collar</legend>
+    <input id="newId" placeholder="Node ID, e.g. !a1b2c3d4">
+    <input id="newName" placeholder="Name, e.g. Rex">
+    <button onclick="addCollar()">Add</button>
+  </fieldset>
+
+  <fieldset id="selectedBox" hidden>
+    <legend id="selectedTitle"></legend>
+    <div class="muted">Draw polygons on the map. New shapes are keep-in zones; pick a shape type below before drawing a keep-out zone.</div>
+    <label>New zone type
+      <select id="zoneKind"><option value="keep_in">Keep in</option><option value="keep_out">Keep out</option></select>
+    </label>
+    <label>Warning margin (m) <input id="margin" type="number" value="10" min="0" max="100"></label>
+    <button class="primary" onclick="saveFences()">Send fences to collar</button>
+    <div style="margin-top:10px">
+      <button onclick="cmd('beep')">Beep</button>
+      <button onclick="cmd('vibrate', 40)">Vibrate</button>
+      <button onclick="cmd('corrections_off')">Corrections off</button>
+      <button onclick="cmd('corrections_on')">Corrections on</button>
+      <button onclick="cmd('force_lost')">Lost mode</button>
+      <button onclick="cmd('clear_lost')">Clear lost</button>
+    </div>
+    <div class="muted" id="msg"></div>
+  </fieldset>
+  <div class="muted">Built on <a href="https://meshtastic.org">Meshtastic</a>. Collar protocol by <a href="https://openshock.org">OpenShock</a>.</div>
+</aside>
+<div id="map"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet.draw/1.0.4/leaflet.draw.js"></script>
+<script>
+// Relative URLs so the page also works behind Home Assistant ingress.
+const api = (path, opts = {}) => fetch('api/' + path, { headers: { 'Content-Type': 'application/json' }, ...opts })
+  .then(async r => { const b = await r.json(); if (!r.ok) throw new Error(b.detail || r.statusText); return b; });
+
+const map = L.map('map').setView([40, -75], 4);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 20, attribution: '&copy; OpenStreetMap contributors' }).addTo(map);
+const fenceLayer = new L.FeatureGroup().addTo(map);
+const trackLayer = new L.FeatureGroup().addTo(map);
+map.addControl(new L.Control.Draw({
+  edit: { featureGroup: fenceLayer },
+  draw: { polyline: false, circle: false, circlemarker: false, marker: false, rectangle: true, polygon: true },
+}));
+map.on(L.Draw.Event.CREATED, e => {
+  const kind = document.getElementById('zoneKind').value;
+  e.layer.feature = { type: 'Feature', properties: { kind, warn_margin_m: +document.getElementById('margin').value } };
+  styleZone(e.layer, kind);
+  fenceLayer.addLayer(e.layer);
+});
+const styleZone = (layer, kind) => layer.setStyle && layer.setStyle({ color: kind === 'keep_out' ? '#c62828' : '#2f6feb' });
+
+let collars = {}, selected = null;
+const say = t => document.getElementById('msg').textContent = t;
+
+async function refresh() {
+  try { const h = await api('health'); document.getElementById('health').textContent = h.mesh_connected ? 'Radio connected' : 'Radio not connected'; } catch {}
+  collars = await api('collars');
+  const box = document.getElementById('collars');
+  box.innerHTML = '';
+  for (const [id, c] of Object.entries(collars)) {
+    const s = c.status || {};
+    const div = document.createElement('div');
+    div.className = 'collar' + (id === selected ? ' selected' : '');
+    div.innerHTML = `<b></b> <span class="muted"></span><br><span class="state-${s.state || ''}">${s.state || 'No report yet'}</span>
+      <span class="muted">${s.battery_pct != null ? ' · battery ' + s.battery_pct + '%' : ''}${s.clearance_m != null ? ' · ' + s.clearance_m + ' m to line' : ''}
+      · fences v${s.fence_version ?? '?'} of v${c.fence_version}</span>`;
+    div.querySelector('b').textContent = c.name;
+    div.querySelector('span.muted').textContent = id;
+    div.onclick = () => select(id);
+    box.appendChild(div);
+  }
+  if (selected && collars[selected]) drawTrack(collars[selected]);
+}
+
+function select(id) {
+  selected = id;
+  const c = collars[id];
+  document.getElementById('selectedBox').hidden = false;
+  document.getElementById('selectedTitle').textContent = c.name;
+  fenceLayer.clearLayers();
+  if (c.fences) L.geoJSON(c.fences, { onEachFeature: (f, l) => { styleZone(l, f.properties?.kind); fenceLayer.addLayer(l); } });
+  if (fenceLayer.getLayers().length) map.fitBounds(fenceLayer.getBounds(), { maxZoom: 18 });
+  refresh();
+}
+
+function drawTrack(c) {
+  trackLayer.clearLayers();
+  const pts = (c.track || []).map(p => [p[1], p[2]]);
+  if (pts.length) {
+    L.polyline(pts, { color: '#888', weight: 2 }).addTo(trackLayer);
+    L.circleMarker(pts[pts.length - 1], { radius: 7, color: '#2f6feb' }).bindTooltip(c.name).addTo(trackLayer);
+  }
+}
+
+async function addCollar() {
+  const node_id = document.getElementById('newId').value.trim();
+  if (!node_id) return;
+  await api('collars', { method: 'POST', body: JSON.stringify({ node_id, name: document.getElementById('newName').value.trim() || null }) });
+  select(node_id);
+}
+
+async function saveFences() {
+  const features = fenceLayer.getLayers().map(l => {
+    const f = l.toGeoJSON();
+    f.properties = l.feature?.properties || { kind: 'keep_in', warn_margin_m: 10 };
+    return f;
+  });
+  try {
+    const r = await api(`collars/${encodeURIComponent(selected)}/fences`, { method: 'PUT', body: JSON.stringify({ type: 'FeatureCollection', features }) });
+    say(`Saved fence v${r.fence_version}` + (r.chunks_sent ? `, sent in ${r.chunks_sent} packet(s)` : ', not sent (radio not connected)'));
+  } catch (e) { say(e.message); }
+  refresh();
+}
+
+async function cmd(action, intensity = 0) {
+  try { await api(`collars/${encodeURIComponent(selected)}/command`, { method: 'POST', body: JSON.stringify({ action, intensity }) }); say('Sent ' + action); }
+  catch (e) { say(e.message); }
+}
+
+refresh();
+setInterval(refresh, 10000);
+</script>
+</body>
+</html>

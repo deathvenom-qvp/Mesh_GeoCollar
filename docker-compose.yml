@@ -1,0 +1,15 @@
+# Run the GeoCollar base station with a Meshtastic node on USB.
+# For a node on Wi-Fi instead, drop "devices" and set GEOCOLLAR_MESH_HOST to its IP address.
+services:
+  geocollar:
+    build: ./base
+    ports:
+      - "8099:8099"
+    volumes:
+      - ./base/data:/data
+    devices:
+      - /dev/ttyUSB0:/dev/ttyUSB0
+    environment:
+      GEOCOLLAR_MESH_SERIAL: /dev/ttyUSB0
+      # GEOCOLLAR_MESH_HOST: 192.168.1.50
+    restart: unless-stopped

@@ -1,5 +1,5 @@
 .meshtastic/
-test/geocollar_tests
+firmware/test/geocollar_tests
 __pycache__/
 *.pyc
 .pytest_cache/
