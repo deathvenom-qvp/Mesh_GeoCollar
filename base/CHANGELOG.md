@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.1
+
+- Fix the Home Assistant build: always build on python:3.12-slim instead of Home Assistant's
+  default Alpine base, which has no Python.
+
 ## 0.2.0
 
 - Draw, edit and delete keep-in and keep-out zones on a satellite or street map, with checks

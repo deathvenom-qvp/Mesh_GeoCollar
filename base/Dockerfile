@@ -1,7 +1,8 @@
-# GeoCollar base station. Builds as a plain Docker image or as a Home Assistant app
-# (Home Assistant passes BUILD_FROM from build.yaml).
-ARG BUILD_FROM=python:3.12-slim
-FROM ${BUILD_FROM}
+# GeoCollar base station. Builds as a plain Docker image or as a Home Assistant app.
+# The base image is fixed on purpose: newer Home Assistant releases pass their own Alpine base
+# (without Python) as BUILD_FROM, so this file does not use that argument. python:3.12-slim is
+# multi-arch, so the same line builds on amd64 and aarch64.
+FROM python:3.12-slim
 
 WORKDIR /app
 COPY requirements.txt .
