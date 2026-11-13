@@ -38,7 +38,8 @@ jobs:
         with:
           path: ~/.platformio
           key: pio-${{ hashFiles('firmware/MESHTASTIC_VERSION') }}
-      - run: pip install platformio
+      # Meshtastic v2.8.2 pins this version; newer post-releases are rejected by its ESP32 platform.
+      - run: pip install platformio==6.2.0
       - run: firmware/build.sh heltec-wireless-tracker
       - uses: actions/upload-artifact@v4
         with:

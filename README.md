@@ -48,7 +48,7 @@ Fixes with poor PDOP or few satellites are ignored entirely.
 ## Build the collar firmware
 
 ```sh
-pip install platformio
+pip install platformio==6.2.0   # the version Meshtastic v2.8.2 pins
 firmware/build.sh            # Heltec Wireless Tracker V1.1
 ```
 

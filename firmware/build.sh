@@ -6,7 +6,7 @@
 # own build picks up automatically. No Meshtastic source file is modified.
 #
 # Usage: firmware/build.sh [platformio env]   (default: heltec-wireless-tracker)
-# Needs: git, python3, PlatformIO (pip install platformio).
+# Needs: git, python3, PlatformIO 6.2.0 (pip install platformio==6.2.0), the version Meshtastic pins.
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
