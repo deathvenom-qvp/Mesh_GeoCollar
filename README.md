@@ -55,7 +55,7 @@ The collar also paces its own GPS: every 5 s near the line, slowing to once a mi
 
 ```sh
 git clone https://github.com/deathvenom-qvp/Mesh_GeoCollar && cd Mesh_GeoCollar
-git submodule update --init --depth 1   # optional: the reference firmwares
+git submodule update --init --checkout --depth 1 reference/meshtastic-firmware reference/openshock-firmware   # optional
 pip install platformio==6.2.0   # the version Meshtastic 2.8 pins
 firmware/build.sh            # Heltec Wireless Tracker V1.1
 ```
