@@ -189,6 +189,24 @@ static void testStateMachine()
     CHECK(e.state() == CollarState::Inside && d.sendStatus);
 }
 
+static void testGpsPacing()
+{
+    Settings s;
+    CHECK(gpsIntervalSecs(s, CollarState::NoFence, 500, 10) == 0);
+    CHECK(gpsIntervalSecs(s, CollarState::Inside, 1000, 10) == 60); // deep inside: slow
+    CHECK(gpsIntervalSecs(s, CollarState::Inside, 10 + 6 * 30, 10) == 30); // 180 m of room at 6 m/s
+    CHECK(gpsIntervalSecs(s, CollarState::Inside, 20, 10) == 5);   // close: fast
+    CHECK(gpsIntervalSecs(s, CollarState::Inside, 5, 10) == 5);    // inside the margin
+    CHECK(gpsIntervalSecs(s, CollarState::Warning, 500, 10) == 5);
+    CHECK(gpsIntervalSecs(s, CollarState::Outside, -5, 10) == 5);
+    CHECK(gpsIntervalSecs(s, CollarState::Lost, -500, 10) == 15);
+    s.gpsPacing = false;
+    CHECK(gpsIntervalSecs(s, CollarState::Inside, 20, 10) == 0);
+    s.gpsPacing = true;
+    s.dogSpeedMps = 0;
+    CHECK(gpsIntervalSecs(s, CollarState::Inside, 1000, 10) == 5); // nonsense settings: stay safe
+}
+
 static void testShockCaps()
 {
     FenceEngine e;
@@ -315,6 +333,7 @@ int main()
     testGeometry();
     testStateMachine();
     testShockCaps();
+    testGpsPacing();
     testProtocol();
     std::printf("%d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;

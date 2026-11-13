@@ -1,5 +1,7 @@
 # Mesh_GeoCollar
 
+<p align="center"><img src="docs/img/vibe-coded.svg" alt="VIBE CODED TO THE MAX" width="720"></p>
+
 A geofence dog collar that runs on the [Meshtastic](https://meshtastic.org) LoRa mesh. Each collar
 keeps its own fences, warns the dog near the line using an off-the-shelf training collar's beep,
 vibrate and (optionally) shock, and, if the dog does get out, stops correcting and switches to
@@ -9,7 +11,7 @@ a Home Assistant app, manages fences and collars and shows where each dog is.
 > **Status: early skeleton.** The fence logic, collar protocol and base app are written and tested
 > on a PC. Nothing has run on real hardware yet. See [What is not done yet](#what-is-not-done-yet).
 
-**Built on Meshtastic. Collar protocol by OpenShock.** See [CREDITS.md](CREDITS.md).
+**Built on Meshtastic. Collar protocol by OpenShock.** See [Credits](#credits).
 
 ## How it works
 
@@ -34,6 +36,9 @@ a Home Assistant app, manages fences and collars and shows where each dog is.
 
 Fixes with poor PDOP or few satellites are ignored entirely.
 
+The collar also paces its own GPS: every 5 s near the line, slowing to once a minute deep inside
+(the time a running dog would need to reach the warning margin), and every 15 s while lost.
+
 ## Repository layout
 
 | Path | What |
@@ -44,10 +49,13 @@ Fixes with poor PDOP or few satellites are ignored entirely.
 | `base/` | Base station app (Python, FastAPI, Leaflet map), Dockerfile, and Home Assistant app manifest. |
 | `docs/protocol.md` | Message format between collars and base. |
 | `docs/hardware.md` | Wiring the Tracker into the training collar, power, antennas, Meshtastic settings. |
+| `reference/` | Meshtastic and OpenShock firmware as git submodules, for reading only. Not used by the build. |
 
 ## Build the collar firmware
 
 ```sh
+git clone https://github.com/deathvenom-qvp/Mesh_GeoCollar && cd Mesh_GeoCollar
+git submodule update --init --depth 1   # optional: the reference firmwares
 pip install platformio==6.2.0   # the version Meshtastic v2.8.2 pins
 firmware/build.sh            # Heltec Wireless Tracker V1.1
 ```
@@ -86,13 +94,34 @@ the collar by node ID in the app, draw keep-in and keep-out zones on the map, an
 ## What is not done yet
 
 - Not yet run on hardware: the data-line tap, the RMT timing and pairing need bench testing.
-- GPS pacing (faster fixes near the line, slower deep inside) is planned but not implemented; set
-  the Meshtastic GPS update interval by hand for now.
+- GPS pacing is written and compiles but is untested on hardware, and its settings (5 s, 60 s,
+  15 s, 6 m/s) can't be changed from the base app yet.
 - Home Assistant entities (device trackers, breach notifications) are not wired up yet; the app
   has its own map for now. The official Meshtastic Home Assistant integration can show nodes
   meanwhile.
 - No authentication on the base app's web page: run it on a trusted network or behind Home
   Assistant ingress.
+
+## Credits
+
+This project would not exist without two open-source firmwares. Both are included under
+[`reference/`](reference) as git submodules, with their own licences, so their code can be read
+next to ours.
+
+- **[Meshtastic firmware](https://github.com/meshtastic/firmware)** (GPL-3.0), by the Meshtastic
+  project and its contributors. The collar firmware *is* Meshtastic: GeoCollar is an optional
+  module built into an unmodified Meshtastic release, which provides the LoRa mesh, GPS,
+  encryption, remote admin and firmware updates. The base app uses the
+  [Meshtastic Python library](https://github.com/meshtastic/python). Meshtastic® is a registered
+  trademark of Meshtastic LLC; this project is not affiliated with or endorsed by it.
+  Reference copy: `reference/meshtastic-firmware`, pinned to the release we build against.
+- **[OpenShock firmware](https://github.com/OpenShock/Firmware)** (AGPL-3.0), by the OpenShock
+  project and its contributors. OpenShock reverse engineered and documented the CaiXianLin
+  collar's 433 MHz protocol ([wiki](https://wiki.openshock.org/hardware/shockers/caixianlin)).
+  Our frame builder is an independent implementation of that protocol, checked against
+  OpenShock's encoder; no OpenShock code is copied. Reference copy: `reference/openshock-firmware`.
+
+Other libraries and data are listed in [CREDITS.md](CREDITS.md).
 
 ## Licence
 

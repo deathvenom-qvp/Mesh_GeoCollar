@@ -229,4 +229,30 @@ Decision FenceEngine::onFix(const Fix &fix)
     return d;
 }
 
+uint32_t gpsIntervalSecs(const Settings &s, CollarState state, float clearanceM, uint16_t warnMarginM)
+{
+    if (!s.gpsPacing || state == CollarState::NoFence)
+        return 0;
+    const uint32_t fast = s.gpsFastSecs ? s.gpsFastSecs : 1;
+    const uint32_t slow = s.gpsSlowSecs > fast ? s.gpsSlowSecs : fast;
+    switch (state) {
+    case CollarState::Lost:
+        return s.gpsLostSecs ? s.gpsLostSecs : fast;
+    case CollarState::Warning:
+    case CollarState::Outside:
+        return fast;
+    default:
+        break;
+    }
+    const float room = clearanceM - (float)warnMarginM;
+    if (!(room > 0) || s.dogSpeedMps == 0)
+        return fast;
+    const float secs = room / (float)s.dogSpeedMps;
+    if (secs <= (float)fast)
+        return fast;
+    if (secs >= (float)slow)
+        return slow;
+    return (uint32_t)secs;
+}
+
 } // namespace geocollar

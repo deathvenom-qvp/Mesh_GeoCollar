@@ -12,6 +12,8 @@ administration and Wi-Fi/Bluetooth firmware updates. The base station uses the o
 [Meshtastic Python library](https://github.com/meshtastic/python).
 
 - Meshtastic firmware is licensed under the GNU General Public License v3.0.
+- A copy is in `reference/meshtastic-firmware` (git submodule, pinned to the release in
+  `firmware/MESHTASTIC_VERSION`) for reading. Its `LICENSE` file is unchanged.
 - Meshtastic® is a registered trademark of Meshtastic LLC. This project is not affiliated with
   or endorsed by Meshtastic LLC.
 
@@ -26,6 +28,8 @@ documentation and checked against the frame layout of OpenShock's `CaiXianlinEnc
 postamble, and the "vibrate at 0" stop frame). No OpenShock source code is copied.
 
 - OpenShock firmware is licensed under the GNU Affero General Public License v3.0.
+- A copy is in `reference/openshock-firmware` (git submodule) for reading only. It is not built
+  or linked into GeoCollar. Its `LICENSE` file is unchanged.
 
 ## Also used
 

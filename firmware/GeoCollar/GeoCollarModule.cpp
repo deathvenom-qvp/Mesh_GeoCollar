@@ -39,7 +39,7 @@ namespace
 
 constexpr const char *kStateFile = "/prefs/geocollar.bin";
 constexpr uint32_t kStateMagic = 0x47434F4C; // "GCOL"
-constexpr uint16_t kStateFormat = 1;
+constexpr uint16_t kStateFormat = 2; // 2: Settings gained the GPS pacing fields
 
 /// Sends CaiXianLin frames on the data-line GPIO without blocking the Meshtastic scheduler:
 /// one frame per call to poll(), each started asynchronously on the RMT peripheral.
@@ -179,6 +179,7 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
             return txDelay; // keep frames flowing; position checks resume once the collar is quiet
 
         checkPosition();
+        applyGpsPacing();
 
         const uint32_t now = millis();
         const uint32_t interval =
@@ -215,6 +216,25 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
             sendStatus(proto::MsgType::Breach);
         else if (d.sendStatus)
             sendStatus(proto::MsgType::Status);
+    }
+
+    // GPS pacing. Meshtastic's GPS thread reads config.position.gps_update_interval on every pass,
+    // so changing it in RAM takes effect within about 5 s without saving the config. The owner's
+    // own value is remembered and put back when there are no fences or pacing is off; if the owner
+    // changes the interval over the mesh, that becomes the new value to put back.
+    void applyGpsPacing()
+    {
+        uint32_t &current = config.position.gps_update_interval;
+        if (current != lastPacedSecs_)
+            ownerGpsSecs_ = current;
+        const uint32_t want =
+            gpsIntervalSecs(engine_.settings(), engine_.state(), lastClearance_, warnMarginM(engine_.fences()));
+        const uint32_t target = want ? want : ownerGpsSecs_;
+        if (current != target) {
+            LOG_DEBUG("GeoCollar: GPS interval %us -> %us", (unsigned)current, (unsigned)target);
+            current = target;
+        }
+        lastPacedSecs_ = current;
     }
 
     void applyCorrection(Correction c, uint8_t intensity)
@@ -360,6 +380,8 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
     uint32_t lastFixTimestamp_ = 0;
     Fix lastFix_{};
     float lastClearance_ = 0;
+    uint32_t ownerGpsSecs_ = 0;
+    uint32_t lastPacedSecs_ = UINT32_MAX; // nothing set yet: the first pass records the owner's value
     uint32_t lastStatusMs_ = 0;
 };
 

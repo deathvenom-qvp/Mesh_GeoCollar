@@ -41,4 +41,9 @@ keep arriving, and the collar's battery voltage.
   GeoCollar commands and remote admin from the base only.
 - Role CLIENT (or CLIENT_MUTE) rather than TRACKER, because the collar must listen for fence
   updates and commands. Measure battery life early.
-- GPS update interval short enough for the fence to react (for example 10 to 30 s).
+- GPS update interval: GeoCollar paces the GPS itself while fences are loaded (5 s near the line,
+  up to 60 s deep inside, 15 s while lost) and puts your configured interval back when there are
+  no fences. The paced value is only changed in memory, but if Meshtastic saves its config for
+  another reason while pacing is active, the paced value is what gets saved.
+- Turn off position broadcasts on any public channel; the collar reports its position to the base
+  by encrypted direct message.

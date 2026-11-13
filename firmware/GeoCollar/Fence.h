@@ -72,6 +72,12 @@ struct Settings {
     uint16_t maxPdopX100 = 500;     // ignore fixes worse than PDOP 5.0
     uint8_t minSats = 5;
     uint16_t correctionMs = 1000;   // how long each beep/vibrate/shock lasts
+    // GPS pacing: fix often near the line, rarely deep inside, to save battery.
+    bool gpsPacing = true;
+    uint16_t gpsFastSecs = 5;       // at or near the line (10 s or less keeps the GPS always on)
+    uint16_t gpsSlowSecs = 60;      // deep inside
+    uint16_t gpsLostSecs = 15;      // while lost, for tracking
+    uint8_t dogSpeedMps = 6;        // assumed top speed: next fix before the dog can reach the margin
 };
 
 struct Fix {
@@ -128,5 +134,11 @@ class FenceEngine
     size_t shockHead_ = 0;
     size_t shockCount_ = 0;
 };
+
+/// GPS update interval in seconds for the current state and clearance, or 0 to leave Meshtastic's
+/// own configured interval alone (no fences, or pacing turned off). Inside, the interval is the
+/// time the dog needs at dogSpeedMps to cover the distance to the warning margin, clamped between
+/// gpsFastSecs and gpsSlowSecs.
+uint32_t gpsIntervalSecs(const Settings &s, CollarState state, float clearanceM, uint16_t warnMarginM);
 
 } // namespace geocollar
