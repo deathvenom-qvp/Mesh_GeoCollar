@@ -4,6 +4,9 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- OpenStreetMap refuses tile requests without a Referer. Home Assistant ingress pages send none
+     by default, so ask for the origin to be sent. -->
+<meta name="referrer" content="strict-origin-when-cross-origin">
 <title>GeoCollar</title>
 <!-- Relative URLs throughout so the page also works behind Home Assistant ingress. -->
 <link rel="stylesheet" href="static/vendor/leaflet/leaflet.css">
@@ -243,9 +246,9 @@ const round7 = x => Math.round(x * 1e7) / 1e7; // the collar stores degrees × 1
 const map = L.map('map', { zoomControl: true }).setView([30, -40], 3);
 const baseLayers = {
   Satellite: L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
-    { maxZoom: 21, maxNativeZoom: 19, attribution: 'Imagery &copy; Esri' }),
+    { maxZoom: 21, maxNativeZoom: 19, referrerPolicy: 'strict-origin-when-cross-origin', attribution: 'Imagery &copy; Esri' }),
   Street: L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',
-    { maxZoom: 21, maxNativeZoom: 19, attribution: '&copy; OpenStreetMap contributors' }),
+    { maxZoom: 21, maxNativeZoom: 19, referrerPolicy: 'strict-origin-when-cross-origin', attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors' }),
 };
 let baseName = 'Satellite';
 try { baseName = localStorage.getItem('geocollar.base') || baseName; } catch {}

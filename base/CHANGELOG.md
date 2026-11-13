@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.2.2
+
+- Fix the street map showing "Access blocked" inside Home Assistant: send a referrer with
+  map tile requests, which OpenStreetMap requires.
+
 ## 0.2.1
 
 - Fix the Home Assistant build: always build on python:3.12-slim instead of Home Assistant's
