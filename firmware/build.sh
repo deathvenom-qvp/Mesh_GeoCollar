@@ -26,6 +26,22 @@ else
   fi
 fi
 
+# Work around pioarduino 6.2.0.post1: the ESP32 platform's second build stage runs PlatformIO from
+# its own Python env ("penv"), and that post-release reports itself as 6.2.0-post.1, which the
+# platform's ">=6.2.0" check rejects. Pre-seed the penv with pioarduino 6.2.0 so it is kept.
+pio_python="$(head -1 "$(command -v pio)" | sed 's/^#!//')"
+penv="${PLATFORMIO_CORE_DIR:-$HOME/.platformio}/penv"
+if [ ! -x "$penv/bin/python" ]; then
+  "$pio_python" -m venv "$penv"
+fi
+if ! "$penv/bin/python" -c "import importlib.metadata as m, sys; sys.exit(m.version('pioarduino') != '6.2.0')" 2>/dev/null; then
+  if [ -x "$penv/bin/uv" ]; then # a penv made by the platform has uv but no pip
+    "$penv/bin/uv" pip install -q --python "$penv/bin/python" "pioarduino==6.2.0"
+  else
+    "$penv/bin/python" -m pip install -q "pioarduino==6.2.0"
+  fi
+fi
+
 mkdir -p "$mt/src/modules/optional"
 rm -rf "$mt/src/modules/optional/GeoCollar"
 cp -r "$here/GeoCollar" "$mt/src/modules/optional/GeoCollar"
