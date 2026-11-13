@@ -58,6 +58,18 @@ class Store:
             self._save()
             return c["fence_version"]
 
+    def set_sim(self, node_id: str, settings: dict | None) -> None:
+        """Simulator settings for a simulated collar (None for a real one)."""
+        with self._lock:
+            c = self._data["collars"].get(node_id)
+            if c is None:
+                return
+            if settings is None:
+                c.pop("sim", None)
+            else:
+                c["sim"] = settings
+            self._save()
+
     def record_status(self, node_id: str, status: dict) -> None:
         with self._lock:
             c = self._data["collars"].setdefault(

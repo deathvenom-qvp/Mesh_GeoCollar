@@ -99,6 +99,17 @@
   .actions { display: flex; gap: 6px; flex-wrap: wrap; }
   #msg { min-height: 1.4em; margin-top: 6px; }
   details summary { cursor: pointer; color: var(--muted); font-size: 13px; }
+  .events { list-style: none; margin: 6px 0 0; padding: 0; font-size: 12px; max-height: 180px; overflow-y: auto; }
+  .events li { display: flex; gap: 8px; padding: 3px 0; border-bottom: 1px solid var(--line); }
+  .events time { color: var(--muted); flex: none; white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .events .k-shock, .events .k-lost { color: var(--bad); font-weight: 600; }
+  .events .k-vibrate { color: var(--warn); font-weight: 600; }
+  .simgrid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 10px; margin-top: 10px; }
+  .simgrid .wide { grid-column: 1 / -1; }
+  input[type=range] { padding: 0; accent-color: var(--accent); }
+  input[type=checkbox] { width: auto; margin: 0; accent-color: var(--accent); }
+  .pill.sim { color: var(--accent); border-color: currentColor; }
+  .target { width: 14px; height: 14px; border: 3px solid var(--accent); border-radius: 50%; background: var(--bg); }
   .stats { display: grid; grid-template-columns: 1fr 1fr; gap: 2px 12px; font-size: 12px; margin: 6px 0 10px; }
   .stats span:nth-child(odd) { color: var(--muted); }
 
@@ -148,6 +159,10 @@
         <div class="muted" id="addMsg" role="status"></div>
       </form>
     </details>
+    <div class="row spread" style="margin-top:8px">
+      <span class="muted">No hardware yet?</span>
+      <button id="addSim" title="Add a pretend collar that follows the collar firmware's fence rules">+ Simulated collar</button>
+    </div>
   </section>
 
   <div id="selectedBox" hidden>
@@ -180,6 +195,33 @@
         <button id="discard">Discard changes</button>
       </div>
       <div class="muted" id="msg" role="status"></div>
+    </section>
+
+    <section id="simBox" hidden>
+      <div class="row spread"><h2 style="margin:0">Simulation</h2><span class="pill sim">Simulated</span></div>
+      <div class="muted" style="margin-top:6px">Not a real collar. It checks every position against its fences with the same rules as the collar firmware, so you can try fences before the hardware is ready.</div>
+      <div class="simgrid">
+        <div class="wide">
+          <label class="field">Movement</label>
+          <div class="segmented" id="simMode">
+            <button type="button" data-mode="still">Stay</button>
+            <button type="button" data-mode="wander">Wander</button>
+            <button type="button" data-mode="goto">Walk to point</button>
+          </div>
+        </div>
+        <div class="wide actions">
+          <button id="simPlace">Place on map</button>
+          <button id="simTarget">Pick walk-to point</button>
+        </div>
+        <label class="field wide">Speed <b id="simSpeedVal"></b>
+          <input type="range" id="simSpeed" min="0.5" max="12" step="0.5"></label>
+        <label class="field">Report every (s) <input type="number" id="simReport" min="1" max="600" step="1"></label>
+        <label class="field">GPS error (m) <input type="number" id="simNoise" min="0" max="30" step="0.5"></label>
+        <label class="field wide row"><input type="checkbox" id="simShock"> Shock enabled on this collar</label>
+      </div>
+      <div class="muted" style="margin-top:6px">A real collar reports when its state changes, every 10 minutes, and every 30 s when lost. The simulator reports more often so you can watch it.</div>
+      <h2 style="margin-top:12px">What the collar did</h2>
+      <ul class="events" id="simEvents"></ul>
     </section>
 
     <section>
@@ -305,6 +347,7 @@ let drawShape = 'Polygon';
 const drafts = {};         // node id -> unsent GeoJSON, kept while switching collars
 let firstLoad = true;
 let ignoreMapClickUntil = 0;
+let pickMode = null;       // 'place' or 'target' while waiting for a map click for the simulator
 
 const zoneStyle = (kind, active) => ({
   color: css(kind === 'keep_out' ? '--keep-out' : '--keep-in'),
@@ -362,7 +405,7 @@ function defaultName(kind) {
 function addZone(layer, props) {
   const z = { layer, props };
   layer.setStyle(zoneStyle(props.kind));
-  layer.on('click', e => { L.DomEvent.stopPropagation(e); editZone(z); });
+  layer.on('click', e => { L.DomEvent.stopPropagation(e); if (!handlePick(e.latlng)) editZone(z); });
   layer.on('pm:edit pm:vertexadded pm:vertexremoved pm:markerdragend', () => { renderZones(); });
   layer.on('pm:intersect', () => say('Fence lines cannot cross each other.'));
   fenceLayer.addLayer(layer);
@@ -428,14 +471,14 @@ map.on('pm:create', e => {
   ignoreMapClickUntil = Date.now() + 400; // the click that closed the shape also reaches the map
 });
 map.on('pm:drawend', () => { if (drawKind) { drawKind = null; $('banner').hidden = true; renderZones(); } });
-map.on('click', () => { if (!drawKind && Date.now() > ignoreMapClickUntil) { stopEditing(); renderZones(); } });
+map.on('click', e => { if (handlePick(e.latlng)) return; if (!drawKind && Date.now() > ignoreMapClickUntil) { stopEditing(); renderZones(); } });
 
 $('finishDraw').onclick = () => {
   const d = map.pm.Draw.Polygon;
   if (d && d._enabled && d._layer && d._layer.getLatLngs().length >= 3) d._finishShape();
   else say('A zone needs at least 3 corners.');
 };
-$('cancelDraw').onclick = endDraw;
+$('cancelDraw').onclick = () => pickMode ? endPick() : endDraw();
 $('drawIn').onclick = () => startDraw('keep_in');
 $('drawOut').onclick = () => startDraw('keep_out');
 $('shapePick').addEventListener('click', e => {
@@ -447,7 +490,7 @@ $('shapePick').addEventListener('click', e => {
 
 document.addEventListener('keydown', e => {
   const typing = /INPUT|SELECT|TEXTAREA/.test(document.activeElement && document.activeElement.tagName);
-  if (e.key === 'Escape') { if (drawKind) endDraw(); else { stopEditing(); renderZones(); } }
+  if (e.key === 'Escape') { if (pickMode) endPick(); else if (drawKind) endDraw(); else { stopEditing(); renderZones(); } }
   if ((e.key === 'Delete' || e.key === 'Backspace') && activeZone && !typing) { e.preventDefault(); deleteZone(activeZone); }
 });
 
@@ -481,7 +524,7 @@ function checks() {
   const margins = new Set(zones.map(z => z.props.warn_margin_m));
   if (margins.size > 1) warnings.push(`The collar starts warning at the smallest distance of all zones (${Math.min(...margins)} m).`);
   const s = selected && collars[selected] && collars[selected].status;
-  if (s && (s.lat || s.lon) && zones.length) {
+  if (s && (s.lat || s.lon) && zones.length && isDirty()) {
     const outside = zones.filter(z => pointInRing(s.lat, s.lon, ringOf(z.layer)) !== (z.props.kind === 'keep_in'));
     if (outside.length) warnings.push(`${collars[selected].name}'s last known position breaks "${outside[0].props.name}". If the dog is still there, corrections start as soon as the collar gets these fences.`);
   }
@@ -563,7 +606,7 @@ function renderCollars() {
     box.append(el('div', { class: 'collar' + (id === selected ? ' selected' : ''), onclick: () => select(id), role: 'button', tabindex: 0,
         onkeydown: e => { if (e.key === 'Enter') select(id); } },
       el('div', { class: 'row spread' },
-        el('span', { class: 'row' }, el('span', { class: `dot st-${st}` }), el('span', { class: 'name' }, c.name)),
+        el('span', { class: 'row' }, el('span', { class: `dot st-${st}` }), el('span', { class: 'name' }, c.name), c.sim ? el('span', { class: 'pill sim' }, 'Sim') : null),
         el('span', { class: `state st-${st}` }, stateLabel(s && s.state))),
       el('div', { class: 'muted' }, bits.join(' · ') || id)));
   }
@@ -584,6 +627,11 @@ function renderDogs() {
     m.bindTooltip(`${stateLabel(s.state)} · ${ago(now - s.received)}${s.sats ? ` · ${s.sats} sats` : ''}`, { direction: 'bottom', offset: [0, 12] });
     m.on('click', e => { L.DomEvent.stopPropagation(e); select(id); });
     m.addTo(dogLayer);
+    if (id === selected && c.sim && c.sim.mode === 'goto' && c.sim.target) {
+      L.polyline([[c.sim.true_lat, c.sim.true_lon], c.sim.target], { color: css('--accent'), weight: 2, dashArray: '6 6', pmIgnore: true, snapIgnore: true, interactive: false }).addTo(trackLayer);
+      L.marker(c.sim.target, { icon: L.divIcon({ className: '', iconSize: [14, 14], iconAnchor: [7, 7], html: '<div class="target"></div>' }),
+        pmIgnore: true, snapIgnore: true, interactive: false, keyboard: false }).addTo(trackLayer);
+    }
     if (id === selected && c.track && c.track.length > 1) {
       L.polyline(c.track.slice(-TRACK_POINTS).map(p => [p[1], p[2]]),
         { color: css('--accent'), weight: 2, opacity: 0.7, dashArray: '2 5', pmIgnore: true, snapIgnore: true, interactive: false }).addTo(trackLayer);
@@ -607,7 +655,79 @@ function renderSelected() {
   } else rows.push(['State', 'No report yet']);
   $('selStats').replaceChildren(...rows.flatMap(([k, v]) => [el('span', {}, k), el('span', {}, v)]));
   $('zoomDog').disabled = !(s && (s.lat || s.lon));
+  renderSim();
 }
+
+// ---------------------------------------------------------------------------------------------
+// Simulated collars
+// ---------------------------------------------------------------------------------------------
+const speedName = v => v < 2.5 ? 'walk' : v < 5 ? 'trot' : v < 9 ? 'run' : 'sprint';
+function renderSim() {
+  const c = collars[selected], sim = c && c.sim;
+  $('simBox').hidden = !sim;
+  if (!sim) return;
+  for (const b of $('simMode').children) b.setAttribute('aria-pressed', String(b.dataset.mode === sim.mode));
+  const set = (id, v) => { if (document.activeElement !== $(id)) $(id).value = v; };
+  set('simSpeed', sim.speed_mps); set('simReport', sim.report_s); set('simNoise', sim.noise_m);
+  $('simSpeedVal').textContent = `${(+$('simSpeed').value).toFixed(1)} m/s (${speedName(+$('simSpeed').value)})`;
+  $('simShock').checked = sim.shock_enabled;
+  const fmt = t => new Date(t * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  $('simEvents').replaceChildren(...(sim.events.length ? sim.events.map(e => el('li', {}, el('time', {}, fmt(e.t)), el('span', { class: 'k-' + e.kind }, e.text)))
+    : [el('li', { class: 'muted' }, 'Nothing yet. Corrections, lost mode and fence updates show here.')]));
+}
+
+async function simUpdate(changes) {
+  try {
+    await api(`sim/${encodeURIComponent(selected)}`, { method: 'PATCH', body: JSON.stringify(changes) });
+  } catch (e) { say(e.message); }
+  refresh();
+}
+
+function startPick(mode) {
+  if (drawKind) endDraw();
+  pickMode = mode;
+  $('bannerText').textContent = mode === 'place' ? `Click the map to put ${collars[selected].name} there.` : `Click the map where ${collars[selected].name} should walk to.`;
+  $('finishDraw').hidden = true;
+  $('banner').hidden = false;
+  map.getContainer().style.cursor = 'crosshair';
+}
+function endPick() {
+  pickMode = null;
+  $('banner').hidden = true;
+  map.getContainer().style.cursor = '';
+}
+function handlePick(latlng) {
+  if (!pickMode || !selected) return false;
+  const mode = pickMode;
+  endPick();
+  ignoreMapClickUntil = Date.now() + 400;
+  if (mode === 'place') simUpdate({ lat: latlng.lat, lon: latlng.lng });
+  else simUpdate({ target: [latlng.lat, latlng.lng], mode: 'goto' });
+  return true;
+}
+
+$('addSim').onclick = async () => {
+  const c = map.getCenter();
+  try {
+    const r = await api('sim', { method: 'POST', body: JSON.stringify({ lat: c.lat, lon: c.lng }) });
+    await refresh();
+    select(r.node_id);
+    say('Simulated collar added in the middle of the map. Use Place on map to move it.');
+  } catch (e) { $('addMsg').textContent = e.message; }
+};
+$('simMode').addEventListener('click', e => {
+  const b = e.target.closest('button'); if (!b) return;
+  const c = collars[selected];
+  if (b.dataset.mode === 'goto' && !(c.sim && c.sim.target)) startPick('target');
+  else simUpdate({ mode: b.dataset.mode });
+});
+$('simPlace').onclick = () => startPick('place');
+$('simTarget').onclick = () => startPick('target');
+$('simSpeed').oninput = () => { $('simSpeedVal').textContent = `${(+$('simSpeed').value).toFixed(1)} m/s (${speedName(+$('simSpeed').value)})`; };
+$('simSpeed').onchange = () => simUpdate({ speed_mps: +$('simSpeed').value });
+$('simReport').onchange = () => simUpdate({ report_s: +$('simReport').value });
+$('simNoise').onchange = () => simUpdate({ noise_m: +$('simNoise').value });
+$('simShock').onchange = () => simUpdate({ shock_enabled: $('simShock').checked });
 
 // ---------------------------------------------------------------------------------------------
 // Data
@@ -706,9 +826,14 @@ document.querySelectorAll('[data-cmd]').forEach(b => b.onclick = async () => {
 
 window.addEventListener('beforeunload', e => { if (isDirty() || Object.keys(drafts).length) { e.preventDefault(); e.returnValue = ''; } });
 
+// Poll faster while a simulated collar is around, so it moves smoothly.
+async function loop() {
+  await refresh().catch(() => {});
+  const fast = Object.values(collars).some(c => c.sim);
+  setTimeout(loop, fast ? 2000 : 10000);
+}
 renderZones();
-refresh();
-setInterval(refresh, 10000);
+loop();
 </script>
 </body>
 </html>

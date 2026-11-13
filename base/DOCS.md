@@ -50,6 +50,15 @@ Collars only obey messages from base nodes they trust:
 Each collar holds up to 4 zones of up to 32 corners. The dog must be inside **every** keep-in
 zone, so use one keep-in zone, not several side by side.
 
+## Trying it without a collar
+
+Press **+ Simulated collar** under the collar list to add a pretend collar in the middle of the
+map. Draw and send fences to it as usual, then use the **Simulation** panel: **Place on map**
+moves it, **Wander** lets it roam, **Walk to point** sends it to a spot you click, and the speed,
+report rate and GPS error are adjustable. It applies the same fence rules as the collar
+firmware, and **What the collar did** lists each beep, vibration, shock and switch to lost mode.
+Commands such as Lost mode work on it too. Remove it like any other collar.
+
 ## Data and access
 
 Collars, fences and recent positions are kept in the app's `/data` folder and included in Home

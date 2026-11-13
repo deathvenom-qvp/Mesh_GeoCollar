@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.3.0
+
+- Simulated collars for trying fences without hardware: place one on the map, let it stay,
+  wander or walk to a point at a chosen speed, with GPS error. It follows the collar firmware's
+  fence rules and lists the beeps, vibrations, shocks and lost-mode changes it would make.
+
 ## 0.2.2
 
 - Fix the street map showing "Access blocked" inside Home Assistant: send a referrer with
