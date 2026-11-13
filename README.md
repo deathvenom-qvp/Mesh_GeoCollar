@@ -128,7 +128,12 @@ the map tiles need internet.
 
 This project would not exist without two open-source firmwares. Both are included under
 [`reference/`](reference) as git submodules, with their own licences, so their code can be read
-next to ours.
+next to ours. They are skipped by `git clone --recursive` (Home Assistant clones the repository
+that way, and OpenShock has a submodule only reachable over SSH); fetch them with:
+
+```sh
+git submodule update --init --checkout --depth 1 reference/meshtastic-firmware reference/openshock-firmware
+```
 
 - **[Meshtastic firmware](https://github.com/meshtastic/firmware)** (GPL-3.0), by the Meshtastic
   project and its contributors. The collar firmware *is* Meshtastic: GeoCollar is an optional

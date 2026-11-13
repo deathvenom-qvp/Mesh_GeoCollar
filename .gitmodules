@@ -2,7 +2,9 @@
 	path = reference/meshtastic-firmware
 	url = https://github.com/meshtastic/firmware
 	shallow = true
+	update = none
 [submodule "reference/openshock-firmware"]
 	path = reference/openshock-firmware
 	url = https://github.com/OpenShock/Firmware
 	shallow = true
+	update = none
