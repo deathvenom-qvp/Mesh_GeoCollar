@@ -1,0 +1,7 @@
+.meshtastic/
+test/geocollar_tests
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+base/data/
