@@ -5,8 +5,9 @@
 Usage: resolve_meshtastic.py SPEC
 
 SPEC is either a full tag such as v2.8.2.d5f1619, which is used as is, or a release series such as
-2.8, which resolves to the newest stable (not pre-release, not draft) Meshtastic release in that
-series, i.e. the latest patch. Releases come from the GitHub API (set GITHUB_TOKEN to avoid its
+2.8, which resolves to the newest Meshtastic release in that series, i.e. the latest patch. A stable
+release wins when the series has one; otherwise the newest pre-release (alpha) is used, with a
+warning. Drafts are never used. Releases come from the GitHub API (set GITHUB_TOKEN to avoid its
 rate limit). If the API can't be reached, the newest tag in the series is found with git instead;
 that fallback can't tell alpha from beta releases.
 """
@@ -35,6 +36,7 @@ def from_api(series):
     if token:
         headers["Authorization"] = f"Bearer {token}"
     best = None
+    best_pre = None
     for page in range(1, 4):
         req = urllib.request.Request(
             f"https://api.github.com/repos/{REPO}/releases?per_page=100&page={page}", headers=headers
@@ -44,11 +46,20 @@ def from_api(series):
         if not releases:
             break
         for rel in releases:
-            if rel["draft"] or rel["prerelease"] or not in_series(rel["tag_name"], series):
+            if rel["draft"] or not in_series(rel["tag_name"], series):
                 continue
-            if best is None or rel["published_at"] > best["published_at"]:
+            if rel["prerelease"]:
+                if best_pre is None or rel["published_at"] > best_pre["published_at"]:
+                    best_pre = rel
+            elif best is None or rel["published_at"] > best["published_at"]:
                 best = rel
-    return best["tag_name"] if best else None
+    if best:
+        return best["tag_name"]
+    if best_pre:
+        print(f"resolve_meshtastic: {series} has no stable release yet; using pre-release "
+              f"{best_pre['tag_name']}", file=sys.stderr)
+        return best_pre["tag_name"]
+    return None
 
 
 def from_git(series):
@@ -95,7 +106,7 @@ def main():
         print(f"resolve_meshtastic: GitHub API failed ({e}); falling back to git tags", file=sys.stderr)
         tag = from_git(spec)
     if not tag:
-        sys.exit(f"resolve_meshtastic: no stable Meshtastic release found in series {spec}")
+        sys.exit(f"resolve_meshtastic: no Meshtastic release found in series {spec}")
     print(tag)
 
 

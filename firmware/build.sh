@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Builds Meshtastic firmware with the GeoCollar module for the Heltec Wireless Tracker.
 #
-# Meshtastic (https://github.com/meshtastic/firmware, GPL-3.0) is checked out at the newest stable
+# Meshtastic (https://github.com/meshtastic/firmware, GPL-3.0) is checked out at the newest
 # patch release of the series in MESHTASTIC_VERSION (e.g. 2.8 -> v2.8.2.d5f1619), and GeoCollar is dropped into src/modules/optional/, which Meshtastic's
 # own build picks up automatically. No Meshtastic source file is modified.
 #

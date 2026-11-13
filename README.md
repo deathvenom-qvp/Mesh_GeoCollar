@@ -61,8 +61,9 @@ firmware/build.sh            # Heltec Wireless Tracker V1.1
 ```
 
 GeoCollar uses Meshtastic's optional-module slot, so no Meshtastic file is modified. Each build
-uses the newest stable patch release of the Meshtastic series named in
-`firmware/MESHTASTIC_VERSION` (currently `2.8`); moving to a new series is a one-line change. To
+uses the newest patch release of the Meshtastic series named in `firmware/MESHTASTIC_VERSION`
+(currently `2.8`), preferring a stable release and otherwise the newest alpha. GeoCollar needs 2.8
+or later: older series lack the optional-module slot and admin-key checks it uses. Moving to a new series is a one-line change. To
 build against one exact release, run `MESHTASTIC_VERSION=v2.8.2.d5f1619 firmware/build.sh`. Pin and ID settings
 are in `firmware/GeoCollar/GeoCollarConfig.h`. CI builds the firmware on every pull request and
 attaches the images.
