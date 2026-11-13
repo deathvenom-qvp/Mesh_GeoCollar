@@ -76,3 +76,32 @@ def test_index_served(tmp_path):
     client, _ = make(tmp_path)
     r = client.get("/")
     assert r.status_code == 200 and "Meshtastic" in r.text and "OpenShock" in r.text
+
+
+def test_vendored_map_libraries_served(tmp_path):
+    client, _ = make(tmp_path)
+    page = client.get("/").text
+    for path in ("static/vendor/leaflet/leaflet.js", "static/vendor/geoman/leaflet-geoman.min.js"):
+        assert path in page
+        assert client.get("/" + path).status_code == 200
+
+
+def test_fence_properties_validated(tmp_path):
+    client, link = make(tmp_path)
+    client.post("/api/collars", json={"node_id": "!a1b2c3d4"})
+
+    def with_props(**props):
+        f = {**FENCE["features"][0], "properties": {**FENCE["features"][0]["properties"], **props}}
+        return {"type": "FeatureCollection", "features": [f]}
+
+    # Extra properties such as the page's zone name are kept but not sent.
+    r = client.put("/api/collars/!a1b2c3d4/fences", json=with_props(name="Yard"))
+    assert r.status_code == 200
+    assert client.get("/api/collars").json()["!a1b2c3d4"]["fences"]["features"][0]["properties"]["name"] == "Yard"
+
+    for bad in ({"kind": "keep_near"}, {"warn_margin_m": -1}, {"warn_margin_m": 70000}, {"warn_margin_m": None}):
+        assert client.put("/api/collars/!a1b2c3d4/fences", json=with_props(**bad)).status_code == 400, bad
+
+    # An empty set clears the collar's fences.
+    r = client.put("/api/collars/!a1b2c3d4/fences", json={"type": "FeatureCollection", "features": []})
+    assert r.status_code == 200 and link.sent[-1][1][6:] == b"\x00"

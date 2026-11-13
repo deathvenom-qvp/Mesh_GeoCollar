@@ -151,7 +151,8 @@ def fence_chunks(zones: Iterable[Zone], fence_version: int) -> list[bytes]:
 def zones_from_geojson(geojson: dict) -> list[Zone]:
     """Accept a FeatureCollection (or one Feature) of Polygons.
 
-    Feature properties: kind = "keep_in" (default) or "keep_out"; warn_margin_m (default 10).
+    Feature properties: kind = "keep_in" (default) or "keep_out"; warn_margin_m (default 10);
+    any others (such as the web page's zone name) are kept by the store but not sent.
     GeoJSON uses [lon, lat]; the closing vertex is dropped.
     """
     features = geojson["features"] if geojson.get("type") == "FeatureCollection" else [geojson]
@@ -163,7 +164,16 @@ def zones_from_geojson(geojson: dict) -> list[Zone]:
         ring = geom["coordinates"][0]
         if len(ring) > 1 and ring[0] == ring[-1]:
             ring = ring[:-1]
+        for lon, lat in ring:
+            if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+                raise ValueError(f"coordinate out of range: {lat}, {lon}")
         props = f.get("properties") or {}
-        kind = ZoneKind.KEEP_OUT if props.get("kind") == "keep_out" else ZoneKind.KEEP_IN
-        zones.append(Zone(kind, int(props.get("warn_margin_m", 10)), [(lat, lon) for lon, lat in ring]))
+        kind_name = props.get("kind", "keep_in")
+        if kind_name not in ("keep_in", "keep_out"):
+            raise ValueError(f"unknown zone kind {kind_name!r}")
+        kind = ZoneKind.KEEP_OUT if kind_name == "keep_out" else ZoneKind.KEEP_IN
+        margin = props.get("warn_margin_m", 10)
+        if isinstance(margin, bool) or not isinstance(margin, (int, float)) or not 0 <= margin <= 0xFFFF:
+            raise ValueError("warn_margin_m must be 0..65535")
+        zones.append(Zone(kind, int(margin), [(lat, lon) for lon, lat in ring]))
     return zones

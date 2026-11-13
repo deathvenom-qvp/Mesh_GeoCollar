@@ -11,6 +11,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from . import protocol
@@ -67,6 +68,8 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
 
     app = FastAPI(title="GeoCollar base", lifespan=lifespan)
     app.state.store = store
+    # Leaflet and Leaflet-Geoman are vendored so the page works without a CDN (e.g. on a LAN).
+    app.mount("/static", StaticFiles(directory=STATIC), name="static")
 
     def require(node_id: str) -> dict:
         c = store.collar(node_id)

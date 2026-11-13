@@ -84,6 +84,14 @@ in its options.
 Then, for each collar: put the base node's public key in the collar's Meshtastic admin keys, add
 the collar by node ID in the app, draw keep-in and keep-out zones on the map, and send them.
 
+The map starts on satellite imagery so you can trace the yard. Each collar holds up to 4 zones of
+up to 32 corners. Draw one keep-in zone around the yard and keep-out zones inside it (a pond, a
+flower bed): the collar requires the dog to be inside *every* keep-in zone, so two separate
+keep-in zones would never both be satisfied. Click a zone to drag its corners, then press **Send
+to collar**; the page shows when the collar reports the new fence version. It warns before you
+send fences that the dog's last position already breaks. The map libraries are bundled, so only
+the map tiles need internet.
+
 ## Safety
 
 - Shock is **off by default**. When enabled it is capped in level, count per breach and count per

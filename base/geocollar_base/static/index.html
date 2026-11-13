@@ -5,156 +5,703 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>GeoCollar</title>
-<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
-<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet.draw/1.0.4/leaflet.draw.css">
+<!-- Relative URLs throughout so the page also works behind Home Assistant ingress. -->
+<link rel="stylesheet" href="static/vendor/leaflet/leaflet.css">
+<link rel="stylesheet" href="static/vendor/geoman/leaflet-geoman.css">
 <style>
-  :root { --bg: #ffffff; --fg: #1d1d1f; --muted: #6e6e73; --line: #d2d2d7; --accent: #2f6feb; --bad: #c62828; --warn: #b26a00; }
-  @media (prefers-color-scheme: dark) { :root { --bg: #161618; --fg: #f2f2f2; --muted: #a1a1a6; --line: #3a3a3c; --accent: #6ea8ff; --bad: #ff6b6b; --warn: #ffb74d; } }
+  :root {
+    --bg: #ffffff; --panel: #f6f7f9; --fg: #1c1d1f; --muted: #686b72; --line: #d9dbe0;
+    --accent: #2563eb; --accent-fg: #ffffff;
+    --keep-in: #15803d; --keep-out: #dc2626;
+    --ok: #15803d; --warn: #b45309; --bad: #dc2626; --idle: #8a8d93;
+    --shadow: 0 1px 3px rgba(0,0,0,.12);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #17181b; --panel: #1f2024; --fg: #eceef1; --muted: #a0a3aa; --line: #34363c;
+      --accent: #6d9eff; --accent-fg: #0b1020;
+      --keep-in: #4ade80; --keep-out: #f87171;
+      --ok: #4ade80; --warn: #fbbf24; --bad: #f87171; --idle: #8a8d93;
+      --shadow: 0 1px 3px rgba(0,0,0,.5);
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #17181b; --panel: #1f2024; --fg: #eceef1; --muted: #a0a3aa; --line: #34363c;
+    --accent: #6d9eff; --accent-fg: #0b1020;
+    --keep-in: #4ade80; --keep-out: #f87171;
+    --ok: #4ade80; --warn: #fbbf24; --bad: #f87171; --idle: #8a8d93;
+    --shadow: 0 1px 3px rgba(0,0,0,.5);
+  }
   * { box-sizing: border-box; }
-  body { margin: 0; font: 14px/1.4 system-ui, sans-serif; background: var(--bg); color: var(--fg); display: grid; grid-template-columns: 320px 1fr; height: 100vh; }
-  aside { border-right: 1px solid var(--line); padding: 16px; overflow-y: auto; }
-  #map { height: 100vh; }
-  h1 { font-size: 18px; margin: 0 0 4px; }
+  html, body { height: 100%; }
+  body { margin: 0; font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; background: var(--bg); color: var(--fg);
+         display: grid; grid-template-columns: 360px 1fr; }
+  aside { border-right: 1px solid var(--line); overflow-y: auto; height: 100vh; }
+  main { position: relative; height: 100vh; }
+  #map { position: absolute; inset: 0; }
+  section { padding: 14px 16px; border-bottom: 1px solid var(--line); }
+  h1 { font-size: 18px; margin: 0; }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 0 0 8px; font-weight: 600; }
+  .row { display: flex; align-items: center; gap: 8px; }
+  .spread { justify-content: space-between; }
   .muted { color: var(--muted); font-size: 12px; }
-  .collar { border: 1px solid var(--line); border-radius: 8px; padding: 10px; margin: 10px 0; cursor: pointer; }
-  .collar.selected { border-color: var(--accent); }
-  .state-LOST, .state-OUTSIDE { color: var(--bad); font-weight: 600; }
-  .state-WARNING { color: var(--warn); font-weight: 600; }
-  button, input, select { font: inherit; }
-  button { border: 1px solid var(--line); background: transparent; color: var(--fg); border-radius: 6px; padding: 4px 10px; margin: 2px 2px 2px 0; cursor: pointer; }
-  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
-  input, select { width: 100%; padding: 5px; border: 1px solid var(--line); border-radius: 6px; background: var(--bg); color: var(--fg); margin: 2px 0 6px; }
-  fieldset { border: 1px solid var(--line); border-radius: 8px; margin: 12px 0; }
-  @media (max-width: 700px) { body { grid-template-columns: 1fr; grid-template-rows: auto 60vh; height: auto; } #map { height: 60vh; } aside { border-right: 0; } }
+  .pill { font-size: 12px; padding: 2px 8px; border-radius: 99px; border: 1px solid var(--line); color: var(--muted); white-space: nowrap; }
+  .pill.ok { color: var(--ok); border-color: currentColor; }
+  .pill.bad { color: var(--bad); border-color: currentColor; }
+  a { color: var(--accent); }
+
+  button, input, select { font: inherit; color: inherit; }
+  button { border: 1px solid var(--line); background: var(--bg); border-radius: 7px; padding: 5px 11px; cursor: pointer; }
+  button:hover:not(:disabled) { border-color: var(--accent); }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); font-weight: 600; }
+  button.link { border: 0; background: none; padding: 0; color: var(--muted); text-decoration: underline; font-size: 12px; }
+  button.draw-in { border-color: var(--keep-in); color: var(--keep-in); font-weight: 600; flex: 1; }
+  button.draw-out { border-color: var(--keep-out); color: var(--keep-out); font-weight: 600; flex: 1; }
+  input, select { width: 100%; padding: 5px 7px; border: 1px solid var(--line); border-radius: 7px; background: var(--bg); }
+  input:focus, select:focus, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+  label.field { display: block; font-size: 12px; color: var(--muted); }
+
+  .collar { border: 1px solid var(--line); border-radius: 9px; padding: 9px 11px; margin: 8px 0; cursor: pointer; background: var(--bg); }
+  .collar:hover { border-color: var(--muted); }
+  .collar.selected { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+  .collar .name { font-weight: 600; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; flex: none; background: var(--idle); }
+  .st-INSIDE { --c: var(--ok); } .st-WARNING { --c: var(--warn); } .st-OUTSIDE, .st-LOST { --c: var(--bad); } .st-NO_FENCE, .st-NONE { --c: var(--idle); }
+  .dot[class*="st-"] { background: var(--c); }
+  .state { color: var(--c, var(--idle)); font-weight: 600; font-size: 12px; }
+
+  .segmented { display: inline-flex; border: 1px solid var(--line); border-radius: 7px; overflow: hidden; }
+  .segmented button { white-space: nowrap; border: 0; border-radius: 0; padding: 3px 9px; font-size: 12px; }
+  .segmented button + button { border-left: 1px solid var(--line); }
+  .segmented button[aria-pressed="true"] { background: var(--accent); color: var(--accent-fg); }
+  .segmented.kind button[aria-pressed="true"].in { background: var(--keep-in); color: var(--bg); }
+  .segmented.kind button[aria-pressed="true"].out { background: var(--keep-out); color: var(--bg); }
+
+  .zone { border: 1px solid var(--line); border-left: 4px solid var(--zc); border-radius: 8px; padding: 8px 10px; margin: 8px 0; background: var(--bg); }
+  .zone.in { --zc: var(--keep-in); } .zone.out { --zc: var(--keep-out); }
+  .zone.selected { box-shadow: 0 0 0 2px var(--zc); }
+  .zone .zname { border: 0; padding: 2px 0; font-weight: 600; background: transparent; }
+  .zone .zname:focus { outline: none; border-bottom: 1px dashed var(--muted); border-radius: 0; }
+  .zone .line { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 6px; white-space: nowrap; }
+  .zone .margin { width: 70px; }
+  .count.over { color: var(--bad); font-weight: 600; }
+  .empty { border: 1px dashed var(--line); border-radius: 8px; padding: 12px; text-align: center; color: var(--muted); font-size: 13px; }
+  .notes { margin: 8px 0 0; padding: 0; list-style: none; font-size: 12px; }
+  .notes li { padding: 6px 8px; border-radius: 6px; margin: 4px 0; }
+  .notes li.error { background: color-mix(in srgb, var(--bad) 14%, transparent); color: var(--fg); }
+  .notes li.warning { background: color-mix(in srgb, var(--warn) 16%, transparent); color: var(--fg); }
+  .sync { font-size: 12px; margin: 8px 0; }
+  .sync.ok { color: var(--ok); } .sync.pending { color: var(--warn); } .sync.dirty { color: var(--accent); }
+  .actions { display: flex; gap: 6px; flex-wrap: wrap; }
+  #msg { min-height: 1.4em; margin-top: 6px; }
+  details summary { cursor: pointer; color: var(--muted); font-size: 13px; }
+  .stats { display: grid; grid-template-columns: 1fr 1fr; gap: 2px 12px; font-size: 12px; margin: 6px 0 10px; }
+  .stats span:nth-child(odd) { color: var(--muted); }
+
+  /* Map overlays */
+  .banner { position: absolute; z-index: 1000; top: 12px; left: 50%; transform: translateX(-50%); background: var(--bg); color: var(--fg);
+            border: 1px solid var(--line); box-shadow: var(--shadow); border-radius: 10px; padding: 8px 12px; display: flex; gap: 10px; align-items: center;
+            max-width: calc(100% - 120px); font-size: 13px; }
+  .banner[hidden] { display: none; }
+  .legend { background: var(--bg); color: var(--fg); padding: 6px 9px; border-radius: 8px; box-shadow: var(--shadow); font-size: 12px; line-height: 1.7; }
+  .legend i { display: inline-block; width: 12px; height: 12px; border-radius: 3px; margin-right: 6px; vertical-align: -1px; }
+  .leaflet-bar a.locate { font-size: 18px; line-height: 30px; }
+  .dog { position: relative; }
+  .dog .pin { width: 22px; height: 22px; border-radius: 50%; border: 3px solid #fff; background: var(--c, var(--idle)); box-shadow: 0 1px 4px rgba(0,0,0,.45); }
+  .dog.stale .pin { opacity: .5; }
+  .dog.st-LOST .pin, .dog.st-OUTSIDE .pin { animation: pulse 1.2s infinite; }
+  .dog .label { position: absolute; left: 26px; top: 1px; white-space: nowrap; font: 600 12px system-ui, sans-serif; color: #111;
+                background: rgba(255,255,255,.92); padding: 1px 6px; border-radius: 5px; box-shadow: 0 1px 2px rgba(0,0,0,.3); }
+  @keyframes pulse { 0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--c) 70%, transparent); } 100% { box-shadow: 0 0 0 14px transparent; } }
+  .leaflet-container { background: var(--panel); font: inherit; }
+
+  @media (max-width: 760px) {
+    body { grid-template-columns: 1fr; grid-template-rows: 58vh auto; }
+    main { height: 58vh; order: -1; }
+    aside { height: auto; border-right: 0; }
+    .banner { max-width: calc(100% - 24px); top: auto; bottom: 12px; flex-wrap: wrap; justify-content: center; }
+  }
 </style>
 </head>
 <body>
 <aside>
-  <h1>GeoCollar</h1>
-  <div class="muted" id="health">Checking radio…</div>
-
-  <div id="collars"></div>
-
-  <fieldset>
-    <legend>Add a collar</legend>
-    <input id="newId" placeholder="Node ID, e.g. !a1b2c3d4">
-    <input id="newName" placeholder="Name, e.g. Rex">
-    <button onclick="addCollar()">Add</button>
-  </fieldset>
-
-  <fieldset id="selectedBox" hidden>
-    <legend id="selectedTitle"></legend>
-    <div class="muted">Draw polygons on the map. New shapes are keep-in zones; pick a shape type below before drawing a keep-out zone.</div>
-    <label>New zone type
-      <select id="zoneKind"><option value="keep_in">Keep in</option><option value="keep_out">Keep out</option></select>
-    </label>
-    <label>Warning margin (m) <input id="margin" type="number" value="10" min="0" max="100"></label>
-    <button class="primary" onclick="saveFences()">Send fences to collar</button>
-    <div style="margin-top:10px">
-      <button onclick="cmd('beep')">Beep</button>
-      <button onclick="cmd('vibrate', 40)">Vibrate</button>
-      <button onclick="cmd('corrections_off')">Corrections off</button>
-      <button onclick="cmd('corrections_on')">Corrections on</button>
-      <button onclick="cmd('force_lost')">Lost mode</button>
-      <button onclick="cmd('clear_lost')">Clear lost</button>
+  <section>
+    <div class="row spread">
+      <h1>GeoCollar</h1>
+      <span class="pill" id="health">Checking radio…</span>
     </div>
-    <div class="muted" id="msg"></div>
-  </fieldset>
-  <div class="muted">Built on <a href="https://meshtastic.org">Meshtastic</a>. Collar protocol by <a href="https://openshock.org">OpenShock</a>.</div>
+  </section>
+
+  <section>
+    <h2>Collars</h2>
+    <div id="collars"></div>
+    <details id="addBox">
+      <summary>Add a collar</summary>
+      <form id="addForm" style="margin-top:8px">
+        <label class="field">Meshtastic node ID <input id="newId" placeholder="!a1b2c3d4" required pattern="!?[0-9a-fA-F]{8}"></label>
+        <label class="field" style="margin-top:6px">Name <input id="newName" placeholder="Rex"></label>
+        <button class="primary" style="margin-top:8px">Add collar</button>
+        <div class="muted" id="addMsg" role="status"></div>
+      </form>
+    </details>
+  </section>
+
+  <div id="selectedBox" hidden>
+    <section>
+      <div class="row spread">
+        <div><div class="name" id="selName" style="font-weight:600;font-size:16px"></div><div class="muted" id="selId"></div></div>
+        <button id="zoomDog" title="Show this collar on the map">Find on map</button>
+      </div>
+      <div class="stats" id="selStats"></div>
+    </section>
+
+    <section>
+      <h2>Fences</h2>
+      <div class="row" style="gap:6px">
+        <button class="draw-in" id="drawIn">+ Keep-in zone</button>
+        <button class="draw-out" id="drawOut">+ Keep-out zone</button>
+      </div>
+      <div class="row spread" style="margin-top:8px">
+        <span class="muted">Draw as</span>
+        <div class="segmented" id="shapePick">
+          <button type="button" data-shape="Polygon" aria-pressed="true">Polygon</button>
+          <button type="button" data-shape="Rectangle" aria-pressed="false">Rectangle</button>
+        </div>
+      </div>
+      <div id="zones"></div>
+      <ul class="notes" id="notes"></ul>
+      <div class="sync" id="sync"></div>
+      <div class="actions">
+        <button class="primary" id="send">Send to collar</button>
+        <button id="discard">Discard changes</button>
+      </div>
+      <div class="muted" id="msg" role="status"></div>
+    </section>
+
+    <section>
+      <h2>Commands</h2>
+      <div class="actions">
+        <button data-cmd="beep">Beep</button>
+        <button data-cmd="vibrate" data-intensity="40">Vibrate</button>
+        <button data-cmd="request_status">Ask for status</button>
+        <button data-cmd="corrections_off">Corrections off</button>
+        <button data-cmd="corrections_on">Corrections on</button>
+        <button data-cmd="force_lost">Lost mode</button>
+        <button data-cmd="clear_lost">Clear lost</button>
+      </div>
+      <div style="margin-top:12px"><button class="link" id="removeCollar">Remove this collar from the base</button></div>
+    </section>
+  </div>
+
+  <section class="muted">Built on <a href="https://meshtastic.org">Meshtastic</a>. Collar protocol by <a href="https://openshock.org">OpenShock</a>.
+    Maps by <a href="https://leafletjs.com">Leaflet</a> and <a href="https://geoman.io">Geoman</a>.</section>
 </aside>
-<div id="map"></div>
 
-<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet.draw/1.0.4/leaflet.draw.js"></script>
+<main>
+  <div id="map"></div>
+  <div class="banner" id="banner" hidden>
+    <span id="bannerText"></span>
+    <button class="primary" id="finishDraw">Finish</button>
+    <button id="cancelDraw">Cancel</button>
+  </div>
+</main>
+
+<script src="static/vendor/leaflet/leaflet.js"></script>
+<script src="static/vendor/geoman/leaflet-geoman.min.js"></script>
 <script>
-// Relative URLs so the page also works behind Home Assistant ingress.
-const api = (path, opts = {}) => fetch('api/' + path, { headers: { 'Content-Type': 'application/json' }, ...opts })
-  .then(async r => { const b = await r.json(); if (!r.ok) throw new Error(b.detail || r.statusText); return b; });
+'use strict';
+// Limits from firmware/GeoCollar/Fence.h and docs/protocol.md.
+const MAX_ZONES = 4, MAX_VERTICES = 32, MAX_MARGIN_M = 1000;
+const STALE_S = 15 * 60;      // grey out a collar position older than this
+const TRACK_POINTS = 120;     // recent positions drawn for the selected collar
+const BIG_ZONE_M = 5000;      // the collar's flat-earth maths is accurate over a few km
 
-const map = L.map('map').setView([40, -75], 4);
-L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 20, attribution: '&copy; OpenStreetMap contributors' }).addTo(map);
-const fenceLayer = new L.FeatureGroup().addTo(map);
-const trackLayer = new L.FeatureGroup().addTo(map);
-map.addControl(new L.Control.Draw({
-  edit: { featureGroup: fenceLayer },
-  draw: { polyline: false, circle: false, circlemarker: false, marker: false, rectangle: true, polygon: true },
-}));
-map.on(L.Draw.Event.CREATED, e => {
-  const kind = document.getElementById('zoneKind').value;
-  e.layer.feature = { type: 'Feature', properties: { kind, warn_margin_m: +document.getElementById('margin').value } };
-  styleZone(e.layer, kind);
-  fenceLayer.addLayer(e.layer);
-});
-const styleZone = (layer, kind) => layer.setStyle && layer.setStyle({ color: kind === 'keep_out' ? '#c62828' : '#2f6feb' });
-
-let collars = {}, selected = null;
-const say = t => document.getElementById('msg').textContent = t;
-
-async function refresh() {
-  try { const h = await api('health'); document.getElementById('health').textContent = h.mesh_connected ? 'Radio connected' : 'Radio not connected'; } catch {}
-  collars = await api('collars');
-  const box = document.getElementById('collars');
-  box.innerHTML = '';
-  for (const [id, c] of Object.entries(collars)) {
-    const s = c.status || {};
-    const div = document.createElement('div');
-    div.className = 'collar' + (id === selected ? ' selected' : '');
-    div.innerHTML = `<b></b> <span class="muted"></span><br><span class="state-${s.state || ''}">${s.state || 'No report yet'}</span>
-      <span class="muted">${s.battery_pct != null ? ' · battery ' + s.battery_pct + '%' : ''}${s.clearance_m != null ? ' · ' + s.clearance_m + ' m to line' : ''}
-      · fences v${s.fence_version ?? '?'} of v${c.fence_version}</span>`;
-    div.querySelector('b').textContent = c.name;
-    div.querySelector('span.muted').textContent = id;
-    div.onclick = () => select(id);
-    box.appendChild(div);
+const $ = id => document.getElementById(id);
+const css = name => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+const el = (tag, attrs = {}, ...kids) => {
+  const e = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (k === 'class') e.className = v; else if (k.startsWith('on')) e.addEventListener(k.slice(2), v);
+    else if (k.startsWith('aria-')) e.setAttribute(k, String(v));
+    else if (v !== undefined && v !== null && v !== false) e.setAttribute(k, v === true ? '' : v);
   }
-  if (selected && collars[selected]) drawTrack(collars[selected]);
+  for (const k of kids.flat()) if (k != null) e.append(k);
+  return e;
+};
+const api = (path, opts = {}) => fetch('api/' + path, { headers: { 'Content-Type': 'application/json' }, ...opts })
+  .then(async r => { const b = await r.json().catch(() => ({})); if (!r.ok) throw new Error(b.detail || r.statusText); return b; });
+const say = t => { $('msg').textContent = t; };
+const ago = secs => secs < 90 ? `${Math.round(secs)} s ago` : secs < 5400 ? `${Math.round(secs / 60)} min ago`
+  : secs < 172800 ? `${Math.round(secs / 3600)} h ago` : `${Math.round(secs / 86400)} days ago`;
+const stateLabel = s => ({ NO_FENCE: 'No fence', INSIDE: 'Inside', WARNING: 'Near the line', OUTSIDE: 'Outside', LOST: 'Lost' })[s] || 'No report yet';
+const round7 = x => Math.round(x * 1e7) / 1e7; // the collar stores degrees × 1e7
+
+// ---------------------------------------------------------------------------------------------
+// Map
+// ---------------------------------------------------------------------------------------------
+const map = L.map('map', { zoomControl: true }).setView([30, -40], 3);
+const baseLayers = {
+  Satellite: L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+    { maxZoom: 21, maxNativeZoom: 19, attribution: 'Imagery &copy; Esri' }),
+  Street: L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+    { maxZoom: 21, maxNativeZoom: 19, attribution: '&copy; OpenStreetMap contributors' }),
+};
+let baseName = 'Satellite';
+try { baseName = localStorage.getItem('geocollar.base') || baseName; } catch {}
+(baseLayers[baseName] || baseLayers.Satellite).addTo(map);
+L.control.layers(baseLayers, null, { position: 'topright' }).addTo(map);
+map.on('baselayerchange', e => { try { localStorage.setItem('geocollar.base', e.name); } catch {} });
+
+const Locate = L.Control.extend({
+  options: { position: 'topleft' },
+  onAdd() {
+    const bar = L.DomUtil.create('div', 'leaflet-bar');
+    const a = L.DomUtil.create('a', 'locate', bar);
+    a.href = '#'; a.title = 'Go to my location'; a.setAttribute('role', 'button'); a.textContent = '◎';
+    L.DomEvent.on(a, 'click', e => { L.DomEvent.preventDefault(e); map.locate({ setView: true, maxZoom: 18 }); });
+    L.DomEvent.disableClickPropagation(bar);
+    return bar;
+  },
+});
+new Locate().addTo(map);
+map.on('locationerror', () => say('Could not get your location from the browser.'));
+
+const Legend = L.Control.extend({
+  options: { position: 'bottomleft' },
+  onAdd() {
+    return el('div', { class: 'legend' },
+      el('div', {}, el('i', { style: 'background:var(--keep-in)' }), 'Keep in'),
+      el('div', {}, el('i', { style: 'background:var(--keep-out)' }), 'Keep out'));
+  },
+});
+new Legend().addTo(map);
+
+map.pm.setGlobalOptions({ allowSelfIntersection: false, snappable: true, snapDistance: 15, continueDrawing: false });
+map.pm.setLang('en', { tooltips: {
+  firstVertex: 'Click to place the first corner',
+  continueLine: 'Click to add a corner',
+  finishPoly: 'Click the first corner to finish',
+  startRect: 'Click to place one corner', finishRect: 'Click to place the opposite corner',
+} }, 'en');
+
+const fenceLayer = L.featureGroup().addTo(map);
+const trackLayer = L.featureGroup().addTo(map);
+const dogLayer = L.featureGroup().addTo(map);
+
+// ---------------------------------------------------------------------------------------------
+// State
+// ---------------------------------------------------------------------------------------------
+let collars = {};          // from the API
+let selected = null;       // node id
+let zones = [];            // [{ layer, props: { name, kind, warn_margin_m } }] for the selected collar
+let activeZone = null;     // the zone being edited
+let drawKind = null;       // kind of the zone being drawn, while drawing
+let createKind = 'keep_in'; // kept past pm:drawend, which Geoman fires before pm:create
+let drawShape = 'Polygon';
+const drafts = {};         // node id -> unsent GeoJSON, kept while switching collars
+let firstLoad = true;
+let ignoreMapClickUntil = 0;
+
+const zoneStyle = (kind, active) => ({
+  color: css(kind === 'keep_out' ? '--keep-out' : '--keep-in'),
+  weight: active ? 4 : 3,
+  opacity: 1,
+  fillOpacity: kind === 'keep_out' ? 0.28 : 0.12,
+  dashArray: kind === 'keep_out' ? '8 6' : null,
+});
+const ringOf = layer => {
+  let ll = layer.getLatLngs();
+  while (Array.isArray(ll[0])) ll = ll[0];
+  return ll;
+};
+const vertexCount = layer => ringOf(layer).length;
+
+// ---------------------------------------------------------------------------------------------
+// Fences: load, draw, edit
+// ---------------------------------------------------------------------------------------------
+function zonesToGeoJSON() {
+  return {
+    type: 'FeatureCollection',
+    features: zones.map(z => {
+      const ring = ringOf(z.layer).map(p => [round7(p.lng), round7(p.lat)]);
+      ring.push(ring[0]);
+      return { type: 'Feature', properties: { ...z.props }, geometry: { type: 'Polygon', coordinates: [ring] } };
+    }),
+  };
+}
+const normalize = gj => JSON.stringify(gj && gj.features ? gj.features.map(f => [f.properties, f.geometry.coordinates]) : []);
+const savedFences = () => (selected && collars[selected] && collars[selected].fences) || { type: 'FeatureCollection', features: [] };
+const isDirty = () => selected && normalize(zonesToGeoJSON()) !== normalize(savedFences());
+
+function loadZones(geojson) {
+  stopEditing();
+  fenceLayer.clearLayers();
+  zones = [];
+  (geojson && geojson.features || []).forEach((f, i) => {
+    const ring = f.geometry.coordinates[0].slice(0, -1).map(([lon, lat]) => [lat, lon]);
+    const p = f.properties || {};
+    addZone(L.polygon(ring), {
+      name: p.name || defaultName(p.kind === 'keep_out' ? 'keep_out' : 'keep_in'),
+      kind: p.kind === 'keep_out' ? 'keep_out' : 'keep_in',
+      warn_margin_m: p.warn_margin_m ?? 10,
+    });
+  });
+  renderZones();
+}
+
+function defaultName(kind) {
+  const n = zones.filter(z => z.props.kind === kind).length + 1;
+  if (kind === 'keep_out') return `Keep-out ${n}`;
+  return n === 1 ? 'Yard' : `Yard ${n}`;
+}
+
+function addZone(layer, props) {
+  const z = { layer, props };
+  layer.setStyle(zoneStyle(props.kind));
+  layer.on('click', e => { L.DomEvent.stopPropagation(e); editZone(z); });
+  layer.on('pm:edit pm:vertexadded pm:vertexremoved pm:markerdragend', () => { renderZones(); });
+  layer.on('pm:intersect', () => say('Fence lines cannot cross each other.'));
+  fenceLayer.addLayer(layer);
+  zones.push(z);
+  return z;
+}
+
+function editZone(z) {
+  if (activeZone === z) return;
+  stopEditing();
+  activeZone = z;
+  z.layer.setStyle(zoneStyle(z.props.kind, true));
+  z.layer.bringToFront();
+  z.layer.pm.enable({ allowSelfIntersection: false, snappable: true, removeVertexOn: 'contextmenu' });
+  renderZones();
+}
+
+function stopEditing() {
+  if (activeZone) {
+    activeZone.layer.pm.disable();
+    activeZone.layer.setStyle(zoneStyle(activeZone.props.kind));
+    activeZone = null;
+  }
+}
+
+function deleteZone(z) {
+  if (activeZone === z) stopEditing();
+  fenceLayer.removeLayer(z.layer);
+  zones = zones.filter(x => x !== z);
+  renderZones();
+}
+
+function startDraw(kind) {
+  if (!selected || zones.length >= MAX_ZONES) return;
+  stopEditing();
+  map.pm.disableDraw();
+  drawKind = createKind = kind;
+  const style = zoneStyle(kind, true);
+  map.pm.enableDraw(drawShape, { pathOptions: style, templineStyle: style, hintlineStyle: { ...style, dashArray: '4 6' } });
+  $('bannerText').textContent = drawShape === 'Rectangle'
+    ? `Drawing a ${kind === 'keep_out' ? 'keep-out' : 'keep-in'} rectangle: click two opposite corners.`
+    : `Drawing a ${kind === 'keep_out' ? 'keep-out' : 'keep-in'} zone: click each corner, then click the first corner or press Finish.`;
+  $('finishDraw').hidden = drawShape === 'Rectangle';
+  $('banner').hidden = false;
+  renderZones();
+}
+
+function endDraw() {
+  map.pm.disableDraw();
+  drawKind = null;
+  $('banner').hidden = true;
+  renderZones();
+}
+
+map.on('pm:create', e => {
+  const kind = createKind;
+  // Store every zone as a plain polygon, as the collar sees it.
+  const layer = L.polygon(ringOf(e.layer));
+  map.removeLayer(e.layer);
+  const z = addZone(layer, { name: defaultName(kind), kind, warn_margin_m: 10 });
+  endDraw();
+  editZone(z);
+  ignoreMapClickUntil = Date.now() + 400; // the click that closed the shape also reaches the map
+});
+map.on('pm:drawend', () => { if (drawKind) { drawKind = null; $('banner').hidden = true; renderZones(); } });
+map.on('click', () => { if (!drawKind && Date.now() > ignoreMapClickUntil) { stopEditing(); renderZones(); } });
+
+$('finishDraw').onclick = () => {
+  const d = map.pm.Draw.Polygon;
+  if (d && d._enabled && d._layer && d._layer.getLatLngs().length >= 3) d._finishShape();
+  else say('A zone needs at least 3 corners.');
+};
+$('cancelDraw').onclick = endDraw;
+$('drawIn').onclick = () => startDraw('keep_in');
+$('drawOut').onclick = () => startDraw('keep_out');
+$('shapePick').addEventListener('click', e => {
+  const b = e.target.closest('button'); if (!b) return;
+  drawShape = b.dataset.shape;
+  for (const x of $('shapePick').children) x.setAttribute('aria-pressed', x === b);
+  if (drawKind) startDraw(drawKind);
+});
+
+document.addEventListener('keydown', e => {
+  const typing = /INPUT|SELECT|TEXTAREA/.test(document.activeElement && document.activeElement.tagName);
+  if (e.key === 'Escape') { if (drawKind) endDraw(); else { stopEditing(); renderZones(); } }
+  if ((e.key === 'Delete' || e.key === 'Backspace') && activeZone && !typing) { e.preventDefault(); deleteZone(activeZone); }
+});
+
+// ---------------------------------------------------------------------------------------------
+// Checks that mirror what the collar firmware will do with these zones
+// ---------------------------------------------------------------------------------------------
+function pointInRing(lat, lon, ring) {
+  let inside = false;
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+    const a = ring[i], b = ring[j];
+    if ((a.lat > lat) !== (b.lat > lat) && lon < (b.lng - a.lng) * (lat - a.lat) / (b.lat - a.lat) + a.lng) inside = !inside;
+  }
+  return inside;
+}
+
+function checks() {
+  const errors = [], warnings = [];
+  if (zones.length > MAX_ZONES) errors.push(`The collar holds at most ${MAX_ZONES} zones.`);
+  for (const z of zones) {
+    const n = vertexCount(z.layer);
+    if (n > MAX_VERTICES) errors.push(`"${z.props.name}" has ${n} corners; the collar allows ${MAX_VERTICES}. Right-click a corner to remove it.`);
+    if (n < 3) errors.push(`"${z.props.name}" needs at least 3 corners.`);
+    const m = z.props.warn_margin_m;
+    if (!Number.isInteger(m) || m < 0 || m > MAX_MARGIN_M) errors.push(`"${z.props.name}": warning distance must be 0 to ${MAX_MARGIN_M} m.`);
+    const b = z.layer.getBounds();
+    if (b.getNorthWest().distanceTo(b.getSouthEast()) > BIG_ZONE_M) warnings.push(`"${z.props.name}" is over ${BIG_ZONE_M / 1000} km across; the collar's distance maths is most accurate for smaller zones.`);
+  }
+  const keepIns = zones.filter(z => z.props.kind === 'keep_in');
+  if (keepIns.length > 1) warnings.push('The collar requires the dog to be inside every keep-in zone at once. Unless the keep-in zones overlap, use one keep-in zone with keep-out zones inside it.');
+  if (zones.length && !keepIns.length) warnings.push('There is no keep-in zone, so the dog may roam anywhere outside the keep-out zones.');
+  const margins = new Set(zones.map(z => z.props.warn_margin_m));
+  if (margins.size > 1) warnings.push(`The collar starts warning at the smallest distance of all zones (${Math.min(...margins)} m).`);
+  const s = selected && collars[selected] && collars[selected].status;
+  if (s && (s.lat || s.lon) && zones.length) {
+    const outside = zones.filter(z => pointInRing(s.lat, s.lon, ringOf(z.layer)) !== (z.props.kind === 'keep_in'));
+    if (outside.length) warnings.push(`${collars[selected].name}'s last known position breaks "${outside[0].props.name}". If the dog is still there, corrections start as soon as the collar gets these fences.`);
+  }
+  return { errors, warnings };
+}
+
+// ---------------------------------------------------------------------------------------------
+// Rendering
+// ---------------------------------------------------------------------------------------------
+function renderZones() {
+  const box = $('zones');
+  box.replaceChildren();
+  if (!zones.length) {
+    box.append(el('div', { class: 'empty', style: 'margin-top:10px' }, drawKind ? 'Click on the map to place the corners.'
+      : 'No zones yet. Draw a keep-in zone around the yard, then keep-out zones for anything inside it the dog should avoid, such as a pond or a flower bed.'));
+  }
+  zones.forEach(z => {
+    const kindBtn = (kind, label) => el('button', { type: 'button', class: kind === 'keep_in' ? 'in' : 'out', 'aria-pressed': z.props.kind === kind,
+      onclick: e => { e.stopPropagation(); z.props.kind = kind; z.layer.setStyle(zoneStyle(kind, activeZone === z)); renderZones(); } }, label);
+    const n = vertexCount(z.layer);
+    const card = el('div', { class: `zone ${z.props.kind === 'keep_out' ? 'out' : 'in'}${activeZone === z ? ' selected' : ''}`,
+        onclick: () => { editZone(z); map.fitBounds(z.layer.getBounds(), { maxZoom: 19, padding: [40, 40] }); } },
+      el('div', { class: 'row spread' },
+        el('input', { class: 'zname', value: z.props.name, 'aria-label': 'Zone name', maxlength: 40,
+          onclick: e => e.stopPropagation(), onchange: e => { z.props.name = e.target.value.trim() || defaultName(z.props.kind); renderZones(); } }),
+        el('button', { class: 'link', title: 'Delete this zone', onclick: e => { e.stopPropagation(); deleteZone(z); } }, 'Delete')),
+      el('div', { class: 'line' },
+        el('div', { class: 'segmented kind' }, kindBtn('keep_in', 'Keep in'), kindBtn('keep_out', 'Keep out')),
+        el('span', { class: 'muted count' + (n > MAX_VERTICES ? ' over' : ''), title: 'Corners used of the collar\'s limit' }, `${n}/${MAX_VERTICES} corners`)),
+      el('div', { class: 'line', style: 'justify-content:flex-start' },
+          el('span', { class: 'muted' }, 'Warn within'),
+          el('input', { class: 'margin', type: 'number', min: 0, max: MAX_MARGIN_M, step: 1, value: z.props.warn_margin_m, 'aria-label': 'Warning distance in metres',
+            onclick: e => e.stopPropagation(),
+            oninput: e => { z.props.warn_margin_m = e.target.value === '' ? NaN : Number(e.target.value); renderStatusArea(); } }),
+          el('span', { class: 'muted' }, 'm of the line')),
+      activeZone === z ? el('div', { class: 'muted', style: 'margin-top:6px' },
+        'Drag corners to move them. Drag a midpoint to add a corner. Right-click (or long-press) a corner to remove it.') : null);
+    box.append(card);
+  });
+  const full = zones.length >= MAX_ZONES;
+  $('drawIn').disabled = $('drawOut').disabled = full || !!drawKind;
+  $('drawIn').title = $('drawOut').title = full ? `The collar holds at most ${MAX_ZONES} zones` : '';
+  renderStatusArea();
+}
+
+function renderStatusArea() {
+  const { errors, warnings } = checks();
+  $('notes').replaceChildren(...errors.map(t => el('li', { class: 'error' }, t)), ...warnings.map(t => el('li', { class: 'warning' }, t)));
+  const c = collars[selected];
+  if (!c) return;
+  const dirty = isDirty();
+  const held = c.status ? c.status.fence_version : null;
+  const sync = $('sync');
+  if (dirty) { sync.className = 'sync dirty'; sync.textContent = 'You have changes that are not on the collar yet.'; }
+  else if (!c.fence_version) { sync.className = 'sync'; sync.textContent = 'No fences have been sent to this collar.'; }
+  else if (held === c.fence_version) { sync.className = 'sync ok'; sync.textContent = `✓ The collar has these fences (version ${c.fence_version}).`; }
+  else { sync.className = 'sync pending'; sync.textContent = `Sent version ${c.fence_version}; the collar ${held == null ? 'has not reported yet' : 'still reports version ' + held}. Resend if it does not update.`; }
+  const inSync = !dirty && c.fence_version && held === c.fence_version;
+  $('send').disabled = errors.length > 0 || !!drawKind || inSync || (!dirty && !c.fence_version);
+  $('send').textContent = !dirty && c.fence_version ? 'Resend to collar' : 'Send to collar';
+  $('discard').disabled = !dirty;
+}
+
+function renderCollars() {
+  const box = $('collars');
+  box.replaceChildren();
+  const ids = Object.keys(collars);
+  if (!ids.length) box.append(el('div', { class: 'empty' }, 'No collars yet. Add one by its Meshtastic node ID below.'));
+  const now = Date.now() / 1000;
+  for (const id of ids) {
+    const c = collars[id], s = c.status;
+    const st = s ? s.state : 'NONE';
+    const bits = [];
+    if (s) {
+      bits.push(ago(now - s.received));
+      if (s.battery_pct != null && s.battery_pct !== 255) bits.push(`battery ${s.battery_pct}%`);
+      if (s.clearance_m != null && c.fence_version) bits.push(`${s.clearance_m} m ${s.clearance_m < 0 ? 'past' : 'from'} the line`);
+    }
+    box.append(el('div', { class: 'collar' + (id === selected ? ' selected' : ''), onclick: () => select(id), role: 'button', tabindex: 0,
+        onkeydown: e => { if (e.key === 'Enter') select(id); } },
+      el('div', { class: 'row spread' },
+        el('span', { class: 'row' }, el('span', { class: `dot st-${st}` }), el('span', { class: 'name' }, c.name)),
+        el('span', { class: `state st-${st}` }, stateLabel(s && s.state))),
+      el('div', { class: 'muted' }, bits.join(' · ') || id)));
+  }
+}
+
+function renderDogs() {
+  dogLayer.clearLayers();
+  trackLayer.clearLayers();
+  const now = Date.now() / 1000;
+  for (const [id, c] of Object.entries(collars)) {
+    const s = c.status;
+    if (!s || !(s.lat || s.lon)) continue;
+    const stale = now - s.received > STALE_S;
+    const icon = L.divIcon({ className: '', iconSize: [22, 22], iconAnchor: [11, 11],
+      html: `<div class="dog st-${s.state}${stale ? ' stale' : ''}" style="--c:${css({ INSIDE: '--ok', WARNING: '--warn', OUTSIDE: '--bad', LOST: '--bad' }[s.state] || '--idle')}"><div class="pin"></div><div class="label"></div></div>` });
+    const m = L.marker([s.lat, s.lon], { icon, pmIgnore: true, snapIgnore: true, zIndexOffset: id === selected ? 1000 : 500, title: c.name, keyboard: false });
+    m.on('add', () => { const lab = m.getElement() && m.getElement().querySelector('.label'); if (lab) lab.textContent = c.name; });
+    m.bindTooltip(`${stateLabel(s.state)} · ${ago(now - s.received)}${s.sats ? ` · ${s.sats} sats` : ''}`, { direction: 'bottom', offset: [0, 12] });
+    m.on('click', e => { L.DomEvent.stopPropagation(e); select(id); });
+    m.addTo(dogLayer);
+    if (id === selected && c.track && c.track.length > 1) {
+      L.polyline(c.track.slice(-TRACK_POINTS).map(p => [p[1], p[2]]),
+        { color: css('--accent'), weight: 2, opacity: 0.7, dashArray: '2 5', pmIgnore: true, snapIgnore: true, interactive: false }).addTo(trackLayer);
+    }
+  }
+}
+
+function renderSelected() {
+  const c = collars[selected];
+  $('selectedBox').hidden = !c;
+  if (!c) return;
+  $('selName').textContent = c.name;
+  $('selId').textContent = selected;
+  const s = c.status;
+  const rows = [];
+  if (s) {
+    rows.push(['State', stateLabel(s.state)], ['Last report', ago(Date.now() / 1000 - s.received)]);
+    if (s.battery_pct != null && s.battery_pct !== 255) rows.push(['Battery', `${s.battery_pct}%`]);
+    if (s.sats) rows.push(['GPS', `${s.sats} sats, PDOP ${s.pdop}`]);
+    rows.push(['Corrections', s.corrections_enabled ? 'On' : 'Off'], ['Shock', s.shock_enabled ? 'Enabled' : 'Disabled']);
+  } else rows.push(['State', 'No report yet']);
+  $('selStats').replaceChildren(...rows.flatMap(([k, v]) => [el('span', {}, k), el('span', {}, v)]));
+  $('zoomDog').disabled = !(s && (s.lat || s.lon));
+}
+
+// ---------------------------------------------------------------------------------------------
+// Data
+// ---------------------------------------------------------------------------------------------
+async function refresh() {
+  try {
+    const h = await api('health');
+    $('health').textContent = h.mesh_connected ? 'Radio connected' : 'Radio not connected';
+    $('health').className = 'pill ' + (h.mesh_connected ? 'ok' : 'bad');
+  } catch { $('health').textContent = 'Base unreachable'; $('health').className = 'pill bad'; }
+  try { collars = await api('collars'); } catch { return; }
+  if (selected && !collars[selected]) { selected = null; loadZones(null); }
+  renderCollars();
+  renderDogs();
+  renderSelected();
+  if (selected) renderStatusArea();
+  if (firstLoad) {
+    firstLoad = false;
+    const ids = Object.keys(collars);
+    if (ids.length === 1) select(ids[0]);
+    else if (dogLayer.getLayers().length) map.fitBounds(dogLayer.getBounds(), { maxZoom: 18, padding: [60, 60] });
+    else if (!ids.length) map.locate({ setView: true, maxZoom: 17 });
+  }
 }
 
 function select(id) {
+  if (id === selected) return;
+  if (drawKind) endDraw();
+  if (selected && isDirty()) drafts[selected] = zonesToGeoJSON();
   selected = id;
   const c = collars[id];
-  document.getElementById('selectedBox').hidden = false;
-  document.getElementById('selectedTitle').textContent = c.name;
-  fenceLayer.clearLayers();
-  if (c.fences) L.geoJSON(c.fences, { onEachFeature: (f, l) => { styleZone(l, f.properties?.kind); fenceLayer.addLayer(l); } });
-  if (fenceLayer.getLayers().length) map.fitBounds(fenceLayer.getBounds(), { maxZoom: 18 });
-  refresh();
+  loadZones(drafts[id] || c.fences);
+  delete drafts[id];
+  say('');
+  renderCollars();
+  renderDogs();
+  renderSelected();
+  if (fenceLayer.getLayers().length) map.fitBounds(fenceLayer.getBounds(), { maxZoom: 19, padding: [40, 40] });
+  else if (c.status && (c.status.lat || c.status.lon)) map.setView([c.status.lat, c.status.lon], 18);
 }
 
-function drawTrack(c) {
-  trackLayer.clearLayers();
-  const pts = (c.track || []).map(p => [p[1], p[2]]);
-  if (pts.length) {
-    L.polyline(pts, { color: '#888', weight: 2 }).addTo(trackLayer);
-    L.circleMarker(pts[pts.length - 1], { radius: 7, color: '#2f6feb' }).bindTooltip(c.name).addTo(trackLayer);
-  }
-}
-
-async function addCollar() {
-  const node_id = document.getElementById('newId').value.trim();
-  if (!node_id) return;
-  await api('collars', { method: 'POST', body: JSON.stringify({ node_id, name: document.getElementById('newName').value.trim() || null }) });
-  select(node_id);
-}
-
-async function saveFences() {
-  const features = fenceLayer.getLayers().map(l => {
-    const f = l.toGeoJSON();
-    f.properties = l.feature?.properties || { kind: 'keep_in', warn_margin_m: 10 };
-    return f;
-  });
+$('send').onclick = async () => {
+  stopEditing();
+  const gj = zonesToGeoJSON();
+  $('send').disabled = true;
+  say('Sending…');
   try {
-    const r = await api(`collars/${encodeURIComponent(selected)}/fences`, { method: 'PUT', body: JSON.stringify({ type: 'FeatureCollection', features }) });
-    say(`Saved fence v${r.fence_version}` + (r.chunks_sent ? `, sent in ${r.chunks_sent} packet(s)` : ', not sent (radio not connected)'));
-  } catch (e) { say(e.message); }
+    const r = await api(`collars/${encodeURIComponent(selected)}/fences`, { method: 'PUT', body: JSON.stringify(gj) });
+    collars[selected].fences = gj;
+    collars[selected].fence_version = r.fence_version;
+    say(`Saved fence version ${r.fence_version}` + (r.chunks_sent ? `, sent in ${r.chunks_sent} packet${r.chunks_sent > 1 ? 's' : ''}.` : '. Not sent: the radio is not connected.'));
+  } catch (e) { say('Could not save: ' + e.message); }
+  renderZones();
   refresh();
-}
+};
 
-async function cmd(action, intensity = 0) {
-  try { await api(`collars/${encodeURIComponent(selected)}/command`, { method: 'POST', body: JSON.stringify({ action, intensity }) }); say('Sent ' + action); }
-  catch (e) { say(e.message); }
-}
+$('discard').onclick = () => { loadZones(savedFences()); say('Changes discarded.'); };
 
+$('zoomDog').onclick = () => {
+  const s = collars[selected] && collars[selected].status;
+  if (s) map.setView([s.lat, s.lon], Math.max(map.getZoom(), 18));
+};
+
+$('addForm').onsubmit = async e => {
+  e.preventDefault();
+  let node_id = $('newId').value.trim().toLowerCase();
+  if (!node_id.startsWith('!')) node_id = '!' + node_id;
+  try {
+    await api('collars', { method: 'POST', body: JSON.stringify({ node_id, name: $('newName').value.trim() || null }) });
+    $('newId').value = $('newName').value = $('addMsg').textContent = '';
+    $('addBox').open = false;
+    await refresh();
+    select(node_id);
+  } catch (err) { $('addMsg').textContent = 'Could not add the collar: ' + err.message; }
+};
+
+$('removeCollar').onclick = async () => {
+  const c = collars[selected];
+  if (!c || !confirm(`Remove ${c.name} from the base? The collar keeps its fences until you send new ones.`)) return;
+  await api(`collars/${encodeURIComponent(selected)}`, { method: 'DELETE' }).catch(e => say(e.message));
+  delete drafts[selected];
+  selected = null;
+  loadZones(null);
+  refresh();
+};
+
+document.querySelectorAll('[data-cmd]').forEach(b => b.onclick = async () => {
+  const action = b.dataset.cmd;
+  try {
+    await api(`collars/${encodeURIComponent(selected)}/command`, { method: 'POST', body: JSON.stringify({ action, intensity: +(b.dataset.intensity || 0) }) });
+    say(`Sent: ${b.textContent}.`);
+  } catch (e) { say(e.message); }
+});
+
+window.addEventListener('beforeunload', e => { if (isDirty() || Object.keys(drafts).length) { e.preventDefault(); e.returnValue = ''; } });
+
+renderZones();
 refresh();
 setInterval(refresh, 10000);
 </script>
