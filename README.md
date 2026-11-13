@@ -44,7 +44,7 @@ The collar also paces its own GPS: every 5 s near the line, slowing to once a mi
 | Path | What |
 | --- | --- |
 | `firmware/GeoCollar/` | The Meshtastic module (C++). Fence engine, CaiXianLin frame builder, wire protocol, Meshtastic glue. |
-| `firmware/build.sh` | Checks out Meshtastic at `firmware/MESHTASTIC_VERSION`, drops the module into `src/modules/optional/`, builds. |
+| `firmware/build.sh` | Checks out the latest Meshtastic patch release of the series in `firmware/MESHTASTIC_VERSION`, drops the module into `src/modules/optional/`, builds. |
 | `firmware/test/` | PC tests for everything that does not need hardware (`make -C firmware/test`). |
 | `base/` | Base station app (Python, FastAPI, Leaflet map), Dockerfile, and Home Assistant app manifest. |
 | `docs/protocol.md` | Message format between collars and base. |
@@ -56,12 +56,14 @@ The collar also paces its own GPS: every 5 s near the line, slowing to once a mi
 ```sh
 git clone https://github.com/deathvenom-qvp/Mesh_GeoCollar && cd Mesh_GeoCollar
 git submodule update --init --depth 1   # optional: the reference firmwares
-pip install platformio==6.2.0   # the version Meshtastic v2.8.2 pins
+pip install platformio==6.2.0   # the version Meshtastic 2.8 pins
 firmware/build.sh            # Heltec Wireless Tracker V1.1
 ```
 
-GeoCollar uses Meshtastic's optional-module slot, so no Meshtastic file is modified and moving to a
-new Meshtastic release is a one-line change to `firmware/MESHTASTIC_VERSION`. Pin and ID settings
+GeoCollar uses Meshtastic's optional-module slot, so no Meshtastic file is modified. Each build
+uses the newest stable patch release of the Meshtastic series named in
+`firmware/MESHTASTIC_VERSION` (currently `2.8`); moving to a new series is a one-line change. To
+build against one exact release, run `MESHTASTIC_VERSION=v2.8.2.d5f1619 firmware/build.sh`. Pin and ID settings
 are in `firmware/GeoCollar/GeoCollarConfig.h`. CI builds the firmware on every pull request and
 attaches the images.
 
@@ -87,7 +89,7 @@ the collar by node ID in the app, draw keep-in and keep-out zones on the map, an
   hour, and never fires on a poor GPS fix or in lost mode.
 - Corrections stop as soon as the dog is confirmed outside: correcting a dog that is trying to come
   home teaches the wrong thing.
-- Fit a hardware disable switch (`GEOCOLLAR_DISABLE_PIN`) and test with the electrodes removed.
+- Fit a hardware disable switch (GPIO 7 to ground) and test with the electrodes removed.
 - Electronic shock collars are banned or restricted in some places. Check local law; beep and
   vibrate alone may be enough.
 

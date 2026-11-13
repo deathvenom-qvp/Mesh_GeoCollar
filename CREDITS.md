@@ -6,14 +6,15 @@ Mesh_GeoCollar stands on the work of two open-source projects. Thank you to both
 
 [Meshtastic](https://meshtastic.org) ([firmware source](https://github.com/meshtastic/firmware)) is the
 off-grid LoRa mesh this project runs on. The collar firmware *is* Meshtastic: GeoCollar is an
-optional module dropped into an unmodified Meshtastic release (see `firmware/MESHTASTIC_VERSION`),
+optional module dropped into an unmodified Meshtastic release (the latest patch of the series in
+`firmware/MESHTASTIC_VERSION`),
 and it relies on Meshtastic for the mesh, GPS, encryption (including PKI direct messages), remote
 administration and Wi-Fi/Bluetooth firmware updates. The base station uses the official
 [Meshtastic Python library](https://github.com/meshtastic/python).
 
 - Meshtastic firmware is licensed under the GNU General Public License v3.0.
-- A copy is in `reference/meshtastic-firmware` (git submodule, pinned to the release in
-  `firmware/MESHTASTIC_VERSION`) for reading. Its `LICENSE` file is unchanged.
+- A copy is in `reference/meshtastic-firmware` (git submodule, pinned to the release
+  the module was last checked against) for reading. Its `LICENSE` file is unchanged.
 - Meshtastic® is a registered trademark of Meshtastic LLC. This project is not affiliated with
   or endorsed by Meshtastic LLC.
 

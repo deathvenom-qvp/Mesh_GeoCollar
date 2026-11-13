@@ -38,9 +38,11 @@ jobs:
         with:
           path: ~/.platformio
           key: pio-${{ hashFiles('firmware/MESHTASTIC_VERSION') }}
-      # Meshtastic v2.8.2 pins this version; newer post-releases are rejected by its ESP32 platform.
+      # Meshtastic 2.8 pins this version; newer post-releases are rejected by its ESP32 platform.
       - run: pip install platformio==6.2.0
       - run: firmware/build.sh heltec-wireless-tracker
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # for the Meshtastic release lookup
       - uses: actions/upload-artifact@v4
         with:
           name: geocollar-heltec-wireless-tracker

@@ -1,17 +1,20 @@
 #!/usr/bin/env bash
 # Builds Meshtastic firmware with the GeoCollar module for the Heltec Wireless Tracker.
 #
-# Meshtastic (https://github.com/meshtastic/firmware, GPL-3.0) is checked out at the version in
-# MESHTASTIC_VERSION, and GeoCollar is dropped into src/modules/optional/, which Meshtastic's
+# Meshtastic (https://github.com/meshtastic/firmware, GPL-3.0) is checked out at the newest stable
+# patch release of the series in MESHTASTIC_VERSION (e.g. 2.8 -> v2.8.2.d5f1619), and GeoCollar is dropped into src/modules/optional/, which Meshtastic's
 # own build picks up automatically. No Meshtastic source file is modified.
 #
 # Usage: firmware/build.sh [platformio env]   (default: heltec-wireless-tracker)
+# To build against one exact release instead: MESHTASTIC_VERSION=v2.8.2.d5f1619 firmware/build.sh
 # Needs: git, python3, PlatformIO 6.2.0 (pip install platformio==6.2.0), the version Meshtastic pins.
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
 env_name="${1:-heltec-wireless-tracker}"
-version="$(tr -d '[:space:]' < "$here/MESHTASTIC_VERSION")"
+spec="${MESHTASTIC_VERSION:-$(tr -d '[:space:]' < "$here/MESHTASTIC_VERSION")}"
+version="$(python3 "$here/resolve_meshtastic.py" "$spec")"
+echo "Building against Meshtastic $version"
 mt="$here/.meshtastic"
 
 if [ ! -d "$mt/.git" ]; then
