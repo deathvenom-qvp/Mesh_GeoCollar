@@ -1,0 +1,13 @@
+configuration:
+  mesh_serial:
+    name: Meshtastic node (USB)
+    description: >-
+      The base station's Meshtastic node, if it is plugged into this machine by USB.
+      Leave empty if you use the network address below instead.
+  mesh_host:
+    name: Meshtastic node (network)
+    description: >-
+      IP address or host name of the base station's Meshtastic node on Wi-Fi or Ethernet
+      (port 4403). Used when no USB device is set.
+network:
+  8099/tcp: Web page without Home Assistant login. Leave empty unless you need it.

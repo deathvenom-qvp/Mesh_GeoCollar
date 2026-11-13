@@ -70,16 +70,27 @@ attaches the images.
 
 ## Run the base station
 
-Docker:
+### Docker
 
 ```sh
 docker compose up -d        # edit docker-compose.yml for your node's USB port or IP first
 # open http://localhost:8099
 ```
 
-Home Assistant: add this repository under Settings > Add-ons (called Apps in newer releases) >
-store > Repositories, install **GeoCollar base**, and pick the Meshtastic node's serial port or IP
-in its options.
+### Home Assistant
+
+[![Add repository to Home Assistant](https://my.home-assistant.io/badges/supervisor_add_addon_repository.svg)](https://my.home-assistant.io/redirect/supervisor_add_addon_repository/?repository_url=https%3A%2F%2Fgithub.com%2Fdeathvenom-qvp%2FMesh_GeoCollar)
+
+1. Click the button above, or go to **Settings > Add-ons** (called **Apps** in newer releases) >
+   **Add-on Store** > **⋮** > **Repositories** and add `https://github.com/deathvenom-qvp/Mesh_GeoCollar`.
+2. Install **GeoCollar base**. Home Assistant builds it on your machine, which takes a few
+   minutes the first time (longer on a Raspberry Pi).
+3. On the **Configuration** tab, pick the Meshtastic node's USB device, or enter its IP address
+   if it is on the network. Start the app and turn on **Show in sidebar**.
+
+Home Assistant OS or Supervised is needed for apps (amd64 or aarch64). Full instructions,
+including pairing collars, are in [base/DOCS.md](base/DOCS.md), which Home Assistant also shows
+on the app's Documentation tab.
 
 Then, for each collar: put the base node's public key in the collar's Meshtastic admin keys, add
 the collar by node ID in the app, draw keep-in and keep-out zones on the map, and send them.

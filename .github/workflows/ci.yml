@@ -50,3 +50,19 @@ jobs:
             firmware/.meshtastic/.pio/build/heltec-wireless-tracker/*.bin
             firmware/.meshtastic/.pio/build/heltec-wireless-tracker/*.factory.bin
           if-no-files-found: warn
+
+  base-image:
+    name: Base app image (amd64 + arm64) and Home Assistant app lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: frenck/action-addon-linter@v2
+        with:
+          path: "./base"
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: base
+          platforms: linux/amd64,linux/arm64
+          push: false

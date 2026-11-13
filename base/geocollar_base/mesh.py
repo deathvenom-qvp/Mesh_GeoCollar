@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from dataclasses import asdict
 from typing import Callable
@@ -26,6 +27,28 @@ class MeshLink:
         self.serial_port = serial_port
         self.host = host
         self.iface = None
+        self.last_error = ""
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def start(self, retry_secs: float = 30) -> None:
+        """Connect in the background, and reconnect whenever the node goes away (unplugged,
+        rebooted, Wi-Fi dropped), so the web page stays up without a radio."""
+
+        def run():
+            while not self._stop.is_set():
+                if self.iface is None:
+                    try:
+                        self.connect()
+                        self.last_error = ""
+                    except Exception as e:  # noqa: BLE001 - any failure just means retry later
+                        self.last_error = str(e) or type(e).__name__
+                        log.warning("could not connect to the Meshtastic node: %s", self.last_error)
+                        self._drop()
+                self._stop.wait(retry_secs)
+
+        self._thread = threading.Thread(target=run, name="meshlink", daemon=True)
+        self._thread.start()
 
     def connect(self) -> None:
         from pubsub import pub  # installed with meshtastic
@@ -39,11 +62,25 @@ class MeshLink:
 
             self.iface = SerialInterface(devPath=self.serial_port or None)
         pub.subscribe(self._on_receive, "meshtastic.receive")
+        pub.subscribe(self._on_lost, "meshtastic.connection.lost")
         log.info("connected to base node %s", self.iface.getMyNodeInfo().get("user", {}).get("id"))
 
+    def _on_lost(self, interface=None):  # noqa: ARG002 - pubsub signature
+        log.warning("lost the connection to the Meshtastic node; will retry")
+        self.last_error = "connection lost"
+        self._drop()
+
+    def _drop(self) -> None:
+        iface, self.iface = self.iface, None
+        if iface:
+            try:
+                iface.close()
+            except Exception:  # noqa: BLE001
+                pass
+
     def close(self) -> None:
-        if self.iface:
-            self.iface.close()
+        self._stop.set()
+        self._drop()
 
     @property
     def connected(self) -> bool:

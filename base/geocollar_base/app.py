@@ -59,10 +59,7 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
     @asynccontextmanager
     async def lifespan(_app):
         if connect:
-            try:
-                link.connect()
-            except Exception:  # keep the UI up even if the radio is missing
-                log.exception("could not connect to the Meshtastic node")
+            link.start()
         yield
         link.close()
 
@@ -83,7 +80,11 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
 
     @app.get("/api/health")
     def health():
-        return {"mesh_connected": link.connected}
+        return {
+            "mesh_connected": link.connected,
+            "mesh_configured": connect or link.connected,
+            "mesh_error": getattr(link, "last_error", ""),
+        }
 
     @app.get("/api/collars")
     def list_collars():

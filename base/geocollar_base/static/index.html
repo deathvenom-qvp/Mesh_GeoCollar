@@ -612,7 +612,9 @@ function renderSelected() {
 async function refresh() {
   try {
     const h = await api('health');
-    $('health').textContent = h.mesh_connected ? 'Radio connected' : 'Radio not connected';
+    $('health').textContent = h.mesh_connected ? 'Radio connected' : h.mesh_configured ? 'Radio not connected' : 'No radio set up';
+    $('health').title = h.mesh_connected ? '' : h.mesh_configured ? `Retrying every 30 s. ${h.mesh_error || ''}`.trim()
+      : 'Set the Meshtastic node\'s serial port or IP address in the app configuration.';
     $('health').className = 'pill ' + (h.mesh_connected ? 'ok' : 'bad');
   } catch { $('health').textContent = 'Base unreachable'; $('health').className = 'pill bad'; }
   try { collars = await api('collars'); } catch { return; }
