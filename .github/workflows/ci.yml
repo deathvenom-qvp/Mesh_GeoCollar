@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  firmware-host-tests:
+    name: Firmware logic tests (PC)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: make -C firmware/test
+
+  base-tests:
+    name: Base app tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r base/requirements-dev.txt
+      - run: python -m pytest -q base/tests
+        env:
+          PYTHONPATH: base
+
+  firmware-build:
+    name: Firmware build (Heltec Wireless Tracker)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/cache@v4
+        with:
+          path: ~/.platformio
+          key: pio-${{ hashFiles('firmware/MESHTASTIC_VERSION') }}
+      - run: pip install platformio
+      - run: firmware/build.sh heltec-wireless-tracker
+      - uses: actions/upload-artifact@v4
+        with:
+          name: geocollar-heltec-wireless-tracker
+          path: |
+            firmware/.meshtastic/.pio/build/heltec-wireless-tracker/*.bin
+            firmware/.meshtastic/.pio/build/heltec-wireless-tracker/*.factory.bin
+          if-no-files-found: warn
