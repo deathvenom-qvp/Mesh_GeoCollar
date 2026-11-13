@@ -10,20 +10,16 @@ arch:
   - amd64
   - aarch64
 init: false
-startup: application
-boot: auto
-# The web page opens in the Home Assistant sidebar through ingress, behind HA's login.
+# The web page opens in the Home Assistant sidebar through ingress (port 8099, the default),
+# behind HA's login. Health is checked by the Dockerfile HEALTHCHECK.
 ingress: true
-ingress_port: 8099
 panel_icon: mdi:dog-side
 panel_title: GeoCollar
 # Optional direct port for use outside Home Assistant. Off by default: the page has no login.
 ports:
   8099/tcp: null
-watchdog: http://[HOST]:[PORT:8099]/api/health
 # Access to USB serial devices, for a Meshtastic node plugged into the Home Assistant machine.
 uart: true
-options: {}
 schema:
   mesh_serial: device(subsystem=tty)?
   mesh_host: str?
