@@ -98,6 +98,13 @@ this long.
 
 Golden bytes for Rex / Ken / 555-123-4567: `02 05 03 526578 03 4b656e 0c 3535352d3132332d34353637`.
 
+## 6. Hello (collar, broadcast)
+
+`02 06 <flags> <battery %>`: flags bit 0 the collar has an admin key, bit 1 it has fences;
+battery 255 = unknown. Sent on the primary channel, unencrypted beyond the channel key, by a collar
+that has not yet heard from a base it trusts: every minute for 15 minutes after boot, then every
+15 minutes. The base lists the sender as a new collar. Golden bytes: `02 06 01 57`.
+
 ### The lost beacon
 
 Once the dog has been past a line for 90 s (counted from the first good fix outside, and only

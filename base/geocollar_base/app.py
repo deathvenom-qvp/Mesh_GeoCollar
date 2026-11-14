@@ -7,6 +7,7 @@ import ipaddress
 import json
 import logging
 import os
+import re
 import secrets
 import shutil
 import time
@@ -76,7 +77,21 @@ class UsbFlashIn(BaseModel):
     build: str
     port: str
     mode: str = "update"
-    node_id: str | None = None  # which collar is plugged in, to record what it now runs
+    node_id: str | None = None  # which collar is plugged in; found from its MAC address when left out
+    name: str | None = None  # the dog's name, if this turns out to be a new collar
+    setup: bool = False  # afterwards, set the collar up for this base (admin key, LoRa, channels)
+
+
+class UsbSetupIn(BaseModel):
+    port: str
+    name: str | None = None
+
+
+class DeviceFlashedIn(BaseModel):
+    node_id: str
+    build: str
+    via: str = "browser"
+    name: str | None = None
 
 
 class OtaIn(BaseModel):
@@ -147,7 +162,8 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
     store = Store(settings["data_dir"])
 
     if link is None:
-        link = MeshLink(lambda n, s: on_status(n, s), settings.get("mesh_serial", ""), settings.get("mesh_host", ""))
+        link = MeshLink(lambda n, s: on_status(n, s), settings.get("mesh_serial", ""), settings.get("mesh_host", ""),
+                        on_hello=lambda n, h: on_hello(n, h))
         connect = bool(settings.get("mesh_serial") or settings.get("mesh_host"))
     else:
         connect = False
@@ -188,6 +204,32 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
         if c and node_id not in sim and c.get("owner_sent") != owner_for(node_id):
             push_owner(node_id)
 
+    # -- New collars: a GeoCollar collar no base has adopted says hello on the mesh now and then.
+    DISCOVERED_KEEP_S = 24 * 3600
+
+    def on_hello(node_id: str, hello: dict) -> None:
+        if store.collar(node_id) is not None:
+            return
+        found = {k: v for k, v in (store.setting("discovered", {}) or {}).items()
+                 if time.time() - v.get("seen", 0) < DISCOVERED_KEEP_S}
+        found[node_id] = {**hello, "seen": time.time(), "via": "mesh"}
+        store.set_setting("discovered", found)
+
+    def note_device(node_id: str, via: str, name: str | None) -> bool:
+        """A collar found while flashing or setting up over USB: add it if it is new."""
+        if not re.fullmatch(r"![0-9a-f]{8}", node_id or ""):
+            return False
+        is_new = store.collar(node_id) is None
+        if is_new:
+            dog = " ".join((name or "").split())
+            store.upsert_collar(node_id, protocol.fit_text(dog, protocol.MAX_DOG_NAME) or None)
+            store.set_collar_info(node_id, "added_via", via)
+            push_owner(node_id)
+        found = store.setting("discovered", {}) or {}
+        if found.pop(node_id, None) is not None:
+            store.set_setting("discovered", found)
+        return is_new
+
     for node_id, c in store.collars().items():
         if c.get("sim"):
             sim.add(node_id, c["sim"])
@@ -212,6 +254,7 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
     app.state.store = store
     app.state.sim = sim
     app.state.on_status = on_status
+    app.state.on_hello = on_hello
     # Leaflet and Leaflet-Geoman are vendored so the page works without a CDN (e.g. on a LAN).
     app.mount("/static", StaticFiles(directory=STATIC), name="static")
 
@@ -244,7 +287,29 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
     def add_collar(body: CollarIn):
         c = store.upsert_collar(body.node_id, body.name)
         push_owner(body.node_id)
+        found = store.setting("discovered", {}) or {}
+        if found.pop(body.node_id, None) is not None:
+            store.set_setting("discovered", found)
         return c
+
+    @app.get("/api/discovered")
+    def discovered():
+        """Collars heard saying hello on the mesh that are not on this base yet."""
+        known = store.collars()
+        return {k: v for k, v in (store.setting("discovered", {}) or {}).items()
+                if k not in known and time.time() - v.get("seen", 0) < DISCOVERED_KEEP_S}
+
+    @app.delete("/api/discovered/{node_id}")
+    def dismiss_discovered(node_id: str):
+        found = store.setting("discovered", {}) or {}
+        found.pop(node_id, None)
+        store.set_setting("discovered", found)
+        return {"dismissed": node_id}
+
+    @app.get("/api/base")
+    def base_info():
+        """The base radio's node ID and public key: the key goes into each collar's admin keys."""
+        return link.base_info() if link.connected and hasattr(link, "base_info") else {}
 
     @app.patch("/api/collars/{node_id}")
     def rename_collar(node_id: str, body: CollarPatch):
@@ -424,10 +489,45 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
 
         def run(job):
             result = fw.flash_usb(job, builds, body.build, body.port, body.mode, settings.get("mesh_serial", ""))
-            record_flash(body.node_id, m, "usb")
+            node_id = body.node_id or result.get("node_id")
+            if node_id and not body.node_id:
+                result["new_collar"] = note_device(node_id, "usb", body.name)
+                if result["new_collar"]:
+                    job.log(f"Added {node_id} to the base as a new collar")
+            record_flash(node_id, m, "usb")
+            if body.setup:
+                c = store.collar(node_id) if node_id else None
+                name = c["name"] if c and c["name"] != node_id else (body.name or "")
+                result.update(fw.setup_collar(job, body.port, getattr(link, "iface", None), name))
             return result
 
         return start("usb", f"Flash over USB ({body.port})", run)
+
+    @app.post("/api/firmware/setup-usb")
+    def firmware_setup_usb(body: UsbSetupIn):
+        """Set up a collar that already runs GeoCollar, plugged into the base, without flashing."""
+        base_radio = settings.get("mesh_serial", "")
+        if base_radio and os.path.realpath(body.port) == os.path.realpath(base_radio):
+            raise HTTPException(400, "that port is the base station's own Meshtastic radio")
+
+        def run(job):
+            result = fw.setup_collar(job, body.port, getattr(link, "iface", None), (body.name or "").strip(), boot_wait_s=10)
+            if result.get("node_id"):
+                result["new_collar"] = note_device(result["node_id"], "usb", body.name)
+            return result
+
+        return start("usb", f"Set up the collar on {body.port}", run)
+
+    @app.post("/api/firmware/flashed")
+    def firmware_device_flashed(body: DeviceFlashedIn):
+        """Flashed from the browser: the page read the collar's MAC address, so add it if new."""
+        m = build_or_404(body.build)
+        node_id = body.node_id.lower()
+        if not re.fullmatch(r"![0-9a-f]{8}", node_id):
+            raise HTTPException(400, "bad node ID")
+        new = note_device(node_id, body.via, body.name)
+        record_flash(node_id, m, body.via)
+        return {"node_id": node_id, "new_collar": new, "collar": store.collar(node_id)}
 
     @app.post("/api/collars/{node_id}/firmware/flashed")
     def firmware_flashed(node_id: str, body: FlashedIn):

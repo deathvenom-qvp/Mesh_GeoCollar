@@ -203,6 +203,7 @@
   <section>
     <h2>Collars</h2>
     <div id="collars"></div>
+    <div id="newCollars"></div>
     <details id="addBox">
       <summary>Add a collar</summary>
       <form id="addForm" style="margin-top:8px">
@@ -211,6 +212,9 @@
         <button class="primary" style="margin-top:8px">Add collar</button>
         <div class="muted" id="addMsg" role="status"></div>
       </form>
+      <div class="muted" style="margin-top:8px">Easier: flash or set up the collar under <b>Collar firmware</b> and it is added
+        by itself, or turn it on near the base and it shows up above as a new collar.</div>
+      <div id="baseKey" style="margin-top:6px"></div>
     </details>
     <div class="row spread" style="margin-top:8px">
       <span class="muted">No hardware yet?</span>
@@ -313,6 +317,9 @@
       <div class="muted" style="margin-top:4px">While the dog stays in a band, the collar repeats its beep or vibration this often.
         Once the dog is past the line it goes quiet, and stays quiet until it is back inside and clear of every band.</div>
       <div class="muted gpsnote" id="gpsNote"></div>
+      <div class="row" id="copyRow" style="gap:6px;margin-top:8px">
+        <select id="copyFrom" aria-label="Copy fences from another collar"></select>
+      </div>
       <div id="zones"></div>
       <ul class="notes" id="notes"></ul>
       <div class="sync" id="sync"></div>
@@ -400,7 +407,11 @@
       <div id="fwUsb" class="fwgrid" hidden>
         <div class="wide muted">For a collar plugged into the machine running this app (the Home Assistant machine).</div>
         <label class="field wide">Port <select id="fwPort"></select></label>
-        <div class="wide actions"><button class="primary" id="fwUsbGo">Flash</button><button id="fwRescan">Rescan ports</button></div>
+        <label class="wide row muted" style="gap:6px"><input type="checkbox" id="fwSetup" checked>
+          Then set it up for this base: trust the base, copy its radio settings and channels, name it after the dog</label>
+        <div class="wide actions"><button class="primary" id="fwUsbGo">Flash</button>
+          <button id="fwSetupOnly" title="For a collar that already runs GeoCollar firmware">Set up only</button>
+          <button id="fwRescan">Rescan ports</button></div>
       </div>
 
       <div id="fwWeb" class="fwgrid" hidden>
@@ -416,6 +427,7 @@
           <option value="full">Full install, erase everything</option>
         </select></label>
         <label class="field">Which collar is it? <select id="fwCollar"></select></label>
+        <label class="field wide" id="fwNewNameRow">Dog's name, if it is a new collar <input id="fwNewName" maxlength="24" placeholder="Rex"></label>
         <div class="wide muted" id="fwModeNote"></div>
       </div>
       <div class="muted" id="fwMsg" role="status" style="margin-top:6px"></div>
@@ -920,7 +932,7 @@ function renderCollars() {
   const box = $('collars');
   box.replaceChildren();
   const ids = Object.keys(collars);
-  if (!ids.length) box.append(el('div', { class: 'empty' }, 'No collars yet. Add one by its Meshtastic node ID below.'));
+  if (!ids.length) box.append(el('div', { class: 'empty' }, 'No collars yet. Flash or set one up under Collar firmware, turn one on near the base, or add it by its Meshtastic node ID below.'));
   const now = Date.now() / 1000;
   for (const id of ids) {
     const c = collars[id], s = c.status;
@@ -988,7 +1000,66 @@ function renderSelected() {
   else if (c.firmware) rows.push(['Firmware', `${shortCommit(c.firmware.commit)}, ${c.firmware.via === 'wifi' ? 'Wi-Fi' : 'USB'} ${ago(Date.now() / 1000 - c.firmware.flashed_at)}`]);
   $('selStats').replaceChildren(...rows.flatMap(([k, v]) => [el('span', {}, k), el('span', {}, v)]));
   $('zoomDog').disabled = !(s && (s.lat || s.lon));
+  renderCopyFrom();
   renderSim();
+}
+
+// Copy another collar's fences (as last sent to it) into this collar's editor, to send from here.
+function renderCopyFrom() {
+  const others = Object.entries(collars).filter(([id, c]) => id !== selected && c.fences && c.fences.features && c.fences.features.length);
+  $('copyRow').hidden = !others.length;
+  if (document.activeElement === $('copyFrom')) return;
+  $('copyFrom').replaceChildren(el('option', { value: '' }, 'Copy fences from another collar…'),
+    ...others.map(([id, c]) => el('option', { value: id }, `${c.name} (${c.fences.features.length} zone${c.fences.features.length === 1 ? '' : 's'})`)));
+}
+$('copyFrom').onchange = () => {
+  const from = $('copyFrom').value, c = collars[from];
+  $('copyFrom').value = '';
+  if (!c || !c.fences) return;
+  if (zones.length && !confirm(`Replace ${collars[selected].name}'s ${zones.length} zone${zones.length === 1 ? '' : 's'} with ${c.name}'s fences?`)) return;
+  if (drawKind) endDraw();
+  loadZones(JSON.parse(JSON.stringify(c.fences)));
+  if (fenceLayer.getLayers().length) map.fitBounds(fenceLayer.getBounds(), { maxZoom: 19, padding: [40, 40] });
+  say(`Copied ${c.name}'s fences and pulse settings. Press "Send to collar" to give them to ${collars[selected].name}.`);
+};
+
+// New collars: heard saying hello on the mesh, not on this base yet.
+let discovered = {}, baseInfo = {};
+function renderNewCollars() {
+  const now = Date.now() / 1000;
+  const items = Object.entries(discovered).map(([id, d]) => {
+    const input = el('input', { maxlength: 24, placeholder: "Dog's name", 'aria-label': `Dog's name for ${id}` });
+    const add = async () => {
+      try {
+        await api('collars', { method: 'POST', body: JSON.stringify({ node_id: id, name: input.value.trim() || null }) });
+        delete discovered[id]; await refresh(); select(id);
+      } catch (e) { say(e.message); }
+    };
+    const dismiss = async () => { await api(`discovered/${encodeURIComponent(id)}`, { method: 'DELETE' }).catch(() => {}); delete discovered[id]; renderNewCollars(); };
+    const bits = [d.long_name || id, ago(now - d.seen)];
+    if (d.battery_pct != null) bits.push(`battery ${d.battery_pct}%`);
+    if (d.hops != null) bits.push(d.hops ? `${d.hops} hop${d.hops === 1 ? '' : 's'} away` : 'direct');
+    return el('div', { class: 'collar newcollar' },
+      el('div', { class: 'row spread' }, el('span', { class: 'row' }, el('span', { class: 'pill' }, 'New'), el('span', { class: 'name' }, id)),
+        el('button', { class: 'link', onclick: dismiss }, 'Not mine')),
+      el('div', { class: 'muted' }, bits.join(' · ')),
+      el('div', { class: 'row', style: 'gap:6px;margin-top:6px' }, input, el('button', { class: 'primary', onclick: add }, 'Add')),
+      d.has_admin_key ? null : el('div', { class: 'callout' }, 'This collar does not trust any base yet. After adding it, plug it into the base and use "Set up only" under Collar firmware, or paste the base key (under "Add a collar") into its Admin key in the Meshtastic app.'));
+  });
+  $('newCollars').replaceChildren(...items);
+}
+function renderBaseKey() {
+  $('baseKey').replaceChildren(...(baseInfo.public_key ? [
+    el('div', { class: 'muted' }, "This base's public key, for each collar's Admin key in the Meshtastic app (Settings > Security):"),
+    el('div', { class: 'row', style: 'gap:6px' }, el('code', { style: 'word-break:break-all;font-size:11px' }, baseInfo.public_key),
+      el('button', { class: 'link', onclick: () => navigator.clipboard?.writeText(baseInfo.public_key).then(() => say('Copied the base key.')) }, 'Copy')),
+  ] : []));
+}
+async function loadDiscovery() {
+  try { discovered = await api('discovered'); } catch { return; }
+  for (const id of Object.keys(discovered)) if (collars[id]) delete discovered[id];
+  renderNewCollars();
+  if (!baseInfo.public_key) { try { baseInfo = await api('base'); renderBaseKey(); } catch { /* radio not connected */ } }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1157,6 +1228,7 @@ async function refresh() {
     $('health').className = 'pill ' + (h.mesh_connected ? 'ok' : 'bad');
   } catch { $('health').textContent = 'Base unreachable'; $('health').className = 'pill bad'; }
   try { collars = await api('collars'); } catch { return; }
+  loadDiscovery();
   if (selected && !collars[selected]) { selected = null; loadZones(null); }
   renderCollars();
   renderDogs();
@@ -1317,9 +1389,11 @@ function renderFw() {
 
   // Shared options
   const keepCollar = $('fwCollar').value;
-  $('fwCollar').replaceChildren(el('option', { value: '' }, 'Not sure / not listed'),
+  $('fwCollar').replaceChildren(el('option', { value: '' }, 'Find out while flashing (new or listed)'),
     ...Object.entries(collars).filter(([, x]) => !x.sim).map(([id, x]) => el('option', { value: id }, x.name)));
-  $('fwCollar').value = collars[keepCollar] ? keepCollar : (c && !c.sim ? selected : '');
+  $('fwCollar').value = collars[keepCollar] ? keepCollar : '';
+  $('fwNewNameRow').hidden = !!$('fwCollar').value;
+  $('fwSetupOnly').disabled = busy || !fw.ports.some(p => p.device === $('fwPort').value && !p.in_use);
   $('fwModeNote').textContent = $('fwMode').value === 'full'
     ? 'Erases the collar, including its settings, keys and fences. Use this for a new collar; set it up again afterwards.'
     : 'Keeps the collar\'s Meshtastic settings, keys and fences. Also brings a collar out of update mode.';
@@ -1372,6 +1446,7 @@ function startOta(resume) {
 $('fwDetails').addEventListener('toggle', () => { if ($('fwDetails').open) fwRefresh(); });
 $('fwMethod').onclick = e => { const b = e.target.closest('button'); if (b) { fwMethod = b.dataset.m; renderFw(); } };
 $('fwMode').onchange = renderFw;
+$('fwCollar').onchange = renderFw;
 $('fwPort').onchange = renderFw;
 $('fwRescan').onclick = fwRefresh;
 $('fwSsid').oninput = () => { $('fwSsid').dataset.edited = '1'; };
@@ -1393,7 +1468,12 @@ $('fwOta').onclick = () => startOta(false);
 $('fwUsbGo').onclick = () => {
   const full = $('fwMode').value === 'full';
   if (full && !confirm('Full install erases everything on the collar, including its keys and fences. Continue?')) return;
-  startJob('firmware/flash-usb', { build: fwSel, port: $('fwPort').value, mode: $('fwMode').value, node_id: $('fwCollar').value || null });
+  startJob('firmware/flash-usb', { build: fwSel, port: $('fwPort').value, mode: $('fwMode').value, node_id: $('fwCollar').value || null,
+    name: $('fwNewName').value.trim() || null, setup: $('fwSetup').checked });
+};
+$('fwSetupOnly').onclick = () => {
+  const id = $('fwCollar').value, name = id ? collars[id].name : $('fwNewName').value.trim();
+  startJob('firmware/setup-usb', { port: $('fwPort').value, name: name || null });
 };
 
 // Flash from this browser with esptool-js over Web Serial. The files come from the base.
@@ -1427,6 +1507,12 @@ $('fwWebGo').onclick = async () => {
     job.step = 'Connecting to the collar'; renderJob(job);
     const chip = await loader.main();
     logLine(`Connected: ${chip}`);
+    let foundId = null;
+    try {
+      const mac = await loader.chip.readMac(loader);
+      const b = (mac.match(/[0-9a-f]{2}/gi) || []);
+      if (b.length === 6) { foundId = '!' + b.slice(2).join('').toLowerCase(); logLine(`Meshtastic node ${foundId}`); }
+    } catch { /* not fatal: the collar can still be added by hand */ }
     if (!/ESP32-S3/i.test(chip)) throw new Error(`this firmware is for an ESP32-S3, but the device is ${chip}`);
     job.step = mode === 'full' ? 'Erasing and writing' : 'Writing'; job.progress = 0; renderJob(job);
     await loader.writeFlash({
@@ -1436,7 +1522,16 @@ $('fwWebGo').onclick = async () => {
     });
     await loader.after('hard_reset');
     job.state = 'done'; job.progress = 1; job.step = 'Done. The collar is restarting.'; logLine(job.step);
-    if (nodeId) await api(`collars/${encodeURIComponent(nodeId)}/firmware/flashed`, { method: 'POST', body: JSON.stringify({ build: m.id, via: 'usb' }) }).catch(() => {});
+    if (foundId && (!nodeId || nodeId === foundId)) {
+      const r = await api('firmware/flashed', { method: 'POST', body: JSON.stringify({ node_id: foundId, build: m.id, via: 'usb', name: $('fwNewName').value.trim() || null }) }).catch(() => null);
+      if (r && r.new_collar) {
+        logLine(`Added ${r.collar.name} (${foundId}) to the base.`);
+        job.step = `Done. Added ${r.collar.name} as a new collar. Its Meshtastic settings still need this base's key: plug it into the base and use "Set up only", or see "Add a collar".`;
+      }
+    } else if (nodeId) {
+      if (foundId && nodeId !== foundId) logLine(`Note: this is node ${foundId}, not ${collars[nodeId].name} (${nodeId}).`);
+      await api(`collars/${encodeURIComponent(nodeId)}/firmware/flashed`, { method: 'POST', body: JSON.stringify({ build: m.id, via: 'usb' }) }).catch(() => {});
+    }
   } catch (e) {
     job.state = 'failed'; job.error = e.message || String(e); logLine('Error: ' + job.error);
   } finally {

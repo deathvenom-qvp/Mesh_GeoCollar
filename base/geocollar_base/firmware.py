@@ -369,6 +369,16 @@ def serial_ports(exclude: str = "") -> list[dict]:
     return out
 
 
+def node_id_from_mac(mac: str) -> str | None:
+    """Meshtastic's node number is the last four bytes of the ESP32's base MAC address
+    (NodeDB::pickNewNodeNum), so esptool's "MAC: ..." line tells us the node ID before the collar
+    even boots. Meshtastic only picks another number if that one clashes with a node it knows."""
+    parts = re.findall(r"[0-9a-fA-F]{2}", mac or "")
+    if len(parts) != 6:
+        return None
+    return "!" + "".join(parts[2:]).lower()
+
+
 def flash_usb(job: Job, builds: BuildStore, build_id: str, port: str, mode: str, base_radio: str = "") -> dict:
     """mode "update": write the app and OTA loader, and clear otadata so the collar boots the new
     app (also gets a collar out of update mode). Settings, keys and fences are kept.
@@ -405,11 +415,105 @@ def flash_usb(job: Job, builds: BuildStore, build_id: str, port: str, mode: str,
             return  # too chatty for the log
         if line.startswith("Wrote "):
             seen[0] += 1
+        mac = re.match(r"MAC:\s*([0-9a-fA-F:]{17})", line.strip())
+        if mac and not found.get("node_id"):
+            found["mac"] = mac.group(1).lower()
+            found["node_id"] = node_id_from_mac(mac.group(1))
+            line += f"  (Meshtastic node {found['node_id']})"
         job.log(line)
 
+    found: dict = {}
     _run(job, cmd, on_line=on_line)
     job.set_step("Done. The collar is restarting.", 1.0)
-    return {"build": build_id, "commit": m.get("geocollar_commit"), "mode": mode}
+    return {"build": build_id, "commit": m.get("geocollar_commit"), "mode": mode, **found}
+
+
+# -------------------------------------------------------------------------------------------------
+# Setting up a collar over USB: what the owner would otherwise do by hand in the Meshtastic app.
+# -------------------------------------------------------------------------------------------------
+def open_serial_node(port: str):
+    from meshtastic.serial_interface import SerialInterface
+
+    return SerialInterface(devPath=port)
+
+
+def setup_collar(job: Job, port: str, base_iface, name: str = "", open_iface=open_serial_node,
+                 boot_wait_s: float = 60) -> dict:
+    """Over USB, make a collar trust and talk to this base: put the base's public key in its admin
+    keys, give it the base's LoRa settings and channels, keep Bluetooth on for the lost beacon, and
+    name it after the dog. Returns the collar's node ID."""
+    if base_iface is None:
+        raise FirmwareError("the base's own Meshtastic radio is not connected, so there is nothing to copy")
+    base = base_iface.localNode
+    base_key = bytes(base.localConfig.security.public_key)
+    if not base_key:
+        raise FirmwareError("the base radio has no public key yet (Meshtastic 2.5 or later makes one)")
+
+    job.set_step(f"Waiting for the collar on {port} to start", None)
+    deadline = time.monotonic() + boot_wait_s
+    iface, last = None, None
+    while iface is None:
+        job.check_cancel()
+        try:
+            iface = open_iface(port)
+        except Exception as e:  # noqa: BLE001 - still booting; any failure means try again
+            last = e
+            if time.monotonic() > deadline:
+                raise FirmwareError(f"could not talk to the collar on {port}: {last}") from e
+            time.sleep(3)
+    try:
+        info = iface.getMyNodeInfo() or {}
+        node_id = (info.get("user") or {}).get("id") or (f"!{info['num']:08x}" if "num" in info else None)
+        job.log(f"Collar is Meshtastic node {node_id}")
+        node = iface.localNode
+        job.set_step("Setting up the collar", None)
+        node.beginSettingsTransaction()
+
+        sec = node.localConfig.security
+        keys = [bytes(k) for k in sec.admin_key]
+        if base_key not in keys:
+            if len(keys) >= 3:  # Meshtastic keeps three admin keys; replace the last one
+                del sec.admin_key[-1]
+            sec.admin_key.append(base_key)
+            node.writeConfig("security")
+            job.log("Added the base's public key to the collar's admin keys")
+        else:
+            job.log("The collar already trusts this base")
+
+        node.localConfig.lora.CopyFrom(base.localConfig.lora)
+        node.writeConfig("lora")
+        job.log("Copied the base's LoRa settings (region and preset)")
+
+        if not node.localConfig.bluetooth.enabled:
+            node.localConfig.bluetooth.enabled = True
+            node.writeConfig("bluetooth")
+            job.log("Turned Bluetooth on (the lost beacon needs it)")
+
+        public = False
+        for i, ch in enumerate(base.channels or []):
+            if i >= len(node.channels):
+                break
+            node.channels[i].CopyFrom(ch)
+            node.writeChannel(i)
+            psk = bytes(ch.settings.psk)
+            if ch.role and (psk in (b"", b"\x01")):
+                public = True
+        job.log("Copied the base's channels")
+        if not public:
+            job.log("Note: no channel with the default public key, so the lost-dog message reaches only your own nodes")
+
+        if name:
+            short = "".join(w[0] for w in name.split()[:4]).upper() or name[:4]
+            node.setOwner(long_name=name[:39], short_name=short[:4])
+            job.log(f"Named the collar {name}")
+        node.commitSettingsTransaction()
+        job.set_step("Done. The collar restarts with the new settings.", 1.0)
+        return {"node_id": node_id}
+    finally:
+        try:
+            iface.close()
+        except Exception:  # noqa: BLE001
+            pass
 
 
 # -------------------------------------------------------------------------------------------------

@@ -81,10 +81,21 @@ bool header(Reader &r, MsgType expect)
 
 bool messageType(const uint8_t *buf, size_t len, MsgType &type)
 {
-    if (len < 2 || buf[0] != kVersion || buf[1] < 1 || buf[1] > 5)
+    if (len < 2 || buf[0] != kVersion || buf[1] < 1 || buf[1] > 6)
         return false;
     type = static_cast<MsgType>(buf[1]);
     return true;
+}
+
+size_t encodeHello(uint8_t *out, size_t cap, bool hasAdminKey, bool hasFences, uint8_t batteryPct)
+{
+    if (cap < kHelloSize)
+        return 0;
+    out[0] = kVersion;
+    out[1] = static_cast<uint8_t>(MsgType::Hello);
+    out[2] = (hasAdminKey ? 1 : 0) | (hasFences ? 2 : 0);
+    out[3] = batteryPct;
+    return kHelloSize;
 }
 
 size_t encodeStatus(uint8_t *out, size_t cap, MsgType type, const StatusReport &s)

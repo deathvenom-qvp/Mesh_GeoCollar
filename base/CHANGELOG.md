@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.10.0
+
+- New collars find themselves. Flashing over USB (on the base or from this computer) reads the
+  collar's Meshtastic node ID from its chip and adds it, named after the dog. On the base, it can
+  then set the collar up too: trust this base (admin key), copy the base's LoRa settings and
+  channels, keep Bluetooth on, and name the node. **Set up only** does that for a collar that
+  already runs GeoCollar.
+- Collars with the new firmware that no base has adopted say hello on the mesh; they show up under
+  Collars as **New**, ready to add.
+- The base's public key is shown under **Add a collar**, with a Copy button.
+- Copy fences (and pulse settings) from another collar, then send them.
+
 ## 0.9.0
 
 - Lost-dog beacon. Collars are named after the dog (Rename next to the name), and a new **If a

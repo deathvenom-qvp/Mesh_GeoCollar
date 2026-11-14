@@ -65,3 +65,19 @@ def test_remote_admin_for_ota():
     assert dest == 0x12345678 and port == portnums_pb2.PortNum.ADMIN_APP and pki and not want_response
     assert msg.ota_request.reboot_ota_mode == admin_pb2.OTAMode.OTA_WIFI and msg.ota_request.ota_hash == b"\x01" * 32
     assert msg.session_passkey == b"k" * 8
+
+
+def test_hello_from_a_new_collar_is_passed_on():
+    from geocollar_base import protocol
+
+    heard = []
+    link = MeshLink(lambda *_: None, on_hello=lambda n, h: heard.append((n, h)))
+
+    class Iface:
+        nodes = {"!18abcd01": {"user": {"longName": "Meshtastic cd01", "shortName": "cd01"}}}
+
+    link.iface = Iface()
+    link._on_receive({"fromId": "!18abcd01", "from": 0x18ABCD01, "rxRssi": -90, "hopStart": 3, "hopLimit": 2,
+                      "decoded": {"portnum": "300", "payload": protocol.encode_hello(False, False, 80)}})
+    assert heard == [("!18abcd01", {"has_admin_key": False, "has_fences": False, "battery_pct": 80,
+                                    "long_name": "Meshtastic cd01", "short_name": "cd01", "rssi": -90, "snr": None, "hops": 1})]

@@ -33,6 +33,7 @@ enum class MsgType : uint8_t {
     Breach = 3,     // collar -> base
     Command = 4,    // base -> collar
     Owner = 5,      // base -> collar: the dog's name and the owner's contact, for the lost beacon
+    Hello = 6,      // collar -> broadcast: "I run GeoCollar and no base has adopted me yet"
 };
 
 enum class CommandAction : uint8_t {
@@ -93,6 +94,9 @@ bool messageType(const uint8_t *buf, size_t len, MsgType &type);
 size_t encodeStatus(uint8_t *out, size_t cap, MsgType type, const StatusReport &s);
 bool decodeStatus(const uint8_t *buf, size_t len, StatusReport &s);
 
+/// Hello: [version][6][flags: bit0 has an admin key, bit1 has fences][battery %, 255 unknown]
+constexpr size_t kHelloSize = 4;
+size_t encodeHello(uint8_t *out, size_t cap, bool hasAdminKey, bool hasFences, uint8_t batteryPct);
 size_t encodeOwner(uint8_t *out, size_t cap, const OwnerInfo &o);
 bool decodeOwner(const uint8_t *buf, size_t len, OwnerInfo &o);
 

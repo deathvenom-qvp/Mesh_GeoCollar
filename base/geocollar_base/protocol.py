@@ -29,6 +29,7 @@ class MsgType(IntEnum):
     BREACH = 3
     COMMAND = 4
     OWNER = 5  # base -> collar: the dog's name and the owner's contact, for the lost beacon
+    HELLO = 6  # collar -> broadcast: runs GeoCollar, not adopted by a base yet
 
 
 class CommandAction(IntEnum):
@@ -131,6 +132,19 @@ def encode_owner(dog: str, owner: str, phone: str) -> bytes:
     return bytes(out)
 
 
+def decode_hello(data: bytes) -> dict:
+    if len(data) != 4 or data[0] != VERSION or data[1] != MsgType.HELLO:
+        raise ValueError("not a GeoCollar hello")
+    return {"has_admin_key": bool(data[2] & 1), "has_fences": bool(data[2] & 2),
+            "battery_pct": None if data[3] == 255 else data[3]}
+
+
+def encode_hello(has_admin_key: bool, has_fences: bool = False, battery_pct: int | None = None) -> bytes:
+    """For tests and simulators."""
+    return bytes([VERSION, MsgType.HELLO, (1 if has_admin_key else 0) | (2 if has_fences else 0),
+                  255 if battery_pct is None else battery_pct])
+
+
 def decode_owner(data: bytes) -> tuple[str, str, str]:
     if len(data) < 5 or data[0] != VERSION or data[1] != MsgType.OWNER:
         raise ValueError("not a GeoCollar owner message")
@@ -180,7 +194,7 @@ def encode_status(s: Status) -> bytes:
 
 
 def message_type(data: bytes) -> MsgType | None:
-    if len(data) < 2 or data[0] != VERSION or data[1] not in (1, 2, 3, 4, 5):
+    if len(data) < 2 or data[0] != VERSION or data[1] not in (1, 2, 3, 4, 5, 6):
         return None
     return MsgType(data[1])
 

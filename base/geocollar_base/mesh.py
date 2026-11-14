@@ -14,6 +14,11 @@ from . import protocol
 log = logging.getLogger(__name__)
 
 
+def _hops(packet: dict) -> int | None:
+    start, left = packet.get("hopStart"), packet.get("hopLimit")
+    return start - left if start is not None and left is not None else None
+
+
 class MeshLink:
     """Sends GeoCollar messages to collars and hands received status reports to a callback.
 
@@ -22,8 +27,10 @@ class MeshLink:
     this base node's public key is in the collar's admin keys.
     """
 
-    def __init__(self, on_status: Callable[[str, dict], None], serial_port: str = "", host: str = ""):
+    def __init__(self, on_status: Callable[[str, dict], None], serial_port: str = "", host: str = "",
+                 on_hello: Callable[[str, dict], None] | None = None):
         self.on_status = on_status
+        self.on_hello = on_hello
         self.serial_port = serial_port
         self.host = host
         self.iface = None
@@ -91,7 +98,19 @@ class MeshLink:
         if decoded.get("portnum") not in (protocol.PORT_NUM, str(protocol.PORT_NUM)):
             return
         data = decoded.get("payload") or b""
-        if protocol.message_type(data) not in (protocol.MsgType.STATUS, protocol.MsgType.BREACH):
+        kind = protocol.message_type(data)
+        if kind == protocol.MsgType.HELLO and self.on_hello:
+            try:
+                hello = protocol.decode_hello(data)
+            except ValueError:
+                return
+            node_id = packet.get("fromId") or f"!{packet['from']:08x}"
+            user = ((self.iface.nodes or {}).get(node_id) or {}).get("user", {}) if self.iface else {}
+            hello.update(long_name=user.get("longName", ""), short_name=user.get("shortName", ""),
+                         rssi=packet.get("rxRssi"), snr=packet.get("rxSnr"), hops=_hops(packet))
+            self.on_hello(node_id, hello)
+            return
+        if kind not in (protocol.MsgType.STATUS, protocol.MsgType.BREACH):
             return
         try:
             status = protocol.decode_status(data)
@@ -119,6 +138,23 @@ class MeshLink:
                 time.sleep(2)  # give the mesh room between chunks
             self._send(node_id, chunk)
         return len(chunks)
+
+    def base_info(self) -> dict:
+        """The base node's ID and public key (base64), for setting up collars."""
+        if not self.iface:
+            return {}
+        import base64
+
+        info = self.iface.getMyNodeInfo() or {}
+        user = info.get("user", {})
+        key = user.get("publicKey") or ""
+        if not key:
+            try:
+                raw = self.iface.localNode.localConfig.security.public_key
+                key = base64.b64encode(raw).decode() if raw else ""
+            except AttributeError:
+                key = ""
+        return {"node_id": user.get("id", ""), "long_name": user.get("longName", ""), "public_key": key}
 
     def send_owner(self, node_id: str, dog: str, owner: str, phone: str) -> None:
         """The dog's name and the owner's contact, for the collar's lost beacon."""

@@ -280,3 +280,130 @@ def test_firmware_api(client, tmp_path):
     assert c.post("/api/collars/!0000abcd/firmware/ota", json={"build": m["id"], "ip": "nope"}).status_code == 400
     j = c.post("/api/firmware/flash-usb", json={"build": m["id"], "port": "/dev/ttyUSB0"}).json()
     assert "base station" in wait_job(c, j["id"])["error"]
+
+
+def test_node_id_from_mac_while_flashing(tmp_path, monkeypatch):
+    assert fw.node_id_from_mac("34:85:18:AB:cd:01") == "!18abcd01"
+    assert fw.node_id_from_mac("nonsense") is None
+    store = fw.BuildStore(tmp_path)
+    make_build(tmp_path / "in")
+    m = store.add(tmp_path / "in", "release")
+    monkeypatch.setattr(fw, "serial_ports", lambda exclude="": [{"device": "/dev/ttyACM0"}])
+
+    def fake_run(job, cmd, on_line=None, **kw):
+        for line in ["Chip is ESP32-S3 (QFN56) (revision v0.2)", "MAC: 34:85:18:ab:cd:01", "Wrote 1 bytes"]:
+            on_line(line)
+
+    monkeypatch.setattr(fw, "_run", fake_run)
+    job = fw.Job("usb", "t")
+    r = fw.flash_usb(job, store, m["id"], "/dev/ttyACM0", "full")
+    assert r["node_id"] == "!18abcd01" and r["mac"] == "34:85:18:ab:cd:01"
+    assert any("Meshtastic node !18abcd01" in line for line in job.view()["log"])
+
+
+class FakeNode:
+    def __init__(self, admin_keys=(), bluetooth=False, public_key=b""):
+        from meshtastic.protobuf import channel_pb2, localonly_pb2
+
+        self.localConfig = localonly_pb2.LocalConfig()
+        self.localConfig.security.admin_key.extend(admin_keys)
+        self.localConfig.security.public_key = public_key
+        self.localConfig.bluetooth.enabled = bluetooth
+        self.channels = [channel_pb2.Channel(index=i) for i in range(8)]
+        self.calls = []
+
+    def beginSettingsTransaction(self):
+        self.calls.append("begin")
+
+    def commitSettingsTransaction(self):
+        self.calls.append("commit")
+
+    def writeConfig(self, name):
+        self.calls.append(f"config:{name}")
+
+    def writeChannel(self, i):
+        self.calls.append(f"channel:{i}")
+
+    def setOwner(self, long_name=None, short_name=None):
+        self.calls.append(f"owner:{long_name}/{short_name}")
+
+
+class FakeIface:
+    def __init__(self, node, num=0x18ABCD01):
+        self.localNode = node
+        self.num = num
+        self.closed = False
+
+    def getMyNodeInfo(self):
+        return {"num": self.num, "user": {"id": f"!{self.num:08x}"}}
+
+    def close(self):
+        self.closed = True
+
+
+def test_setup_collar_over_usb(monkeypatch):
+    from meshtastic.protobuf import channel_pb2, config_pb2
+
+    monkeypatch.setattr(fw.time, "sleep", lambda s: None)
+    base = FakeNode(public_key=b"B" * 32)
+    base.localConfig.lora.region = config_pb2.Config.LoRaConfig.RegionCode.US
+    base.localConfig.lora.modem_preset = config_pb2.Config.LoRaConfig.ModemPreset.MEDIUM_FAST
+    base.channels[0].role = channel_pb2.Channel.Role.PRIMARY
+    base.channels[0].settings.psk = b"\x01"
+    collar = FakeNode(admin_keys=[b"1" * 32, b"2" * 32, b"3" * 32])
+    iface = FakeIface(collar)
+    tries = []
+
+    def open_iface(port):
+        tries.append(port)
+        if len(tries) < 3:
+            raise OSError("still booting")
+        return iface
+
+    job = fw.Job("usb", "t")
+    r = fw.setup_collar(job, "/dev/ttyACM0", FakeIface(base, 0x11111111), "Rex the Dog", open_iface=open_iface)
+    assert r == {"node_id": "!18abcd01"} and len(tries) == 3 and iface.closed
+    keys = [bytes(k) for k in collar.localConfig.security.admin_key]
+    assert keys == [b"1" * 32, b"2" * 32, b"B" * 32]  # three at most: the last one gives way
+    assert collar.localConfig.lora.region == base.localConfig.lora.region
+    assert collar.localConfig.lora.modem_preset == base.localConfig.lora.modem_preset
+    assert collar.localConfig.bluetooth.enabled
+    assert collar.channels[0].settings.psk == b"\x01"
+    assert collar.calls[0] == "begin" and collar.calls[-1] == "commit"
+    assert "owner:Rex the Dog/RTD" in collar.calls and "config:security" in collar.calls
+
+    # Again: already trusted, nothing duplicated.
+    collar.calls.clear()
+    fw.setup_collar(fw.Job("usb", "t"), "/dev/ttyACM0", FakeIface(base), "", open_iface=lambda p: iface)
+    assert "config:security" not in collar.calls and len(collar.localConfig.security.admin_key) == 3
+
+    with pytest.raises(fw.FirmwareError, match="not connected"):
+        fw.setup_collar(fw.Job("usb", "t"), "/dev/ttyACM0", None)
+
+
+def test_new_collars_from_usb_browser_and_mesh(client, tmp_path, monkeypatch):
+    c, app = client
+    make_build(tmp_path / "in")
+    m = app.state.builds.add(tmp_path / "in", "release")
+
+    # Flashed from the browser, which read the MAC address: added as a new collar.
+    r = c.post("/api/firmware/flashed", json={"node_id": "!18ABCD01", "build": m["id"], "name": "Rex"}).json()
+    assert r["new_collar"] and r["collar"]["name"] == "Rex" and r["collar"]["firmware"]["build"] == m["id"]
+    r = c.post("/api/firmware/flashed", json={"node_id": "!18abcd01", "build": m["id"]}).json()
+    assert not r["new_collar"] and r["collar"]["name"] == "Rex"
+    assert c.post("/api/firmware/flashed", json={"node_id": "rex", "build": m["id"]}).status_code == 400
+
+    # Flashed on the base: the node ID comes from esptool's MAC line.
+    monkeypatch.setattr(fw, "flash_usb", lambda job, builds, b, port, mode, base_radio="": {"node_id": "!22222222", "mode": mode})
+    job = c.post("/api/firmware/flash-usb", json={"build": m["id"], "port": "/dev/ttyACM0", "mode": "full", "name": "Biscuit"}).json()
+    done = wait_job(c, job["id"])
+    assert done["state"] == "done" and done["result"]["new_collar"]
+    assert c.get("/api/collars").json()["!22222222"]["name"] == "Biscuit"
+
+    # Heard on the mesh: listed until added.
+    app.state.on_hello("!33333333", {"has_admin_key": False, "long_name": "Meshtastic 3333"})
+    app.state.on_hello("!18abcd01", {"has_admin_key": True})  # already on the base: ignored
+    found = c.get("/api/discovered").json()
+    assert list(found) == ["!33333333"] and found["!33333333"]["long_name"] == "Meshtastic 3333"
+    c.post("/api/collars", json={"node_id": "!33333333", "name": "Pip"})
+    assert c.get("/api/discovered").json() == {}

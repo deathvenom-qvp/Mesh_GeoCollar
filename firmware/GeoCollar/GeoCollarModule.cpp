@@ -52,6 +52,9 @@ constexpr const char *kStateFile = "/prefs/geocollar.bin";
 constexpr uint32_t kStateMagic = 0x47434F4C; // "GCOL"
 constexpr uint16_t kStateFormat = 5; // 2: GPS pacing settings; 3: per-zone bands; 4: pulse intervals; 5: owner
 constexpr uint32_t kBeaconRefreshMs = 10 * 1000; // re-apply the beacon advertisement this often
+// Until a base adopts the collar it says hello on the primary channel, so the base app can list it:
+// every minute for the first 15 minutes after boot, then every 15 minutes.
+constexpr uint32_t kHelloFastMs = 60 * 1000, kHelloSlowMs = 15 * 60 * 1000, kHelloFastForMs = 15 * 60 * 1000;
 
 /// Sends CaiXianLin frames on the data-line GPIO without blocking the Meshtastic scheduler:
 /// one frame per call to poll(), each started asynchronously on the RMT peripheral.
@@ -293,6 +296,8 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
         const uint32_t now = millis();
         const uint32_t interval =
             engine_.state() == CollarState::Lost ? GEOCOLLAR_LOST_STATUS_INTERVAL_MS : GEOCOLLAR_STATUS_INTERVAL_MS;
+        if (!baseNode_ && (lastHelloMs_ == 0 || now - lastHelloMs_ >= (now < kHelloFastForMs ? kHelloFastMs : kHelloSlowMs)))
+            sendHello();
         if (baseNode_ && now - lastStatusMs_ >= interval)
             sendStatus(engine_.state() == CollarState::Lost ? proto::MsgType::Breach : proto::MsgType::Status);
 
@@ -486,6 +491,21 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
         sendStatus(proto::MsgType::Status);
     }
 
+    void sendHello()
+    {
+        lastHelloMs_ = millis() | 1;
+        meshtastic_MeshPacket *p = allocDataPacket();
+        if (!p)
+            return;
+        p->to = NODENUM_BROADCAST;
+        p->want_ack = false;
+        const uint8_t battery = powerStatus ? powerStatus->getBatteryChargePercent() : 255;
+        p->decoded.payload.size = proto::encodeHello(p->decoded.payload.bytes, sizeof(p->decoded.payload.bytes),
+                                                     config.security.admin_key_count > 0, engine_.fences().zoneCount > 0, battery);
+        LOG_DEBUG("GeoCollar: hello, waiting for a base");
+        service->sendToMesh(p, RX_SRC_LOCAL, false);
+    }
+
     void sendStatus(proto::MsgType type)
     {
         if (!baseNode_)
@@ -587,6 +607,7 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
     uint32_t ownerGpsSecs_ = 0;
     uint32_t lastPacedSecs_ = UINT32_MAX; // nothing set yet: the first pass records the owner's value
     uint32_t lastStatusMs_ = 0;
+    uint32_t lastHelloMs_ = 0;
 };
 
 GeoCollarModule *geoCollarModule = nullptr;

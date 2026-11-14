@@ -30,7 +30,18 @@ connected, and hovering it shows the last error.
 
 ## Pairing a collar
 
-Collars only obey messages from base nodes they trust:
+The easy way: plug the new collar into the base machine, open **Collar firmware**, pick **USB on
+base**, type the dog's name, leave **Then set it up for this base** ticked and press **Flash** (or
+**Set up only** if it already runs GeoCollar). The base reads the collar's node ID from its chip,
+adds it, puts the base's public key in the collar's admin keys, and copies the base's LoRa
+settings and channels to it. Flashing from **USB on this computer** also adds the collar, but its
+Meshtastic settings then need the base's key by hand (below).
+
+A collar running GeoCollar that no base has adopted says hello on the mesh every minute for 15
+minutes after it starts, then every 15 minutes. If the base hears it (same LoRa settings and
+primary channel), it shows under Collars as **New**, with an **Add** button.
+
+By hand, collars only obey messages from base nodes they trust:
 
 1. In the Meshtastic app, open the base node and copy its **public key** (Settings > Security).
 2. On each collar, paste that key into **Admin key** (Settings > Security) and save.
@@ -61,6 +72,10 @@ Without a public channel, the message goes on your primary channel and only your
 read it. Your phone number goes out in the clear to anyone nearby, which is the point.
 
 ## Drawing fences
+
+To give a dog the same fences as another, pick the other collar in **Copy fences from another
+collar** (in the Fences section), then **Send to collar**.
+
 
 1. Select the collar. Switch the map to **Satellite** (top right) if it isn't already.
 2. Press **+ Keep-in zone** and click each corner of the yard, then click the first corner or

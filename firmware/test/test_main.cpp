@@ -502,12 +502,15 @@ static void testBeacon()
     strcpy(o.owner, "Ken");
     strcpy(o.phone, "555-123-4567");
     uint8_t buf[100];
-    const size_t n = encodeOwner(buf, sizeof(buf), o);
+    size_t n = encodeOwner(buf, sizeof(buf), o);
     CHECK(n == 2 + 1 + 3 + 1 + 3 + 1 + 12);
     CHECK(hex(buf, n) == "0205035265780" "34b656e0c3535352d3132332d34353637");
     MsgType t;
     CHECK(messageType(buf, n, t) && t == MsgType::Owner);
     CHECK(decodeOwner(buf, n, back) && strcmp(back.dog, "Rex") == 0 && strcmp(back.phone, "555-123-4567") == 0);
+    CHECK(encodeHello(buf, sizeof(buf), true, false, 87) == kHelloSize && hex(buf, kHelloSize) == "02060157");
+    CHECK(messageType(buf, kHelloSize, t) && t == MsgType::Hello);
+    n = encodeOwner(buf, sizeof(buf), o);
     buf[3] = '\n'; // control characters are refused
     CHECK(!decodeOwner(buf, n, back));
     CHECK(!decodeOwner(buf, n - 1, back));
