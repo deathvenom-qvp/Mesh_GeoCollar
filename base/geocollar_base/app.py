@@ -20,6 +20,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from . import firmware as fw
+from . import geo
 from . import protocol
 from .mesh import MeshLink
 from .sim import Simulator
@@ -37,6 +38,7 @@ def load_settings() -> dict:
         "mesh_host": os.environ.get("GEOCOLLAR_MESH_HOST", ""),
         "firmware_repo": os.environ.get("GEOCOLLAR_FIRMWARE_REPO", fw.DEFAULT_REPO),
         "ota_subnet": os.environ.get("GEOCOLLAR_OTA_SUBNET", ""),
+        "home": os.environ.get("GEOCOLLAR_HOME", ""),  # "lat, lon"; else Home Assistant's home
     }
     options = Path(settings["data_dir"]) / "options.json"
     if options.exists():
@@ -291,6 +293,24 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
         if found.pop(body.node_id, None) is not None:
             store.set_setting("discovered", found)
         return c
+
+    # -- Map: address search and the home location ---------------------------------------------
+    geocoder = geo.Geocoder()
+    app.state.geocoder = geocoder
+
+    @app.get("/api/geocode")
+    def geocode(q: str, west: float | None = None, south: float | None = None, east: float | None = None,
+                north: float | None = None):
+        vb = (west, south, east, north) if None not in (west, south, east, north) else None
+        try:
+            return {"results": geocoder.search(q, vb)}
+        except geo.GeoError as e:
+            raise HTTPException(400 if "characters" in str(e) or "long" in str(e) else 502, str(e)) from e
+
+    @app.get("/api/home")
+    def home():
+        """Where to start the map: the app option, else Home Assistant's home, else nothing."""
+        return geo.parse_home(settings.get("home", "")) or geo.ha_home() or {}
 
     @app.get("/api/discovered")
     def discovered():

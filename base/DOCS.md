@@ -71,6 +71,13 @@ public channel (LongFast with the default key) on the collar, at least as a seco
 Without a public channel, the message goes on your primary channel and only your own nodes can
 read it. Your phone number goes out in the clear to anyone nearby, which is the point.
 
+## Finding your place on the map
+
+Type an address in the search box at the top right of the map and press Enter. The map starts
+at Home Assistant's home location (Settings > System > General) and the ⌂ button returns there;
+the **Home location** option overrides it. Searches go to OpenStreetMap's Nominatim service, so
+the base needs internet access for them.
+
 ## Drawing fences
 
 To give a dog the same fences as another, pick the other collar in **Copy fences from another

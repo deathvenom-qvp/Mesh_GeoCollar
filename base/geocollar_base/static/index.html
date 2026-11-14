@@ -168,6 +168,15 @@
   .legend { background: var(--bg); color: var(--fg); padding: 6px 9px; border-radius: 8px; box-shadow: var(--shadow); font-size: 12px; line-height: 1.7; }
   .legend i { display: inline-block; width: 12px; height: 12px; border-radius: 3px; margin-right: 6px; vertical-align: -1px; }
   .leaflet-bar a.locate { font-size: 18px; line-height: 30px; }
+  .mapsearch { background: var(--bg); color: var(--fg); border-radius: 8px; box-shadow: var(--shadow); width: min(320px, calc(100vw - 110px)); }
+  .mapsearch form { display: flex; gap: 4px; padding: 4px; }
+  .mapsearch input { flex: 1; min-width: 0; border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; background: var(--bg); color: var(--fg); font: inherit; font-size: 13px; }
+  .mapsearch button { border: 0; background: var(--accent); color: #fff; border-radius: 6px; padding: 0 10px; cursor: pointer; font-size: 13px; }
+  .mapsearch ul { list-style: none; margin: 0; padding: 0 4px 4px; max-height: 50vh; overflow: auto; }
+  .mapsearch li button { display: block; width: 100%; text-align: left; background: none; color: var(--fg); padding: 6px; border-radius: 6px; font-size: 12px; line-height: 1.35; }
+  .mapsearch li button:hover, .mapsearch li button:focus { background: color-mix(in srgb, var(--accent) 14%, transparent); }
+  .mapsearch .note { padding: 2px 8px 6px; font-size: 12px; color: var(--muted, #666); }
+  .mapsearch .credit { padding: 0 8px 6px; font-size: 10px; opacity: .7; }
   .dog { position: relative; }
   .dog .pin { width: 22px; height: 22px; border-radius: 50%; border: 3px solid #fff; background: var(--c, var(--idle)); box-shadow: 0 1px 4px rgba(0,0,0,.45); }
   .dog.stale .pin { opacity: .5; }
@@ -515,6 +524,49 @@ const baseLayers = {
 let baseName = 'Satellite';
 try { baseName = localStorage.getItem('geocollar.base') || baseName; } catch {}
 (baseLayers[baseName] || baseLayers.Satellite).addTo(map);
+// Address search (OpenStreetMap Nominatim, through the base). Searches on Enter only, as
+// Nominatim's usage policy asks.
+let searchMarker = null;
+const Search = L.Control.extend({
+  options: { position: 'topright' },
+  onAdd() {
+    const box = L.DomUtil.create('div', 'mapsearch');
+    const input = el('input', { type: 'search', placeholder: 'Search address or place', 'aria-label': 'Search for an address', enterkeyhint: 'search' });
+    const list = el('ul', { role: 'listbox' });
+    const note = el('div', { class: 'note', role: 'status' });
+    const go = r => {
+      list.replaceChildren(); note.textContent = '';
+      if (r.bbox) map.fitBounds([[r.bbox[0], r.bbox[2]], [r.bbox[1], r.bbox[3]]], { maxZoom: 19 });
+      else map.setView([r.lat, r.lon], 18);
+      if (searchMarker) searchMarker.remove();
+      searchMarker = L.marker([r.lat, r.lon], { pmIgnore: true, snapIgnore: true, keyboard: false, title: r.name })
+        .bindPopup(el('div', {}, r.name, el('br'), el('button', { class: 'link', onclick: () => { searchMarker.remove(); searchMarker = null; } }, 'Remove pin')))
+        .addTo(map);
+    };
+    const form = el('form', { onsubmit: async e => {
+      e.preventDefault();
+      const q = input.value.trim();
+      if (q.length < 3) { note.textContent = 'Type at least 3 characters.'; return; }
+      note.textContent = 'Searching…'; list.replaceChildren();
+      const b = map.getBounds(), p = new URLSearchParams({ q });
+      if (map.getZoom() >= 8) p.set('west', b.getWest()), p.set('south', b.getSouth()), p.set('east', b.getEast()), p.set('north', b.getNorth());
+      try {
+        const { results } = await api(`geocode?${p}`);
+        if (!results.length) { note.textContent = 'Nothing found. Try adding the town or postcode.'; return; }
+        if (results.length === 1) { go(results[0]); return; }
+        note.textContent = '';
+        list.replaceChildren(...results.map(r => el('li', {}, el('button', { type: 'button', onclick: () => go(r) }, r.name))),
+          el('li', { class: 'credit' }, 'Search by OpenStreetMap Nominatim'));
+      } catch (err) { note.textContent = err.message; }
+    } }, input, el('button', { 'aria-label': 'Search' }, 'Go'));
+    input.addEventListener('keydown', e => { if (e.key === 'Escape') { list.replaceChildren(); note.textContent = ''; } });
+    box.append(form, note, list);
+    L.DomEvent.disableClickPropagation(box);
+    L.DomEvent.disableScrollPropagation(box);
+    return box;
+  },
+});
+new Search().addTo(map);
 L.control.layers(baseLayers, null, { position: 'topright' }).addTo(map);
 map.on('baselayerchange', e => { try { localStorage.setItem('geocollar.base', e.name); } catch {} });
 
@@ -525,11 +577,24 @@ const Locate = L.Control.extend({
     const a = L.DomUtil.create('a', 'locate', bar);
     a.href = '#'; a.title = 'Go to my location'; a.setAttribute('role', 'button'); a.textContent = '◎';
     L.DomEvent.on(a, 'click', e => { L.DomEvent.preventDefault(e); map.locate({ setView: true, maxZoom: 18 }); });
+    const h = L.DomUtil.create('a', 'locate', bar);
+    h.href = '#'; h.title = 'Go home'; h.setAttribute('role', 'button'); h.textContent = '⌂'; h.id = 'homeBtn';
+    L.DomEvent.on(h, 'click', async e => {
+      L.DomEvent.preventDefault(e);
+      const home = await getHome();
+      if (home) map.setView([home.lat, home.lon], 18);
+      else say('No home location: set one in Home Assistant (Settings > System > General) or in the app options.');
+    });
     L.DomEvent.disableClickPropagation(bar);
     return bar;
   },
 });
 new Locate().addTo(map);
+let homeLoc;
+async function getHome() {
+  if (homeLoc === undefined) { try { const h = await api('home'); homeLoc = h && h.lat != null ? h : null; } catch { homeLoc = null; } }
+  return homeLoc;
+}
 map.on('locationerror', () => say('Could not get your location from the browser.'));
 
 const Legend = L.Control.extend({
@@ -1244,7 +1309,7 @@ async function refresh() {
     const ids = Object.keys(collars);
     if (ids.length === 1) select(ids[0]);
     else if (dogLayer.getLayers().length) map.fitBounds(dogLayer.getBounds(), { maxZoom: 18, padding: [60, 60] });
-    else if (!ids.length) map.locate({ setView: true, maxZoom: 17 });
+    else if (!ids.length || map.getZoom() < 5) getHome().then(h => h ? map.setView([h.lat, h.lon], 18) : map.locate({ setView: true, maxZoom: 17 }));
   }
 }
 

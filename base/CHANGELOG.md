@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.11.0
+
+- Address search on the map (top right): type an address or place and press Enter. Looked up
+  with OpenStreetMap's Nominatim through the base.
+- The map starts at your Home Assistant home location (Settings > System > General) when there
+  are no collars to show, and a ⌂ button under ◎ goes back there. Outside Home Assistant, set
+  `GEOCOLLAR_HOME` (or the **Home location** option) to "latitude, longitude".
+
 ## 0.10.0
 
 - New collars find themselves. Flashing over USB (on the base or from this computer) reads the

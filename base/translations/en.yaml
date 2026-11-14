@@ -19,5 +19,10 @@ configuration:
     description: >-
       For Wi-Fi updates, the network the collar joins, such as 192.168.1.0/24. Leave empty to
       use this machine's own network.
+  home:
+    name: Home location
+    description: >-
+      Where the map starts, as "latitude, longitude". Leave empty to use Home Assistant's own
+      home location (Settings > System > General).
 network:
   8099/tcp: Web page without Home Assistant login. Leave empty unless you need it.
