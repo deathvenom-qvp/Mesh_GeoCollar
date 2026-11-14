@@ -30,8 +30,8 @@ class FakeLink:
     def close(self):
         pass
 
-    def send_fences(self, node_id, zones, version):
-        chunks = protocol.fence_chunks(zones, version)
+    def send_fences(self, node_id, zones, version, pulses=None):
+        chunks = protocol.fence_chunks(zones, version, pulses)
         self.sent += [(node_id, c) for c in chunks]
         return len(chunks)
 
@@ -104,4 +104,4 @@ def test_fence_properties_validated(tmp_path):
 
     # An empty set clears the collar's fences.
     r = client.put("/api/collars/!a1b2c3d4/fences", json={"type": "FeatureCollection", "features": []})
-    assert r.status_code == 200 and link.sent[-1][1][6:] == b"\x00"
+    assert r.status_code == 200 and link.sent[-1][1][6:] == b"\x00\x00\x00"

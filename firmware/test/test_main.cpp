@@ -171,24 +171,37 @@ static void testStateMachine()
     d = e.onFix(fixAt(-20, 100, t += 1000, 150, 3));
     CHECK(d.fixRejected);
 
-    // Outside, shock disabled by default: vibrate only.
+    // Past the line: corrections stop straight away.
     d = e.onFix(fixAt(-5, 100, t += 1000));
-    CHECK(e.state() == CollarState::Outside && d.correction == Correction::Vibrate);
+    CHECK(e.state() == CollarState::Outside && d.correction == Correction::None && d.sendStatus);
     d = e.onFix(fixAt(-8, 100, t += 1000));
-    CHECK(d.correction == Correction::Vibrate);
+    CHECK(d.correction == Correction::None);
     // Third consecutive outside fix: lost. Breach sent, corrections stop.
     d = e.onFix(fixAt(-12, 100, t += 1000));
     CHECK(e.state() == CollarState::Lost && d.sendBreach && d.correction == Correction::None);
     d = e.onFix(fixAt(-40, 100, t += 1000));
     CHECK(d.correction == Correction::None && !d.sendBreach);
 
-    // Coming back: needs rearmFixes good fixes at least rearmMarginM inside.
-    d = e.onFix(fixAt(2, 100, t += 1000)); // inside but not by 5 m
-    CHECK(e.state() == CollarState::Lost);
+    // Coming back: needs rearmFixes good fixes clear of every band (10 m here).
+    d = e.onFix(fixAt(8, 100, t += 1000)); // inside, but still in the attention band
+    CHECK(e.state() == CollarState::Lost && d.correction == Correction::None);
     e.onFix(fixAt(20, 100, t += 1000));
     e.onFix(fixAt(20, 100, t += 1000));
     d = e.onFix(fixAt(20, 100, t += 1000));
     CHECK(e.state() == CollarState::Inside && d.sendStatus);
+
+    // A short trip past the line (not long enough to be lost): silent on the way back in through
+    // the bands, and only corrected again once clear of them all.
+    d = e.onFix(fixAt(-2, 100, t += 1000));
+    CHECK(e.state() == CollarState::Outside && d.correction == Correction::None);
+    d = e.onFix(fixAt(3, 100, t += 1000)); // warning band, coming back
+    CHECK(e.state() == CollarState::Warning && d.correction == Correction::None);
+    d = e.onFix(fixAt(8, 100, t += 1000)); // attention band
+    CHECK(d.correction == Correction::None);
+    d = e.onFix(fixAt(30, 100, t += 1000)); // clear: re-armed
+    CHECK(e.state() == CollarState::Inside);
+    d = e.onFix(fixAt(8, 100, t += 1000));
+    CHECK(d.correction == Correction::Beep);
 }
 
 static void testGpsPacing()
@@ -224,31 +237,36 @@ static void testShockCaps()
     s.maxShocksPerBreach = 2;
     s.maxShocksPerHour = 3;
 
+    // 1.5 m inside the line: in the danger band.
     uint32_t t = 0;
-    Decision d = e.onFix(fixAt(-5, 100, t += 1000));
+    Decision d = e.onFix(fixAt(1.5, 100, t += 1000));
     CHECK(d.correction == Correction::Shock && d.intensity == 30); // capped level
-    d = e.onFix(fixAt(-5, 100, t += 1000));
+    d = e.onFix(fixAt(1.5, 100, t += 1000));
     CHECK(d.correction == Correction::Shock);
-    d = e.onFix(fixAt(-5, 100, t += 1000));
+    d = e.onFix(fixAt(1.5, 100, t += 1000));
     CHECK(d.correction == Correction::Vibrate); // per-breach cap reached
 
-    // Back inside resets the per-breach count, but the hourly cap (3) still applies.
+    // Back clear resets the per-breach count, but the hourly cap (3) still applies.
     e.onFix(fixAt(100, 100, t += 1000));
-    d = e.onFix(fixAt(-5, 100, t += 1000));
+    d = e.onFix(fixAt(1.5, 100, t += 1000));
     CHECK(d.correction == Correction::Shock);
     e.onFix(fixAt(100, 100, t += 1000));
-    d = e.onFix(fixAt(-5, 100, t += 1000));
+    d = e.onFix(fixAt(1.5, 100, t += 1000));
     CHECK(d.correction == Correction::Vibrate); // 3 shocks in the last hour
 
     // An hour later shocks are allowed again.
     e.onFix(fixAt(100, 100, t += 3600000));
-    d = e.onFix(fixAt(-5, 100, t += 1000));
+    d = e.onFix(fixAt(1.5, 100, t += 1000));
     CHECK(d.correction == Correction::Shock);
+
+    // Never a shock past the line.
+    d = e.onFix(fixAt(-1, 100, t += 1000));
+    CHECK(d.correction == Correction::None);
 
     // Corrections off: nothing at all.
     s.correctionsEnabled = false;
     e.onFix(fixAt(100, 100, t += 1000));
-    d = e.onFix(fixAt(-5, 100, t += 1000));
+    d = e.onFix(fixAt(1.5, 100, t += 1000));
     CHECK(d.correction == Correction::None);
 }
 
@@ -278,7 +296,7 @@ static void testBands()
     f.zones[0] = square(ZoneKind::KeepIn, 0, 4, 6);
     soft.setFences(f);
     CHECK(soft.onFix(fixAt(1, 100, t += 1000)).correction == Correction::Vibrate);
-    CHECK(soft.onFix(fixAt(-3, 100, t += 1000)).correction == Correction::Vibrate);
+    CHECK(soft.onFix(fixAt(-3, 100, t += 1000)).correction == Correction::None);
 
     // Shock disabled on the collar: a danger band vibrates instead.
     FenceEngine off;
@@ -300,6 +318,41 @@ static void testBands()
     CHECK(two.onFix(fixAt(110, 30, t += 1000)).correction == Correction::None); // 30 m from both
     CHECK(two.onFix(fixAt(110, 52, t += 1000)).correction == Correction::Beep);  // 8 m from the pond
     CHECK(two.onFix(fixAt(110, 57, t += 1000)).correction == Correction::Vibrate);
+}
+
+static void testPulser()
+{
+    FenceSet f;
+    f.beepPulseS = 3;
+    f.vibratePulseS = 2;
+    CorrectionPulser p;
+    uint8_t level = 0;
+    Decision beep;
+    beep.correction = Correction::Beep;
+    Decision buzz;
+    buzz.correction = Correction::Vibrate;
+    buzz.intensity = 50;
+
+    CHECK(p.onDecision(beep, f, 10000));                                       // new: fire now
+    CHECK(p.poll(f, 11000, true, level) == Correction::None);                  // too soon
+    CHECK(p.poll(f, 13000, true, level) == Correction::Beep);                  // 3 s later
+    CHECK(!p.onDecision(beep, f, 14000));                                      // fix 1 s after a pulse: wait
+    CHECK(p.poll(f, 16000, true, level) == Correction::Beep);
+    CHECK(p.onDecision(buzz, f, 16500));                                       // escalation fires at once
+    CHECK(p.poll(f, 18500, true, level) == Correction::Vibrate && level == 50); // every 2 s
+    CHECK(p.poll(f, 19000, false, level) == Correction::None);                 // corrections off: stops
+    CHECK(p.poll(f, 21000, true, level) == Correction::None);                  // and stays stopped
+    CHECK(p.onDecision(buzz, f, 22000));
+    CHECK(p.poll(f, 22000 + CorrectionPulser::kStaleMs + 1, true, level) == Correction::None); // no fresh fix
+    Decision none;
+    p.onDecision(buzz, f, 60000);
+    CHECK(!p.onDecision(none, f, 61000));                                      // clear: nothing,
+    CHECK(p.poll(f, 70000, true, level) == Correction::None);                  // and pulsing ends
+
+    FenceSet once; // pulse 0: once per fix, no repeats
+    CorrectionPulser q;
+    CHECK(q.onDecision(beep, once, 1000) && q.onDecision(beep, once, 1500));
+    CHECK(q.poll(once, 9000, true, level) == Correction::None);
 }
 
 // --------------------------------------------------------------------------------------------
@@ -340,7 +393,7 @@ static void testProtocol()
     }
     uint8_t blob[kMaxFenceBlob];
     const size_t blobLen = encodeFenceSet(blob, sizeof(blob), f);
-    CHECK(blobLen == 1 + (6 + 4 * 8) + (6 + 32 * 8));
+    CHECK(blobLen == 3 + (6 + 4 * 8) + (6 + 32 * 8));
 
     const uint8_t count = (blobLen + kMaxChunkData - 1) / kMaxChunkData;
     CHECK(count == 2);
@@ -364,8 +417,11 @@ static void testProtocol()
     FenceSet one;
     one.zoneCount = 1;
     one.zones[0] = square(ZoneKind::KeepIn, 3, 5, 7);
+    one.beepPulseS = 4;
+    one.vibratePulseS = 2;
     n = encodeFenceSet(buf, sizeof(buf), one);
-    CHECK(hex(buf, n) == "01" "00" "04" "03" "05" "07" "00" // 1 zone: keep-in, 4 vertices, bands 3/5/7 m
+    CHECK(hex(buf, n) == "01" "04" "02"                 // 1 zone, beep every 4 s, vibrate every 2 s
+                         "00" "04" "03" "05" "07" "00" // keep-in, 4 vertices, bands 3/5/7 m
                          "0084d717" "80e84bd3" // 40.0000000, -75.0000000
                          "0084d717" "a0364cd3" // 40.0000000, -74.9980000
                          "20d2d717" "a0364cd3" // 40.0020000, -74.9980000
@@ -386,6 +442,7 @@ int main()
     testStateMachine();
     testShockCaps();
     testBands();
+    testPulser();
     testGpsPacing();
     testProtocol();
     std::printf("%d checks, %d failures\n", checks, failures);

@@ -42,16 +42,38 @@ def test_walk_out_matches_firmware_rules():
     assert sim.engine.state == S.INSIDE
 
 
-def test_shock_only_with_a_danger_band_and_capped_per_breach():
-    out = _move(40.0, -75.0, 90, 105)  # 5 m past the east edge
-    for danger, expected in ((3, 2), (0, 0)):
-        sim = walker()
-        sim.set_fences([protocol.Zone(YARD.kind, danger, 5, 5, YARD.vertices)], 8)
-        sim.update({"shock_enabled": True, "lat": out[0], "lon": out[1]})
-        for t in range(5):
-            sim.step(1.0, now=t)
-        shocks = [e for e in sim.events if e["kind"] == "shock"]
-        assert len(shocks) == expected and sim.engine.state == S.LOST
+def test_no_corrections_past_the_line_and_quiet_until_clear():
+    out = _move(40.0, -75.0, 90, 102)  # 2 m past the east edge
+    sim = walker()
+    sim.set_fences([protocol.Zone(YARD.kind, 3, 5, 5, YARD.vertices)], 8)
+    sim.update({"shock_enabled": True, "lat": out[0], "lon": out[1]})
+    sim.step(1.0, now=1)
+    assert sim.engine.state == S.OUTSIDE
+    # Back inside, through the danger and warning bands: silent.
+    for t, metres_in in enumerate((1.5, 6, 11), start=2):
+        lat, lon = _move(40.0, -75.0, 90, 100 - metres_in)
+        sim.update({"lat": lat, "lon": lon})
+        sim.step(0, now=t)
+    kinds = [e["kind"] for e in sim.events]
+    assert not {"shock", "vibrate", "beep"} & set(kinds) and sim.engine.state == S.WARNING
+    # Clear of every band: corrections come back.
+    sim.update({"lat": 40.0, "lon": -75.0})
+    sim.step(0, now=10)
+    lat, lon = _move(40.0, -75.0, 90, 100 - 11)
+    sim.update({"lat": lat, "lon": lon})
+    sim.step(0, now=11)
+    assert sim.events[0]["kind"] == "beep"
+
+
+def test_pulses_repeat_beeps():
+    sim = walker()
+    sim.set_fences([YARD], 7, protocol.Pulses(beep_s=2, vibrate_s=3))
+    lat, lon = _move(40.0, -75.0, 90, 100 - 8)  # attention band
+    sim.update({"lat": lat, "lon": lon})
+    for t in range(7):
+        sim.step(0, now=100 + t)
+    beeps = [e for e in sim.events if e["kind"] == "beep"]
+    assert len(beeps) == 4  # at 0, 2, 4 and 6 s
 
 
 def test_danger_band_inside_the_line_shocks():
@@ -62,8 +84,8 @@ def test_danger_band_inside_the_line_shocks():
         lat, lon = _move(40.0, -75.0, 90, 100 - metres_in)
         sim.update({"lat": lat, "lon": lon})
         sim.step(0, now=t)
-    kinds = [e["kind"] for e in reversed(sim.events)]
-    assert kinds[-3:] == ["beep", "vibrate", "shock"] and sim.engine.state == S.WARNING
+    kinds = [e["kind"] for e in reversed(sim.events) if e["kind"] != "fences"]
+    assert kinds == ["beep", "vibrate", "shock"] and sim.engine.state == S.WARNING
 
 
 def test_sim_api_flow(tmp_path):

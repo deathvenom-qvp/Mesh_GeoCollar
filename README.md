@@ -34,13 +34,15 @@ The line you draw is the outer edge of three bands inside it, each with its own 
 | Warning | Vibrate. |
 | Danger (next to the line, optional) | Shock, only if shock is enabled on the collar, capped per breach and per hour; otherwise vibrate. Turn the danger band off and the zone never shocks. |
 
+Beeps and vibrations can repeat every 2 to 10 seconds while the dog stays in a band.
+
 | State | Collar does |
 | --- | --- |
 | Inside, clear of every band | Nothing; reports status every 10 minutes. |
 | Warning (inside, in any band) | The band's correction, above. |
-| Outside (not yet confirmed) | Keeps correcting: shock only if the zone has a danger band and shock is enabled; otherwise vibrate. |
+| Outside (not yet confirmed) | **Stops all corrections** at once. They stay off, even through the bands on the way back, until the dog is inside and clear of every band. |
 | Lost (3 good fixes outside) | **Stops all corrections**, sends a breach alert, reports position every 30 s. |
-| Back inside by 5 m for 3 fixes | Re-arms. |
+| Back inside, clear of every band, for 3 fixes | Re-arms. |
 
 Fixes with poor PDOP or few satellites are ignored entirely.
 

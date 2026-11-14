@@ -115,6 +115,7 @@ void FenceEngine::setFences(const FenceSet &fences)
     outsideCount_ = 0;
     rearmCount_ = 0;
     shocksThisBreach_ = 0;
+    quiet_ = false;
     state_ = fences_.zoneCount ? CollarState::Inside : CollarState::NoFence;
 }
 
@@ -131,6 +132,7 @@ void FenceEngine::clearLost()
     outsideCount_ = 0;
     rearmCount_ = 0;
     shocksThisBreach_ = 0;
+    quiet_ = false;
 }
 
 bool FenceEngine::fixIsGood(const Fix &fix) const
@@ -177,7 +179,7 @@ Decision FenceEngine::onFix(const Fix &fix)
     // Every zone has its own bands; the most severe band over all zones decides.
     float c = 1e9f;
     Band band = Band::Clear;
-    bool shockBand = false; // outside or in danger of a zone that has a danger band
+    bool shockBand = false; // in the danger band of a zone that has one
     for (size_t i = 0; i < fences_.zoneCount && i < kMaxZones; i++) {
         const Zone &z = fences_.zones[i];
         const float zd = signedDistanceM(z, fix.latI, fix.lonI);
@@ -186,18 +188,19 @@ Decision FenceEngine::onFix(const Fix &fix)
         const Band b = bandFor(z, zd);
         if (b > band)
             band = b;
-        if ((b == Band::Danger || b == Band::Outside) && z.dangerM > 0)
+        if (b == Band::Danger && z.dangerM > 0)
             shockBand = true;
     }
     d.clearanceM = c;
 
-    // Lost: never correct; just watch for the dog coming back well inside.
+    // Lost: never correct; just watch for the dog coming all the way back in.
     if (state_ == CollarState::Lost) {
-        if (c >= settings_.rearmMarginM) {
+        if (band == Band::Clear) {
             if (++rearmCount_ >= settings_.rearmFixes) {
                 rearmCount_ = 0;
                 outsideCount_ = 0;
                 shocksThisBreach_ = 0;
+                quiet_ = false;
                 setState(CollarState::Inside, d);
             }
         } else {
@@ -206,45 +209,38 @@ Decision FenceEngine::onFix(const Fix &fix)
         return d;
     }
 
+    if (band == Band::Outside) {
+        // Past the line: stop correcting at once. Correcting a dog that is out (or on its way
+        // back) teaches the wrong thing. Stay quiet until it is clear of every band again.
+        quiet_ = true;
+        outsideCount_++;
+        if (outsideCount_ >= settings_.lostConfirmFixes) {
+            setState(CollarState::Lost, d);
+            d.sendBreach = true;
+            return d;
+        }
+        setState(CollarState::Outside, d);
+        return d;
+    }
+
+    outsideCount_ = 0;
     if (band == Band::Clear) {
-        outsideCount_ = 0;
         shocksThisBreach_ = 0;
+        quiet_ = false;
         setState(CollarState::Inside, d);
         return d;
     }
 
-    if (band != Band::Outside) {
-        // Inside, in a band: beep, then vibrate, then (danger band) shock.
-        outsideCount_ = 0;
-        setState(CollarState::Warning, d);
-        if (settings_.correctionsEnabled) {
-            if (band == Band::Attention) {
-                d.correction = Correction::Beep;
-            } else if (band == Band::Danger && shockBand) {
-                correctHard(d, fix.nowMs);
-            } else {
-                d.correction = Correction::Vibrate;
-                d.intensity = settings_.vibrateLevel;
-            }
-        }
+    // Inside, in a band: beep, then vibrate, then (danger band) shock. Silent while coming back
+    // in after being past the line.
+    setState(CollarState::Warning, d);
+    if (quiet_ || !settings_.correctionsEnabled)
         return d;
-    }
-
-    // Outside the line.
-    outsideCount_++;
-    if (outsideCount_ >= settings_.lostConfirmFixes) {
-        setState(CollarState::Lost, d);
-        d.sendBreach = true;
-        return d; // no correction once lost
-    }
-
-    setState(CollarState::Outside, d);
-    if (!settings_.correctionsEnabled)
-        return d;
-    if (shockBand) {
+    if (band == Band::Attention) {
+        d.correction = Correction::Beep;
+    } else if (band == Band::Danger && shockBand) {
         correctHard(d, fix.nowMs);
     } else {
-        // The crossed zone has no danger band: never shock for it.
         d.correction = Correction::Vibrate;
         d.intensity = settings_.vibrateLevel;
     }
@@ -291,6 +287,49 @@ uint32_t gpsIntervalSecs(const Settings &s, CollarState state, float clearanceM,
     if (secs >= (float)slow)
         return slow;
     return (uint32_t)secs;
+}
+
+// ---------------------------------------------------------------------------------------------
+
+bool CorrectionPulser::onDecision(const Decision &d, const FenceSet &f, uint32_t nowMs)
+{
+    fixMs_ = nowMs;
+    const bool repeatable = d.correction == Correction::Beep || d.correction == Correction::Vibrate;
+    if (!repeatable) {
+        // Shock is never repeated between fixes, and None ends any pulsing.
+        current_ = Correction::None;
+        return d.correction != Correction::None;
+    }
+    const uint8_t period = periodFor(d.correction, f);
+    const bool changed = d.correction != current_;
+    current_ = d.correction;
+    intensity_ = d.intensity;
+    if (period == 0 || changed || nowMs - lastMs_ >= period * 1000u) {
+        lastMs_ = nowMs;
+        return true;
+    }
+    return false; // a pulse went out recently; the next one is on the pulse timer
+}
+
+Correction CorrectionPulser::poll(const FenceSet &f, uint32_t nowMs, bool allowed, uint8_t &intensity)
+{
+    if (current_ == Correction::None)
+        return Correction::None;
+    if (!allowed || nowMs - fixMs_ > kStaleMs) {
+        current_ = Correction::None; // corrections switched off, or no fresh fix: stop pulsing
+        return Correction::None;
+    }
+    const uint8_t period = periodFor(current_, f);
+    if (period == 0 || nowMs - lastMs_ < period * 1000u)
+        return Correction::None;
+    lastMs_ = nowMs;
+    intensity = intensity_;
+    return current_;
+}
+
+uint8_t CorrectionPulser::periodFor(Correction c, const FenceSet &f)
+{
+    return c == Correction::Beep ? f.beepPulseS : c == Correction::Vibrate ? f.vibratePulseS : 0;
 }
 
 } // namespace geocollar

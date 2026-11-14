@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.0
+
+- Band colours: attention light blue, warning yellow, danger red.
+- Repeat beep and vibrate every 2 to 10 seconds while the dog stays in a band.
+- Past the line the collar stops all corrections, and stays quiet until the dog is back inside
+  and clear of every band. Needs the matching collar firmware.
+
 ## 0.4.0
 
 - Each zone now has three bands inside its line: danger (shock), warning (vibrate) and attention

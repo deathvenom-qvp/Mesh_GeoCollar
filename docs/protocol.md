@@ -30,6 +30,8 @@ a **fence set**:
 | Size | Field |
 | --- | --- |
 | 1 | zone count (0..4) |
+| 1 | beep pulse: repeat beep every this many seconds while in the attention band (0 = once per GPS fix, else 2..10) |
+| 1 | vibrate pulse: same for vibrate (0, or 2..10) |
 | per zone: 1 | kind: 0 keep-in, 1 keep-out |
 | per zone: 1 | vertex count (3..32) |
 | per zone: 1 | danger band width, metres (0 = no danger band, never shock for this zone) |
@@ -48,9 +50,10 @@ allowed side (inwards for keep-in, outwards for keep-out):
 | attention | to danger + warning + attention | beep |
 | clear | beyond that | nothing |
 
-Past the line the collar keeps correcting (shock only if the zone has a danger band) until it has
-3 good fixes outside, then switches to lost mode and stops correcting. With several zones, the
-most severe band of any zone wins.
+Past the line the collar stops correcting at once. After 3 good fixes outside it switches to lost
+mode. Either way it stays silent, even while coming back in through the bands, until the dog is
+inside and clear of every band (lost mode needs 3 such fixes). With several zones, the most severe
+band of any zone wins.
 
 The collar saves a complete set to flash and reports its fence version in every Status, so the
 base can resend until the versions match.

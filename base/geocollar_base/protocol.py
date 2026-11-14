@@ -16,6 +16,8 @@ MAX_ZONES = 4
 MAX_VERTICES = 32
 MAX_CHUNKS = 8
 MAX_BAND_M = 255  # each band width is one byte on the wire
+MAX_PULSE_S = 10
+MIN_PULSE_S = 2
 
 
 class MsgType(IntEnum):
@@ -63,6 +65,15 @@ class Zone:
     @property
     def band_width_m(self) -> int:
         return self.danger_m + self.warning_m + self.attention_m
+
+
+@dataclass
+class Pulses:
+    """Repeat beep / vibrate every this many seconds while the dog stays in that band
+    (0 = once per GPS fix only). Sent with the fences."""
+
+    beep_s: int = 0
+    vibrate_s: int = 0
 
 
 @dataclass
@@ -131,11 +142,15 @@ def message_type(data: bytes) -> MsgType | None:
     return MsgType(data[1])
 
 
-def encode_fence_set(zones: Iterable[Zone]) -> bytes:
+def encode_fence_set(zones: Iterable[Zone], pulses: Pulses | None = None) -> bytes:
     zones = list(zones)
     if len(zones) > MAX_ZONES:
         raise ValueError(f"at most {MAX_ZONES} zones")
-    out = bytearray([len(zones)])
+    pulses = pulses or Pulses()
+    for v in (pulses.beep_s, pulses.vibrate_s):
+        if v != 0 and not MIN_PULSE_S <= v <= MAX_PULSE_S:
+            raise ValueError(f"pulse intervals must be 0 (off) or {MIN_PULSE_S}..{MAX_PULSE_S} s")
+    out = bytearray([len(zones), pulses.beep_s, pulses.vibrate_s])
     for z in zones:
         if not 3 <= len(z.vertices) <= MAX_VERTICES:
             raise ValueError(f"a zone needs 3..{MAX_VERTICES} vertices")
@@ -148,9 +163,9 @@ def encode_fence_set(zones: Iterable[Zone]) -> bytes:
     return bytes(out)
 
 
-def fence_chunks(zones: Iterable[Zone], fence_version: int) -> list[bytes]:
+def fence_chunks(zones: Iterable[Zone], fence_version: int, pulses: Pulses | None = None) -> list[bytes]:
     """Split a fence set into packets the collar reassembles."""
-    blob = encode_fence_set(zones)
+    blob = encode_fence_set(zones, pulses)
     count = max(1, math.ceil(len(blob) / MAX_CHUNK_DATA))
     if count > MAX_CHUNKS:
         raise ValueError("fence set too large")
@@ -201,3 +216,17 @@ def _band(props: dict, key: str, default: int) -> int:
     if isinstance(v, bool) or not isinstance(v, (int, float)) or not 0 <= v <= MAX_BAND_M or v != int(v):
         raise ValueError(f"{key} must be a whole number of metres, 0..{MAX_BAND_M}")
     return int(v)
+
+
+def pulses_from_geojson(geojson: dict) -> Pulses:
+    """The FeatureCollection's "pulse" member: {"beep_s": n, "vibrate_s": n}, 0 = off."""
+    raw = geojson.get("pulse") or {}
+    if not isinstance(raw, dict):
+        raise ValueError("pulse must be an object")
+    values = []
+    for key in ("beep_s", "vibrate_s"):
+        v = raw.get(key, 0)
+        if isinstance(v, bool) or not isinstance(v, int) or (v != 0 and not MIN_PULSE_S <= v <= MAX_PULSE_S):
+            raise ValueError(f"pulse.{key} must be 0 (off) or {MIN_PULSE_S}..{MAX_PULSE_S} seconds")
+        values.append(v)
+    return Pulses(*values)

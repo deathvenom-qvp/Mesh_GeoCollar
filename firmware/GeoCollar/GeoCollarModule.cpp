@@ -39,7 +39,7 @@ namespace
 
 constexpr const char *kStateFile = "/prefs/geocollar.bin";
 constexpr uint32_t kStateMagic = 0x47434F4C; // "GCOL"
-constexpr uint16_t kStateFormat = 3; // 2: Settings gained the GPS pacing fields; 3: per-zone bands
+constexpr uint16_t kStateFormat = 4; // 2: GPS pacing settings; 3: per-zone bands; 4: pulse intervals
 
 /// Sends CaiXianLin frames on the data-line GPIO without blocking the Meshtastic scheduler:
 /// one frame per call to poll(), each started asynchronously on the RMT peripheral.
@@ -179,6 +179,7 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
             return txDelay; // keep frames flowing; position checks resume once the collar is quiet
 
         checkPosition();
+        repeatPulse();
         applyGpsPacing();
 
         const uint32_t now = millis();
@@ -211,7 +212,8 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
         engine_.settings().correctionsEnabled = savedEnable;
 
         lastClearance_ = d.clearanceM;
-        applyCorrection(d.correction, d.intensity);
+        if (pulser_.onDecision(d, engine_.fences(), millis()))
+            applyCorrection(d.correction, d.intensity);
         if (d.sendBreach)
             sendStatus(proto::MsgType::Breach);
         else if (d.sendStatus)
@@ -235,6 +237,17 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
             current = target;
         }
         lastPacedSecs_ = current;
+    }
+
+    /// Repeat beep / vibrate between fixes at the pulse interval sent with the fences.
+    void repeatPulse()
+    {
+        const bool hwDisabled = GEOCOLLAR_DISABLE_PIN >= 0 && digitalRead(GEOCOLLAR_DISABLE_PIN) == LOW;
+        const bool allowed = engine_.settings().correctionsEnabled && !hwDisabled && engine_.state() == CollarState::Warning;
+        uint8_t intensity = 0;
+        const Correction c = pulser_.poll(engine_.fences(), millis(), allowed, intensity);
+        if (c != Correction::None)
+            applyCorrection(c, intensity);
     }
 
     void applyCorrection(Correction c, uint8_t intensity)
@@ -274,6 +287,7 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
         case proto::CommandAction::CorrectionsOff:
             s.correctionsEnabled = false;
             tx_.stop();
+            pulser_.stop();
             saveState();
             break;
         case proto::CommandAction::CorrectionsOn:
@@ -283,6 +297,7 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
         case proto::CommandAction::ForceLost:
             engine_.forceLost();
             tx_.stop();
+            pulser_.stop();
             break;
         case proto::CommandAction::ClearLost:
             engine_.clearLost();
@@ -374,6 +389,7 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
     }
 
     FenceEngine engine_;
+    CorrectionPulser pulser_;
     CollarTransmitter tx_;
     proto::FenceAssembler assembler_;
     NodeNum baseNode_ = 0;

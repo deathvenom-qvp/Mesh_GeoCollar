@@ -70,7 +70,8 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
             sim.add(node_id, c["sim"])
             if c.get("fences"):
                 try:
-                    sim.set_fences(node_id, protocol.zones_from_geojson(c["fences"]), c.get("fence_version", 0))
+                    sim.set_fences(node_id, protocol.zones_from_geojson(c["fences"]), c.get("fence_version", 0),
+                                   protocol.pulses_from_geojson(c["fences"]))
                 except (KeyError, ValueError):
                     log.warning("stored fences for %s are invalid", node_id)
 
@@ -130,17 +131,18 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
         require(node_id)
         try:
             zones = protocol.zones_from_geojson(geojson)
-            protocol.fence_chunks(zones, 1)  # validate size before storing
+            pulses = protocol.pulses_from_geojson(geojson)
+            protocol.fence_chunks(zones, 1, pulses)  # validate size before storing
         except (KeyError, ValueError) as e:
             raise HTTPException(400, f"invalid fences: {e}") from e
         version = store.set_fences(node_id, geojson)
         sent = 0
         if node_id in sim:
-            sim.set_fences(node_id, zones, version)
+            sim.set_fences(node_id, zones, version, pulses)
             sim.report_now(node_id)
-            sent = len(protocol.fence_chunks(zones, version))
+            sent = len(protocol.fence_chunks(zones, version, pulses))
         elif link.connected:
-            sent = link.send_fences(node_id, zones, version)
+            sent = link.send_fences(node_id, zones, version, pulses)
         return {"fence_version": version, "chunks_sent": sent}
 
     @app.post("/api/collars/{node_id}/command")

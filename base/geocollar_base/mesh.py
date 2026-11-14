@@ -111,8 +111,9 @@ class MeshLink:
             data, destinationId=node_id, portNum=protocol.PORT_NUM, wantAck=True, pkiEncrypted=True
         )
 
-    def send_fences(self, node_id: str, zones: list[protocol.Zone], fence_version: int) -> int:
-        chunks = protocol.fence_chunks(zones, fence_version)
+    def send_fences(self, node_id: str, zones: list[protocol.Zone], fence_version: int,
+                    pulses: protocol.Pulses | None = None) -> int:
+        chunks = protocol.fence_chunks(zones, fence_version, pulses)
         for i, chunk in enumerate(chunks):
             if i:
                 time.sleep(2)  # give the mesh room between chunks

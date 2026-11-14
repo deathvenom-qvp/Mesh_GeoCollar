@@ -114,10 +114,12 @@ class FenceEngine:
     _rearm: int = 0
     _shocks_this_breach: int = 0
     _shock_times: deque = field(default_factory=lambda: deque(maxlen=16))
+    _quiet: bool = False  # went past the line: no corrections until clear of every band
 
     def set_fences(self, zones: list[protocol.Zone]) -> None:
         self.zones = list(zones)
         self._outside = self._rearm = self._shocks_this_breach = 0
+        self._quiet = False
         self.state = protocol.CollarState.INSIDE if self.zones else protocol.CollarState.NO_FENCE
 
     def force_lost(self) -> None:
@@ -128,6 +130,7 @@ class FenceEngine:
         if self.state == protocol.CollarState.LOST:
             self.state = protocol.CollarState.INSIDE if self.zones else protocol.CollarState.NO_FENCE
         self._outside = self._rearm = self._shocks_this_breach = 0
+        self._quiet = False
 
     def _set_state(self, s: protocol.CollarState, d: Decision) -> None:
         if s != self.state:
@@ -152,48 +155,49 @@ class FenceEngine:
             c = min(c, zd)
             b = band_for(z, zd)
             band = max(band, b)
-            if b in (DANGER, OUTSIDE) and z.danger_m > 0:
+            if b == DANGER and z.danger_m > 0:
                 shock_band = True
         d.clearance_m = c
         s = self.settings
 
+        # Lost: never correct; wait for the dog to come all the way back in.
         if self.state == S.LOST:
-            if c >= s.rearm_margin_m:
+            if band == CLEAR:
                 self._rearm += 1
                 if self._rearm >= s.rearm_fixes:
                     self._rearm = self._outside = self._shocks_this_breach = 0
+                    self._quiet = False
                     self._set_state(S.INSIDE, d)
             else:
                 self._rearm = 0
             return d
 
-        if band == CLEAR:
-            self._outside = self._shocks_this_breach = 0
-            self._set_state(S.INSIDE, d)
-            return d
-        if band != OUTSIDE:
-            self._outside = 0
-            self._set_state(S.WARNING, d)
-            if s.corrections_enabled:
-                if band == ATTENTION:
-                    d.correction = "beep"
-                elif band == DANGER and shock_band:
-                    self._correct_hard(d, now)
-                else:
-                    d.correction, d.intensity = "vibrate", s.vibrate_level
+        if band == OUTSIDE:
+            # Past the line: stop correcting at once, and stay quiet until clear of every band.
+            self._quiet = True
+            self._outside += 1
+            if self._outside >= s.lost_confirm_fixes:
+                self._set_state(S.LOST, d)
+                d.send_breach = True
+                return d
+            self._set_state(S.OUTSIDE, d)
             return d
 
-        self._outside += 1
-        if self._outside >= s.lost_confirm_fixes:
-            self._set_state(S.LOST, d)
-            d.send_breach = True
+        self._outside = 0
+        if band == CLEAR:
+            self._shocks_this_breach = 0
+            self._quiet = False
+            self._set_state(S.INSIDE, d)
             return d
-        self._set_state(S.OUTSIDE, d)
-        if not s.corrections_enabled:
+
+        self._set_state(S.WARNING, d)
+        if self._quiet or not s.corrections_enabled:
             return d
-        if shock_band:
+        if band == ATTENTION:
+            d.correction = "beep"
+        elif band == DANGER and shock_band:
             self._correct_hard(d, now)
-        else:  # the crossed zone has no danger band: never shock for it
+        else:
             d.correction, d.intensity = "vibrate", s.vibrate_level
         return d
 
@@ -242,6 +246,10 @@ class SimCollar:
         self.engine = FenceEngine()
         self.engine.settings.shock_enabled = bool(settings.get("shock_enabled", False))
         self.fence_version = 0
+        self.pulses = protocol.Pulses()
+        self._pulse_kind: str | None = None  # beep / vibrate being repeated
+        self._pulse_intensity = 0
+        self._pulse_last = -1e9
         self.events: deque = deque(maxlen=12)
         self.clearance = None
         self._last_report = -1e9
@@ -290,7 +298,8 @@ class SimCollar:
             self._report_now = True
 
     # -- what the base sends ----------------------------------------------------------------
-    def set_fences(self, zones: list[protocol.Zone], version: int) -> None:
+    def set_fences(self, zones: list[protocol.Zone], version: int, pulses: protocol.Pulses | None = None) -> None:
+        self.pulses = pulses or protocol.Pulses()
         # Round to the collar's integer degrees x 1e7, as the radio would.
         self.engine.set_fences([
             protocol.Zone(z.kind, z.danger_m, z.warning_m, z.attention_m, [(round(a, 7), round(o, 7)) for a, o in z.vertices]) for z in zones
@@ -350,16 +359,42 @@ class SimCollar:
         n = self.noise_m
         lat, lon = _move(self.lat, self.lon, self.rng.uniform(0, 360), abs(self.rng.gauss(0, n / 1.5)) if n else 0)
         self._fix = (lat, lon)
+        was_quiet = self.engine._quiet
         d = self.engine.on_fix(lat, lon, now)
         if self.engine.zones:
             self.clearance = d.clearance_m
-        if d.correction:
-            self._event(d.correction, f"{d.correction}{f' {d.intensity}' if d.intensity else ''} at {int(round(d.clearance_m))} m from the line")
+        if self.engine._quiet and not was_quiet:
+            self._event("info", "past the line: corrections off until clear of every band")
+        elif was_quiet and not self.engine._quiet:
+            self._event("info", "clear of every band: corrections back on")
+        self._pulse(d, now)
         if d.send_breach:
             self._event("lost", "confirmed outside: corrections stop, lost mode")
         if d.send_status or d.send_breach or self._report_now or now - self._last_report >= self.report_s:
             return self.report(now, breach=d.send_breach or self.engine.state == protocol.CollarState.LOST)
         return None
+
+    # The simulator takes a fix every second; a real collar near the line takes one every 5 s.
+    FIX_EVERY_S = 5
+
+    def _pulse(self, d: Decision, now: float) -> None:
+        """Fire corrections like the collar's CorrectionPulser: beep / vibrate repeat at the pulse
+        interval while the dog stays in that band (or once per GPS fix when pulsing is off)."""
+        def fire(kind, intensity):
+            self._pulse_last = now
+            self._event(kind, f"{kind}{f' {intensity}' if intensity else ''} at {int(round(d.clearance_m))} m from the line")
+
+        if d.correction == "shock":
+            self._pulse_kind = None
+            fire("shock", d.intensity)
+            return
+        if d.correction not in ("beep", "vibrate"):
+            self._pulse_kind = None
+            return
+        period = (self.pulses.beep_s if d.correction == "beep" else self.pulses.vibrate_s) or self.FIX_EVERY_S
+        if d.correction != self._pulse_kind or now - self._pulse_last >= period:
+            fire(d.correction, d.intensity)
+        self._pulse_kind = d.correction
 
     def report(self, now: float, breach: bool = False) -> dict:
         self._last_report = now
@@ -414,9 +449,9 @@ class Simulator:
         self.on_settings(node_id, settings)
         return settings
 
-    def set_fences(self, node_id: str, zones, version: int) -> None:
+    def set_fences(self, node_id: str, zones, version: int, pulses=None) -> None:
         with self.lock:
-            self.collars[node_id].set_fences(zones, version)
+            self.collars[node_id].set_fences(zones, version, pulses)
 
     def command(self, node_id: str, action, intensity: int = 0) -> None:
         with self.lock:

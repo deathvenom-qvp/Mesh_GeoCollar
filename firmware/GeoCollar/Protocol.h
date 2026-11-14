@@ -24,6 +24,8 @@ constexpr uint8_t kVersion = 2; // 2: zones carry danger / warning / attention b
 constexpr size_t kMaxChunkData = 180;
 /// Largest encoded fence set, to bound reassembly memory.
 constexpr size_t kMaxFenceBlob = 1100;
+/// Longest correction pulse interval, seconds.
+constexpr uint8_t kMaxPulseS = 10;
 
 enum class MsgType : uint8_t {
     FenceChunk = 1, // base -> collar

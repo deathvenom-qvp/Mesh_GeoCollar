@@ -29,9 +29,10 @@ def test_status_golden_round_trip():
 
 
 def test_fence_set_golden():
-    blob = p.encode_fence_set([p.Zone(p.ZoneKind.KEEP_IN, 3, 5, 7, SQUARE)])
+    blob = p.encode_fence_set([p.Zone(p.ZoneKind.KEEP_IN, 3, 5, 7, SQUARE)], p.Pulses(4, 2))
     assert blob.hex() == (
-        "01000403050700"
+        "010402"
+        "000403050700"
         "0084d71780e84bd3"
         "0084d717a0364cd3"
         "20d2d717a0364cd3"
@@ -78,6 +79,14 @@ def test_geojson_old_margin_and_defaults():
     for bad in ({"danger_m": -1}, {"warning_m": 256}, {"attention_m": 2.5}, {"danger_m": True}):
         with pytest.raises(ValueError):
             zone(bad)
+
+
+def test_pulses():
+    assert p.pulses_from_geojson({"type": "FeatureCollection", "features": []}) == p.Pulses(0, 0)
+    assert p.pulses_from_geojson({"pulse": {"beep_s": 2, "vibrate_s": 10}}) == p.Pulses(2, 10)
+    for bad in ({"beep_s": 1}, {"vibrate_s": 11}, {"beep_s": 2.5}, {"beep_s": True}):
+        with pytest.raises(ValueError):
+            p.pulses_from_geojson({"pulse": bad})
 
 
 def test_message_type():

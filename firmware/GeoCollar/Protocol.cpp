@@ -174,12 +174,14 @@ bool decodeFenceChunk(const uint8_t *buf, size_t len, FenceChunk &c)
     return c.length <= kMaxChunkData;
 }
 
-// Fence set blob: u8 zoneCount, then per zone: u8 kind, u8 vertexCount, u8 dangerM, u8 warningM,
+// Fence set blob: u8 zoneCount, u8 beepPulseS, u8 vibratePulseS, then per zone: u8 kind, u8 vertexCount, u8 dangerM, u8 warningM,
 // u8 attentionM, u8 reserved (0), then vertexCount pairs of (i32 latI, i32 lonI).
 size_t encodeFenceSet(uint8_t *out, size_t cap, const FenceSet &f)
 {
     Writer w{out, cap};
     w.u8(f.zoneCount);
+    w.u8(f.beepPulseS);
+    w.u8(f.vibratePulseS);
     for (size_t i = 0; i < f.zoneCount && i < kMaxZones; i++) {
         const Zone &z = f.zones[i];
         w.u8(static_cast<uint8_t>(z.kind));
@@ -202,7 +204,9 @@ bool decodeFenceSet(const uint8_t *buf, size_t len, uint16_t version, FenceSet &
     FenceSet tmp;
     tmp.version = version;
     tmp.zoneCount = r.u8();
-    if (!r.ok || tmp.zoneCount > kMaxZones)
+    tmp.beepPulseS = r.u8();
+    tmp.vibratePulseS = r.u8();
+    if (!r.ok || tmp.zoneCount > kMaxZones || tmp.beepPulseS > kMaxPulseS || tmp.vibratePulseS > kMaxPulseS)
         return false;
     for (size_t i = 0; i < tmp.zoneCount; i++) {
         Zone &z = tmp.zones[i];

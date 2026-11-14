@@ -16,7 +16,7 @@
     --bg: #ffffff; --panel: #f6f7f9; --fg: #1c1d1f; --muted: #686b72; --line: #d9dbe0;
     --accent: #2563eb; --accent-fg: #ffffff;
     --keep-in: #15803d; --keep-out: #7c3aed;
-    --danger: #dc2626; --warning-band: #f97316; --attention: #eab308;
+    --danger: #dc2626; --warning-band: #eab308; --attention: #38bdf8;
     --ok: #15803d; --warn: #b45309; --bad: #dc2626; --idle: #8a8d93;
     --shadow: 0 1px 3px rgba(0,0,0,.12);
   }
@@ -25,7 +25,7 @@
       --bg: #17181b; --panel: #1f2024; --fg: #eceef1; --muted: #a0a3aa; --line: #34363c;
       --accent: #6d9eff; --accent-fg: #0b1020;
       --keep-in: #4ade80; --keep-out: #a78bfa;
-      --danger: #f87171; --warning-band: #fb923c; --attention: #facc15;
+      --danger: #f87171; --warning-band: #facc15; --attention: #7dd3fc;
       --ok: #4ade80; --warn: #fbbf24; --bad: #f87171; --idle: #8a8d93;
       --shadow: 0 1px 3px rgba(0,0,0,.5);
     }
@@ -34,7 +34,7 @@
     --bg: #17181b; --panel: #1f2024; --fg: #eceef1; --muted: #a0a3aa; --line: #34363c;
     --accent: #6d9eff; --accent-fg: #0b1020;
     --keep-in: #4ade80; --keep-out: #a78bfa;
-    --danger: #f87171; --warning-band: #fb923c; --attention: #facc15;
+    --danger: #f87171; --warning-band: #facc15; --attention: #7dd3fc;
     --ok: #4ade80; --warn: #fbbf24; --bad: #f87171; --idle: #8a8d93;
     --shadow: 0 1px 3px rgba(0,0,0,.5);
   }
@@ -94,6 +94,7 @@
   .bands input[type=number] { padding: 3px 6px; }
   .bands .sw { width: 14px; height: 14px; border-radius: 3px; }
   .bands .off { opacity: .45; }
+  .pulses { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 10px; }
   .gpsnote { margin-top: 8px; padding: 6px 8px; border: 1px dashed var(--line); border-radius: 6px; }
   .count.over { color: var(--bad); font-weight: 600; }
   .empty { border: 1px dashed var(--line); border-radius: 8px; padding: 12px; text-align: center; color: var(--muted); font-size: 13px; }
@@ -194,6 +195,14 @@
           <button type="button" data-shape="Rectangle" aria-pressed="false">Rectangle</button>
         </div>
       </div>
+      <div class="pulses">
+        <label class="field">Repeat beep
+          <select id="pulseBeep" aria-label="Repeat beep interval"></select></label>
+        <label class="field">Repeat vibrate
+          <select id="pulseVibrate" aria-label="Repeat vibrate interval"></select></label>
+      </div>
+      <div class="muted" style="margin-top:4px">While the dog stays in a band, the collar repeats its beep or vibration this often.
+        Once the dog is past the line it goes quiet, and stays quiet until it is back inside and clear of every band.</div>
       <div class="muted gpsnote"><b>GPS accuracy:</b> the collar's UC6580 receiver is rated 1.5 m (RMS) in open sky. On a dog,
         near buildings or under trees, expect 2 to 5 m, with the odd jump of 10 m or more. Keep each band at least 3 m wide, and
         draw the line a few metres inside anything that really matters, such as a road.</div>
@@ -388,9 +397,16 @@ const vertexCount = layer => ringOf(layer).length;
 // ---------------------------------------------------------------------------------------------
 // Fences: load, draw, edit
 // ---------------------------------------------------------------------------------------------
+const PULSE_CHOICES = [[0, 'Every GPS fix'], ...[2, 3, 4, 5, 6, 7, 8, 9, 10].map(n => [n, `Every ${n} s`])];
+for (const id of ['pulseBeep', 'pulseVibrate']) {
+  $(id).replaceChildren(...PULSE_CHOICES.map(([v, t]) => el('option', { value: v }, t)));
+  $(id).addEventListener('change', () => renderStatusArea());
+}
+const currentPulse = () => ({ beep_s: +$('pulseBeep').value, vibrate_s: +$('pulseVibrate').value });
 function zonesToGeoJSON() {
   return {
     type: 'FeatureCollection',
+    pulse: currentPulse(),
     features: zones.map(z => {
       const ring = ringOf(z.layer).map(p => [round7(p.lng), round7(p.lat)]);
       ring.push(ring[0]);
@@ -398,7 +414,7 @@ function zonesToGeoJSON() {
     }),
   };
 }
-const normalize = gj => JSON.stringify(gj && gj.features ? gj.features.map(f => [f.properties, f.geometry.coordinates]) : []);
+const normalize = gj => JSON.stringify([gj && gj.pulse || { beep_s: 0, vibrate_s: 0 }, gj && gj.features ? gj.features.map(f => [f.properties, f.geometry.coordinates]) : []]);
 const savedFences = () => (selected && collars[selected] && collars[selected].fences) || { type: 'FeatureCollection', features: [] };
 const isDirty = () => selected && normalize(zonesToGeoJSON()) !== normalize(savedFences());
 
@@ -406,6 +422,9 @@ function loadZones(geojson) {
   stopEditing();
   fenceLayer.clearLayers();
   zones = [];
+  const pulse = (geojson && geojson.pulse) || {};
+  $('pulseBeep').value = String(pulse.beep_s || 0);
+  $('pulseVibrate').value = String(pulse.vibrate_s || 0);
   (geojson && geojson.features || []).forEach((f, i) => {
     const ring = f.geometry.coordinates[0].slice(0, -1).map(([lon, lat]) => [lat, lon]);
     const p = f.properties || {};
@@ -671,7 +690,7 @@ function renderBands() {
           ? polygonClipping.difference(outerBuf, poly, ...(innerBuf.length ? [innerBuf] : []))
           : polygonClipping.intersection(poly, innerBuf.length ? polygonClipping.difference(outerBuf, innerBuf) : outerBuf);
         if (area.length) {
-          L.polygon(area.map(pg => pg.map(r => r.map(f.back))), { pane: 'bands', stroke: false, fillColor: css(b.color), fillOpacity: 0.45,
+          L.polygon(area.map(pg => pg.map(r => r.map(f.back))), { pane: 'bands', stroke: false, fillColor: css(b.color), fillOpacity: 0.5,
             interactive: false, pmIgnore: true, snapIgnore: true }).addTo(bandLayer);
         }
         inner = outer; innerBuf = outerBuf;

@@ -41,6 +41,10 @@ struct Zone {
 struct FenceSet {
     uint16_t version = 0;
     uint8_t zoneCount = 0;
+    // Repeat beep / vibrate every this many seconds while the dog stays in that band.
+    // 0 = once per GPS fix only.
+    uint8_t beepPulseS = 0;
+    uint8_t vibratePulseS = 0;
     Zone zones[kMaxZones];
 };
 
@@ -71,7 +75,7 @@ enum class CollarState : uint8_t {
     NoFence = 0,   // no fences loaded, nothing to do
     Inside = 1,    // well inside
     Warning = 2,   // inside but in a zone's attention, warning or danger band
-    Outside = 3,   // crossed the line, not yet confirmed
+    Outside = 3,   // crossed the line, not yet confirmed; no corrections
     Lost = 4,      // confirmed outside: corrections stop, tracking starts
 };
 
@@ -85,7 +89,7 @@ struct Settings {
     uint8_t maxShocksPerHour = 4;
     uint8_t lostConfirmFixes = 3;   // consecutive good fixes outside before Lost
     uint8_t rearmFixes = 3;         // consecutive good fixes back inside before re-arming
-    uint16_t rearmMarginM = 5;      // must be this far inside to count toward re-arming
+    uint16_t rearmMarginM = 5;      // unused since bands: re-arming needs the dog clear of every band
     uint16_t maxPdopX100 = 500;     // ignore fixes worse than PDOP 5.0
     uint8_t minSats = 5;
     uint16_t correctionMs = 1000;   // how long each beep/vibrate/shock lasts
@@ -147,11 +151,34 @@ class FenceEngine
     uint8_t outsideCount_ = 0;
     uint8_t rearmCount_ = 0;
     uint8_t shocksThisBreach_ = 0;
+    bool quiet_ = false; // went past the line: no corrections until clear of every band
     // Timestamps of recent shocks, for the per-hour cap.
     static constexpr size_t kShockHistory = 16;
     uint32_t shockTimes_[kShockHistory] = {};
     size_t shockHead_ = 0;
     size_t shockCount_ = 0;
+};
+
+/// Repeats beep and vibrate corrections between GPS fixes, at the fence set's pulse intervals,
+/// for as long as the latest fix keeps the dog in that band.
+class CorrectionPulser
+{
+  public:
+    static constexpr uint32_t kStaleMs = 30000; // stop pulsing if fixes stop coming
+
+    /// Feed each fix's decision. Returns true if the decision's correction should fire now
+    /// (false when a pulse of the same kind went out less than one period ago).
+    bool onDecision(const Decision &d, const FenceSet &f, uint32_t nowMs);
+    /// Call often. Returns a correction to repeat now (and its intensity), or None.
+    Correction poll(const FenceSet &f, uint32_t nowMs, bool allowed, uint8_t &intensity);
+    void stop() { current_ = Correction::None; }
+
+  private:
+    static uint8_t periodFor(Correction c, const FenceSet &f);
+    Correction current_ = Correction::None;
+    uint8_t intensity_ = 0;
+    uint32_t lastMs_ = 0;
+    uint32_t fixMs_ = 0;
 };
 
 /// GPS update interval in seconds for the current state and clearance, or 0 to leave Meshtastic's

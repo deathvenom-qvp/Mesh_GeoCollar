@@ -48,8 +48,11 @@ Collars only obey messages from base nodes they trust:
 5. Set each zone's bands. The line you draw is the outer edge; going in from it:
    - **Danger** (red, optional): shock, if shock is enabled on the collar. Untick it and the line
      starts the warning band instead, so that zone never shocks.
-   - **Warning** (orange): vibrate.
-   - **Attention** (yellow): beep.
+   - **Warning** (yellow): vibrate.
+   - **Attention** (light blue): beep.
+   **Repeat beep** and **Repeat vibrate** set how often the collar repeats them while the dog stays
+   in that band (every 2 to 10 s, or once per GPS fix). Once the dog is past the line the collar
+   goes quiet, and stays quiet until the dog is back inside and clear of every band.
    The map shades each band so you can see exactly where it starts and ends. For a keep-out zone
    the bands lie outside its line.
 6. Press **Send to collar**. The page shows when the collar reports the new fence version.
