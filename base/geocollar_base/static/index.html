@@ -15,7 +15,7 @@
   :root {
     --bg: #ffffff; --panel: #f6f7f9; --fg: #1c1d1f; --muted: #686b72; --line: #d9dbe0;
     --accent: #2563eb; --accent-fg: #ffffff;
-    --keep-in: #15803d; --keep-out: #7c3aed;
+    --keep-in: #15803d; --keep-out: #7c3aed; --parcel: #ea580c;
     --danger: #dc2626; --warning-band: #eab308; --attention: #38bdf8;
     --ok: #15803d; --warn: #b45309; --bad: #dc2626; --idle: #8a8d93;
     --shadow: 0 1px 3px rgba(0,0,0,.12);
@@ -24,7 +24,7 @@
     :root:not([data-theme="light"]) {
       --bg: #17181b; --panel: #1f2024; --fg: #eceef1; --muted: #a0a3aa; --line: #34363c;
       --accent: #6d9eff; --accent-fg: #0b1020;
-      --keep-in: #4ade80; --keep-out: #a78bfa;
+      --keep-in: #4ade80; --keep-out: #a78bfa; --parcel: #fb923c;
       --danger: #f87171; --warning-band: #facc15; --attention: #7dd3fc;
       --ok: #4ade80; --warn: #fbbf24; --bad: #f87171; --idle: #8a8d93;
       --shadow: 0 1px 3px rgba(0,0,0,.5);
@@ -33,7 +33,7 @@
   :root[data-theme="dark"] {
     --bg: #17181b; --panel: #1f2024; --fg: #eceef1; --muted: #a0a3aa; --line: #34363c;
     --accent: #6d9eff; --accent-fg: #0b1020;
-    --keep-in: #4ade80; --keep-out: #a78bfa;
+    --keep-in: #4ade80; --keep-out: #a78bfa; --parcel: #fb923c;
     --danger: #f87171; --warning-band: #facc15; --attention: #7dd3fc;
     --ok: #4ade80; --warn: #fbbf24; --bad: #f87171; --idle: #8a8d93;
     --shadow: 0 1px 3px rgba(0,0,0,.5);
@@ -121,6 +121,12 @@
   .stats { display: grid; grid-template-columns: 1fr 1fr; gap: 2px 12px; font-size: 12px; margin: 6px 0 10px; }
   .stats span:nth-child(odd) { color: var(--muted); }
 
+  /* Property lines */
+  .parcel-pop { font: 13px/1.4 system-ui, sans-serif; min-width: 200px; }
+  .parcel-pop dl { display: grid; grid-template-columns: auto 1fr; gap: 1px 8px; margin: 6px 0; font-size: 12px; }
+  .parcel-pop dt { color: #686b72; } .parcel-pop dd { margin: 0; word-break: break-word; }
+  .parcel-pop .actions { margin-top: 6px; }
+
   /* Firmware */
   .builds { list-style: none; margin: 6px 0; padding: 0; }
   .builds li { display: grid; grid-template-columns: 18px 1fr auto; gap: 2px 8px; align-items: start; padding: 6px 0; border-bottom: 1px solid var(--line); font-size: 13px; }
@@ -190,6 +196,20 @@
       <span class="muted">No hardware yet?</span>
       <button id="addSim" title="Add a pretend collar that follows the collar firmware's fence rules">+ Simulated collar</button>
     </div>
+  </section>
+
+  <section id="parcelBox">
+    <div class="row spread"><h2 style="margin:0">Property lines</h2>
+      <label class="row muted" style="gap:5px"><input type="checkbox" id="parcelShow" checked> Show</label></div>
+    <div class="muted" style="margin-top:6px">Import your parcel from your county's GIS or tax map site as GeoJSON, KML, or a
+      shapefile (the .zip, or the .shp, .dbf and .prj files together). Click a parcel on the map to turn it into a keep-in zone.
+      Tax-map lines are often 1 to 5 m off, so check them against the satellite view.</div>
+    <div class="actions" style="margin-top:8px">
+      <button id="parcelImport">Import file…</button>
+      <button class="link" id="parcelClear" hidden>Remove all</button>
+    </div>
+    <input type="file" id="parcelFile" multiple hidden accept=".geojson,.json,.kml,.zip,.shp,.dbf,.prj,.cpg">
+    <div class="muted" id="parcelMsg" role="status" style="margin-top:6px"></div>
   </section>
 
   <div id="selectedBox" hidden>
@@ -351,6 +371,8 @@
 <script src="static/vendor/leaflet/leaflet.js"></script>
 <script src="static/vendor/geoman/leaflet-geoman.min.js"></script>
 <script src="static/vendor/polygon-clipping/polygon-clipping.umd.min.js"></script>
+<script src="static/vendor/togeojson/togeojson.umd.js"></script>
+<script src="static/vendor/shpjs/shp.min.js"></script>
 <script>
 'use strict';
 // Limits from firmware/GeoCollar/Fence.h and docs/protocol.md.
@@ -423,6 +445,7 @@ const Legend = L.Control.extend({
     return el('div', { class: 'legend' },
       el('div', {}, el('i', { style: 'background:var(--keep-in)' }), 'Keep-in line'),
       el('div', {}, el('i', { style: 'background:var(--keep-out)' }), 'Keep-out line'),
+      el('div', { id: 'legendParcel', hidden: true }, el('i', { style: 'border:2px dashed var(--parcel);background:none;width:10px;height:10px' }), 'Property line'),
       ...BANDS.map(b => el('div', {}, el('i', { style: `background:var(${b.color});opacity:.7` }), `${b.name}: ${b.does}`)));
   },
 });
@@ -1247,6 +1270,201 @@ $('fwWebGo').onclick = async () => {
     fwWebBusy = false; renderJob(job); renderFw(); refresh();
   }
 };
+
+// ---------------------------------------------------------------------------------------------
+// Property lines: parcels imported from county GIS files, shown as dashed outlines. The page
+// parses the files (KML with togeojson, shapefiles with shpjs, which also reprojects using the
+// .prj); the base keeps the result so every device sees it.
+// ---------------------------------------------------------------------------------------------
+const MAX_PARCELS = 500;
+map.createPane('parcels').style.zIndex = 380;
+let parcels = { type: 'FeatureCollection', features: [] };
+const parcelLayer = L.geoJSON(null, {
+  pane: 'parcels', pmIgnore: true, snapIgnore: false, // zones being drawn snap to parcel corners
+  style: () => ({ color: css('--parcel'), weight: 2, dashArray: '6 5', fill: true, fillOpacity: 0.04, fillColor: css('--parcel') }),
+  onEachFeature: (f, layer) => layer.on('click', e => {
+    if (drawKind || pickMode) return; // let the click reach the map, to place a corner or a point
+    L.DomEvent.stopPropagation(e);
+    L.popup({ maxWidth: 320 }).setLatLng(e.latlng).setContent(parcelPopup(f, e.latlng)).openOn(map);
+  }),
+});
+const parcelSay = t => { $('parcelMsg').textContent = t; };
+const parcelKey = f => JSON.stringify(f.geometry.coordinates);
+
+function showParcels() {
+  parcelLayer.clearLayers();
+  parcelLayer.addData(parcels);
+  const on = $('parcelShow').checked && parcels.features.length > 0;
+  if (on) parcelLayer.addTo(map); else parcelLayer.remove();
+  $('parcelClear').hidden = !parcels.features.length;
+  const leg = document.getElementById('legendParcel');
+  if (leg) leg.hidden = !on;
+  parcelSay(parcels.features.length ? `${parcels.features.length} parcel${parcels.features.length > 1 ? 's' : ''} imported.` : '');
+}
+
+async function loadParcels() {
+  try { parcels = await api('parcels'); } catch { return; }
+  showParcels();
+}
+
+async function saveParcels(fc) {
+  const r = await api('parcels', { method: 'PUT', body: JSON.stringify(fc) });
+  await loadParcels();
+  return r.count;
+}
+
+// Labels county exports commonly use, most useful first.
+const PARCEL_LABELS = /^(site_?addr|situs|address|addr|prop_?addr|location|owner|own_?name|name|pin|apn|parcel|parcel_?id|parno|gpin|tax_?id|acres|acreage)/i;
+function parcelTitle(p) {
+  const k = Object.keys(p).find(k => /addr|situs|location/i.test(k) && p[k]) || Object.keys(p).find(k => /^(pin|apn|parcel)/i.test(k) && p[k]);
+  return k ? String(p[k]) : 'Parcel';
+}
+
+function parcelPopup(f, latlng) {
+  const p = f.properties || {};
+  const keys = Object.keys(p).filter(k => p[k] !== '' && p[k] != null);
+  keys.sort((a, b) => PARCEL_LABELS.test(b) - PARCEL_LABELS.test(a));
+  const c = selected && collars[selected];
+  const full = zones.length >= MAX_ZONES;
+  return el('div', { class: 'parcel-pop' },
+    el('b', {}, parcelTitle(p)),
+    keys.length ? el('dl', {}, ...keys.slice(0, 8).flatMap(k => [el('dt', {}, k), el('dd', {}, String(p[k]))])) : null,
+    el('div', { class: 'actions' },
+      el('button', { class: 'primary', disabled: !c || full, title: !c ? 'Select a collar first' : full ? `A collar holds at most ${MAX_ZONES} zones` : '',
+        onclick: () => { map.closePopup(); useParcel(f, latlng); } }, c ? `Use as keep-in zone for ${c.name}` : 'Select a collar to use it'),
+      el('button', { onclick: async () => {
+        map.closePopup();
+        try { await saveParcels({ type: 'FeatureCollection', features: parcels.features.filter(x => x !== f && parcelKey(x) !== parcelKey(f)) }); }
+        catch (e) { parcelSay(e.message); }
+      } }, 'Remove')));
+}
+
+// Douglas-Peucker in local metres, loosened until the ring fits the collar's corner limit.
+function simplifyRing(latlngs, maxPoints) {
+  const fr = localFrame(latlngs[0]);
+  const pts = latlngs.map(ll => fr.fwd(ll));
+  const segDist = (p, a, b) => {
+    const dx = b[0] - a[0], dy = b[1] - a[1], len = dx * dx + dy * dy;
+    const t = len ? Math.max(0, Math.min(1, ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / len)) : 0;
+    return Math.hypot(p[0] - a[0] - t * dx, p[1] - a[1] - t * dy);
+  };
+  const dp = (arr, tol) => {
+    const keep = new Uint8Array(arr.length); keep[0] = keep[arr.length - 1] = 1;
+    const stack = [[0, arr.length - 1]];
+    while (stack.length) {
+      const [i, j] = stack.pop();
+      let best = -1, at = -1;
+      for (let k = i + 1; k < j; k++) { const d = segDist(arr[k], arr[i], arr[j]); if (d > best) { best = d; at = k; } }
+      if (best > tol) { keep[at] = 1; stack.push([i, at], [at, j]); }
+    }
+    return arr.filter((_, k) => keep[k]);
+  };
+  // Split the closed ring at its farthest point from the start, so both halves are open paths.
+  let far = 0;
+  pts.forEach((p, k) => { if (Math.hypot(p[0] - pts[0][0], p[1] - pts[0][1]) > Math.hypot(pts[far][0] - pts[0][0], pts[far][1] - pts[0][1])) far = k; });
+  let tol = 0.1, out = pts;
+  for (; tol < 1000; tol *= 1.5) {
+    out = [...dp(pts.slice(0, far + 1), tol), ...dp([...pts.slice(far), pts[0]], tol).slice(1, -1)];
+    if (out.length <= maxPoints) break;
+  }
+  return { ring: out.map(p => L.latLng(fr.back(p))), tolerance: out.length < pts.length ? tol : 0 };
+}
+
+function useParcel(f, latlng) {
+  if (!selected || zones.length >= MAX_ZONES) return;
+  const polys = f.geometry.type === 'Polygon' ? [f.geometry.coordinates] : f.geometry.coordinates;
+  const rings = polys.map(poly => poly[0].slice(0, -1).map(([lon, lat]) => L.latLng(lat, lon)));
+  const area = r => Math.abs(r.reduce((a, p, i) => { const q = r[(i + 1) % r.length]; return a + p.lng * q.lat - q.lng * p.lat; }, 0));
+  const ring = rings.find(r => pointInRing(latlng.lat, latlng.lng, r)) || rings.sort((a, b) => area(b) - area(a))[0];
+  const { ring: simple, tolerance } = simplifyRing(ring, MAX_VERTICES);
+  if (simple.length < 3) { say('That parcel is too small to use as a zone.'); return; }
+  stopEditing();
+  const z = addZone(L.polygon(simple), { name: parcelTitle(f.properties || {}).slice(0, 40) || 'Property', kind: 'keep_in', ...DEFAULT_BANDS });
+  editZone(z);
+  map.fitBounds(z.layer.getBounds(), { maxZoom: 19, padding: [40, 40] });
+  say(tolerance
+    ? `Added a keep-in zone from the parcel, simplified from ${ring.length} to ${simple.length} corners (lines moved by up to ${tolerance < 1 ? tolerance.toFixed(1) : Math.round(tolerance)} m). Check it, then send it to the collar.`
+    : 'Added a keep-in zone from the parcel. Check it against the satellite view, then send it to the collar.');
+}
+
+// File reading. Returns a list of GeoJSON features.
+async function readParcelFiles(files) {
+  const byExt = {};
+  for (const f of files) byExt[f.name.split('.').pop().toLowerCase()] = f;
+  const features = [];
+  const addFc = fc => { for (const x of [].concat(fc)) features.push(...(x.type === 'FeatureCollection' ? x.features : x.type === 'Feature' ? [x] : [{ type: 'Feature', properties: {}, geometry: x }])); };
+  for (const f of files) {
+    const ext = f.name.split('.').pop().toLowerCase();
+    if (ext === 'geojson' || ext === 'json') addFc(JSON.parse(await f.text()));
+    else if (ext === 'kml') {
+      const doc = new DOMParser().parseFromString(await f.text(), 'text/xml');
+      if (doc.querySelector('parsererror')) throw new Error(`${f.name} is not valid KML`);
+      addFc(toGeoJSON.kml(doc));
+    } else if (ext === 'zip') addFc(await shp(await f.arrayBuffer()));
+    else if (ext === 'kmz') throw new Error('KMZ is a zipped KML: unzip it and import the .kml inside.');
+  }
+  if (byExt.shp) {
+    const parts = { shp: await byExt.shp.arrayBuffer() };
+    if (byExt.dbf) parts.dbf = await byExt.dbf.arrayBuffer();
+    if (byExt.prj) parts.prj = await byExt.prj.text();
+    if (byExt.cpg) parts.cpg = await byExt.cpg.text();
+    if (!byExt.prj) parcelSay('No .prj file was picked, so the shapefile is assumed to be in longitude/latitude.');
+    addFc(await shp(parts));
+  } else if (byExt.dbf && !Object.keys(byExt).some(e => ['zip', 'geojson', 'json', 'kml'].includes(e)))
+    throw new Error('Pick the .shp file too (with the .dbf and .prj).');
+  return features;
+}
+
+function polygonsOnly(features) {
+  const out = [];
+  for (const f of features) {
+    const g = f && f.geometry;
+    if (!g) continue;
+    if (g.type === 'Polygon' || g.type === 'MultiPolygon') out.push({ type: 'Feature', properties: f.properties || {}, geometry: g });
+    else if (g.type === 'GeometryCollection')
+      for (const sub of g.geometries || []) if (sub.type === 'Polygon' || sub.type === 'MultiPolygon') out.push({ type: 'Feature', properties: f.properties || {}, geometry: sub });
+  }
+  return out;
+}
+
+$('parcelImport').onclick = () => $('parcelFile').click();
+$('parcelFile').onchange = async () => {
+  const files = [...$('parcelFile').files];
+  $('parcelFile').value = '';
+  if (!files.length) return;
+  parcelSay('Reading…');
+  try {
+    // Round like the base stores them (1e-7 degrees, about 1 cm), so re-imports are recognised.
+    const r7 = c => typeof c[0] === 'number' ? [round7(c[0]), round7(c[1])] : c.map(r7);
+    let found = polygonsOnly(await readParcelFiles(files)).map(f => ({ ...f, geometry: { type: f.geometry.type, coordinates: r7(f.geometry.coordinates) } }));
+    if (!found.length) throw new Error('No parcel outlines (polygons) found in that file.');
+    const first = found[0].geometry.type === 'Polygon' ? found[0].geometry.coordinates[0][0] : found[0].geometry.coordinates[0][0][0];
+    if (Math.abs(first[0]) > 180 || Math.abs(first[1]) > 90)
+      throw new Error('That file is not in longitude/latitude. Export it as WGS84 (EPSG:4326), or import the zipped shapefile with its .prj.');
+    const have = new Set(parcels.features.map(parcelKey));
+    found = found.filter(f => !have.has(parcelKey(f)));
+    let note = '';
+    const room = MAX_PARCELS - parcels.features.length;
+    if (found.length > room) {
+      // A whole-county export: keep the parcels nearest the map's centre.
+      const c = map.getCenter();
+      const dist = f => { const b = L.geoJSON(f).getBounds().getCenter(); return c.distanceTo(b); };
+      found = found.map(f => [dist(f), f]).sort((a, b) => a[0] - b[0]).slice(0, Math.max(0, room)).map(x => x[1]);
+      note = ` The file had more than ${MAX_PARCELS} parcels, so only the ${found.length} nearest the map's centre were kept.`;
+    }
+    if (!found.length) { parcelSay('Those parcels are already imported.' + note); return; }
+    await saveParcels({ type: 'FeatureCollection', features: [...parcels.features, ...found] });
+    $('parcelShow').checked = true; showParcels();
+    map.fitBounds(L.geoJSON({ type: 'FeatureCollection', features: found }).getBounds(), { maxZoom: 19, padding: [40, 40] });
+    parcelSay(`Imported ${found.length} parcel${found.length > 1 ? 's' : ''}. Click one on the map to use it as a keep-in zone.${note}`);
+  } catch (e) { parcelSay(`Could not import: ${e.message}`); }
+};
+$('parcelShow').onchange = showParcels;
+$('parcelClear').onclick = async () => {
+  if (!confirm('Remove all imported property lines? Zones made from them stay.')) return;
+  try { await saveParcels({ type: 'FeatureCollection', features: [] }); } catch (e) { parcelSay(e.message); }
+};
+loadParcels();
 
 window.addEventListener('beforeunload', e => { if (isDirty() || Object.keys(drafts).length) { e.preventDefault(); e.returnValue = ''; } });
 

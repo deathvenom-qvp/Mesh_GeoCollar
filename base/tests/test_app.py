@@ -105,3 +105,38 @@ def test_fence_properties_validated(tmp_path):
     # An empty set clears the collar's fences.
     r = client.put("/api/collars/!a1b2c3d4/fences", json={"type": "FeatureCollection", "features": []})
     assert r.status_code == 200 and link.sent[-1][1][6:] == b"\x00\x00\x00"
+
+
+def test_parcels_round_trip(tmp_path):
+    from fastapi.testclient import TestClient
+
+    from geocollar_base.app import create_app
+
+    class NoLink:
+        connected = False
+        last_error = ""
+
+        def start(self):
+            pass
+
+        def close(self):
+            pass
+
+    c = TestClient(create_app({"data_dir": str(tmp_path)}, link=NoLink()))
+    assert c.get("/api/parcels").json()["features"] == []
+    square = [[-75, 40], [-75, 40.001], [-74.999, 40.001], [-74.999, 40], [-75, 40]]
+    fc = {"type": "FeatureCollection", "features": [
+        {"type": "Feature", "properties": {"PIN": "12-34", "nested": {"x": 1}, "AREA": 1.5},
+         "geometry": {"type": "Polygon", "coordinates": [square]}},
+        {"type": "Feature", "properties": {}, "geometry": {"type": "Point", "coordinates": [-75, 40]}},
+        {"type": "Feature", "properties": {}, "geometry": {"type": "MultiPolygon", "coordinates": [[square], [square]]}},
+    ]}
+    assert c.put("/api/parcels", json=fc).json() == {"count": 2}
+    got = c.get("/api/parcels").json()["features"]
+    assert got[0]["properties"] == {"PIN": "12-34", "AREA": 1.5}
+    assert got[1]["geometry"]["type"] == "MultiPolygon"
+    projected = {"type": "FeatureCollection", "features": [{"type": "Feature", "properties": {},
+        "geometry": {"type": "Polygon", "coordinates": [[[500000, 4400000], [500010, 4400000], [500010, 4400010], [500000, 4400000]]]}}]}
+    assert "longitude/latitude" in c.put("/api/parcels", json=projected).json()["detail"]
+    assert c.put("/api/parcels", json={"type": "FeatureCollection", "features": []}).json() == {"count": 0}
+    assert c.get("/api/parcels").json()["features"] == []

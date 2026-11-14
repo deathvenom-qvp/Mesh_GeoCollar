@@ -40,6 +40,9 @@ postamble, and the "vibrate at 0" stop frame). No OpenShock source code is copie
   correction bands, vendored with their licences in `base/geocollar_base/static/vendor/`. Map tiles from
   [OpenStreetMap](https://www.openstreetmap.org/copyright) contributors and satellite imagery
   from Esri World Imagery.
+- [@tmcw/togeojson](https://github.com/placemark/togeojson) 7.1.3 (BSD-2-Clause) and
+  [shpjs](https://github.com/calvinmetcalf/shapefile-js) 6.2.0 (MIT, bundling proj4js) for
+  importing property lines from KML and shapefiles, vendored with their licences.
 - [esptool](https://github.com/espressif/esptool) (GPL-2.0-or-later) for flashing collars over USB
   from the base, and [esptool-js](https://github.com/espressif/esptool-js) 0.5.7 (Apache-2.0,
   bundling pako, MIT and Zlib) for flashing from the browser, vendored with its licence in

@@ -88,6 +88,51 @@ class CommandIn(BaseModel):
     duration_ms: int = 1000
 
 
+MAX_PARCELS = 500
+MAX_PARCEL_POINTS = 100_000
+
+
+def clean_parcels(fc: dict) -> dict:
+    """Keep only (Multi)Polygons in longitude/latitude, with a few short text properties, so a
+    county export can't fill the data file. The page parses KML and shapefiles itself."""
+    if fc.get("type") != "FeatureCollection" or not isinstance(fc.get("features"), list):
+        raise ValueError("expected a GeoJSON FeatureCollection")
+    if len(fc["features"]) > MAX_PARCELS:
+        raise ValueError(f"at most {MAX_PARCELS} parcels")
+    points = 0
+    out = []
+    for f in fc["features"]:
+        g = f.get("geometry") or {}
+        if g.get("type") not in ("Polygon", "MultiPolygon"):
+            continue
+        polys = [g["coordinates"]] if g["type"] == "Polygon" else g["coordinates"]
+        clean_polys = []
+        for poly in polys:
+            rings = []
+            for ring in poly:
+                pts = [[round(float(x), 7), round(float(y), 7)] for x, y, *_ in ring]
+                if len(pts) < 4:
+                    continue
+                if not all(-180 <= x <= 180 and -90 <= y <= 90 for x, y in pts):
+                    raise ValueError("coordinates are not longitude/latitude")
+                points += len(pts)
+                rings.append(pts)
+            if rings:
+                clean_polys.append(rings)
+        if not clean_polys:
+            continue
+        props = {}
+        for k, v in list((f.get("properties") or {}).items())[:30]:
+            if isinstance(v, (str, int, float)) and not isinstance(v, bool) and len(str(k)) <= 40:
+                props[str(k)] = v if not isinstance(v, str) else v[:120]
+        geometry = {"type": "Polygon", "coordinates": clean_polys[0]} if len(clean_polys) == 1 \
+            else {"type": "MultiPolygon", "coordinates": clean_polys}
+        out.append({"type": "Feature", "properties": props, "geometry": geometry})
+    if points > MAX_PARCEL_POINTS:
+        raise ValueError("too many points; export just your own parcel and its neighbours")
+    return {"type": "FeatureCollection", "features": out}
+
+
 def create_app(settings: dict | None = None, link: MeshLink | None = None) -> FastAPI:
     settings = settings or load_settings()
     store = Store(settings["data_dir"])
@@ -194,6 +239,20 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
             raise HTTPException(503, "not connected to a Meshtastic node")
         link.send_command(node_id, action, body.intensity, body.duration_ms)
         return {"sent": action.name}
+
+    # -- Property lines (parcels imported from county GIS files) --------------------------------
+    @app.get("/api/parcels")
+    def get_parcels():
+        return store.setting("parcels") or {"type": "FeatureCollection", "features": []}
+
+    @app.put("/api/parcels")
+    def put_parcels(fc: dict):
+        try:
+            clean = clean_parcels(fc)
+        except (KeyError, TypeError, ValueError) as e:
+            raise HTTPException(400, f"invalid parcels: {e}") from e
+        store.set_setting("parcels", clean if clean["features"] else None)
+        return {"count": len(clean["features"])}
 
     # -- Firmware -------------------------------------------------------------------------------
     fw_root = Path(settings["data_dir"]) / "firmware"

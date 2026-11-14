@@ -65,6 +65,21 @@ such as a road. The collar ignores fixes with poor satellite geometry.
 Each collar holds up to 4 zones of up to 32 corners. The dog must be inside **every** keep-in
 zone, so use one keep-in zone, not several side by side.
 
+## Property lines
+
+Most US counties publish parcel (tax map) lines on their GIS or property search site, and many let
+you download a parcel as GeoJSON, KML or a shapefile. Under **Property lines**, press
+**Import file…** and pick the file. For a shapefile, pick the `.zip`, or the `.shp`, `.dbf` and
+`.prj` files together; the `.prj` tells the page how to convert the coordinates. Parcels show as
+dashed orange outlines, saved on the base so every device sees them, and a zone you draw snaps
+to their corners.
+
+Click a parcel and choose **Use as keep-in zone** to turn its outline into a zone for the
+selected collar. Outlines with more than 32 corners are simplified, and the page says by how many
+metres the line moved. Tax-map lines are often 1 to 5 m off, so compare the zone with the
+satellite view before sending it, and keep the danger band well inside anything that matters,
+such as a road. A whole-county file is cut down to the 500 parcels nearest the map's centre.
+
 ## Trying it without a collar
 
 Press **+ Simulated collar** under the collar list to add a pretend collar in the middle of the

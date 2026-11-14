@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.7.0
+
+- Property lines: import parcels from your county's GIS site as GeoJSON, KML or a shapefile
+  (zipped, or the .shp, .dbf and .prj files together; reprojected from the .prj). They show as
+  dashed outlines that zones snap to while drawing. Click one to make it a keep-in zone,
+  simplified to the collar's 32-corner limit.
+
 ## 0.6.0
 
 - Firmware panel: download the latest collar firmware built by CI, or build it from source on
