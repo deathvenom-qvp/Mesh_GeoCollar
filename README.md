@@ -105,8 +105,13 @@ Home Assistant OS or Supervised is needed for apps (amd64 or aarch64). Full inst
 including pairing collars, are in [base/DOCS.md](base/DOCS.md), which Home Assistant also shows
 on the app's Documentation tab.
 
-Then, for each collar: put the base node's public key in the collar's Meshtastic admin keys, add
-the collar by node ID in the app, draw keep-in and keep-out zones on the map, and send them.
+The base radio is any Meshtastic node on stock firmware (2.5 or later) with its LoRa region set,
+plugged into the Home Assistant machine by USB (recommended) or reachable on the network. See
+[Setting up the base radio](base/DOCS.md#setting-up-the-base-radio).
+
+Then, for each collar: plug it into the base machine, flash and set it up from **Collar
+firmware** (that adds it, names it after the dog, and makes it trust the base), draw keep-in and
+keep-out zones on the map, and send them.
 
 The map starts on satellite imagery so you can trace the yard. Each collar holds up to 4 zones of
 up to 32 corners. Draw one keep-in zone around the yard and keep-out zones inside it (a pond, a

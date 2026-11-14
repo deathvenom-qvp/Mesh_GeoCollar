@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.12.1
+
+- **Base radio** panel (click the radio badge): how the base radio is connected, its node,
+  firmware, region, preset and channels, and warnings for anything that stops collars working
+  (no region, firmware before 2.5, no public key, ham mode). Setup steps when no radio is set.
+- Docs: how to set up the base radio, and USB versus network.
+
 ## 0.12.0
 
 - Shock can now be turned on for real collars: **Turn shock on…** at the top of a collar's panel,

@@ -116,6 +116,10 @@
   .rename { display: flex; gap: 6px; align-items: center; }
   .rename input { width: 12em; }
   .rename[hidden], .row[hidden] { display: none; }
+  #radioBox summary { cursor: pointer; font-size: 12px; margin-top: 6px; }
+  button.pill { cursor: pointer; font-family: inherit; background: none; }
+  #radioInfo .stats { margin-top: 4px; }
+  #radioInfo ol { margin: 6px 0 0 18px; padding: 0; font-size: 13px; }
   .shockbox { margin-top: 8px; padding: 8px; border: 1px solid var(--line); border-radius: 8px; font-size: 13px; }
   .shockbox input[type=range] { width: 100%; }
   button.danger { background: var(--bad); color: #fff; border-color: var(--bad); }
@@ -208,9 +212,13 @@
           <button type="button" data-u="m">m</button>
           <button type="button" data-u="ft">ft</button>
         </div>
-        <span class="pill" id="health">Checking radio…</span>
+        <button type="button" class="pill" id="health" title="Base radio details">Checking radio…</button>
       </div>
     </div>
+    <details id="radioBox">
+      <summary class="muted">Base radio</summary>
+      <div id="radioInfo" style="margin-top:6px"></div>
+    </details>
   </section>
 
   <section>
@@ -1140,8 +1148,43 @@ async function loadDiscovery() {
   try { discovered = await api('discovered'); } catch { return; }
   for (const id of Object.keys(discovered)) if (collars[id]) delete discovered[id];
   renderNewCollars();
-  if (!baseInfo.public_key) { try { baseInfo = await api('base'); renderBaseKey(); } catch { /* radio not connected */ } }
+  const now = Date.now();
+  if (!baseInfo.public_key || now - (baseInfo.fetched || 0) > 60000) {
+    try { baseInfo = { ...(await api('base')), fetched: now }; } catch { /* radio not connected */ }
+    renderBaseKey(); renderRadio();
+  }
 }
+
+// The base radio: how it is connected, its settings, and anything that stops collars working.
+let lastHealth = null;
+function renderRadio() {
+  const h = lastHealth, b = baseInfo, box = $('radioInfo');
+  if (!h) return;
+  if (!h.mesh_configured) {
+    box.replaceChildren(el('div', {}, 'No base radio is set up. Any Meshtastic node (2.5 or later) works as the base:'),
+      el('ol', {},
+        el('li', {}, 'Plug it into this machine by USB (best), or put it on your network with Wi-Fi or Ethernet.'),
+        el('li', {}, 'In Home Assistant open this app\'s Configuration tab and pick the USB device, or type the node\'s IP address.'),
+        el('li', {}, 'Save and restart the app. This badge turns green when it connects.')));
+    $('radioBox').open = true;
+    return;
+  }
+  if (!h.mesh_connected) {
+    box.replaceChildren(el('div', { class: 'callout bad' }, `Not connected. Retrying every 30 s. ${h.mesh_error || ''}`),
+      el('div', { class: 'muted', style: 'margin-top:6px' }, 'Check the cable or IP address. Only one program can use the radio at a time, so close the Meshtastic app or other integrations connected to it.'));
+    $('radioBox').open = true;
+    return;
+  }
+  const rows = [['Node', `${b.long_name || ''} ${b.node_id || ''}`.trim()], ['Connected by', b.connection], ['Board', b.hw_model],
+    ['Meshtastic', b.firmware], ['Region', b.region], ['Preset', b.preset], ['Role', b.role], ['Primary channel', b.channel],
+    ['Public channel', b.public_channel == null ? '' : b.public_channel ? 'Yes (lost-dog messages reach strangers)' : 'No']].filter(([, v]) => v);
+  box.replaceChildren(
+    ...(b.issues || []).map(t => el('div', { class: 'callout bad' }, t)),
+    el('div', { class: 'stats' }, ...rows.flatMap(([k, v]) => [el('span', {}, k), el('span', {}, v)])),
+    el('div', { class: 'muted', style: 'margin-top:6px' }, 'Collars must use the same region, preset and primary channel. "Set up only" under Collar firmware copies them to a collar over USB.'));
+  if ((b.issues || []).length) $('radioBox').open = true;
+}
+$('health').onclick = () => { $('radioBox').open = !$('radioBox').open; };
 
 // Shock: off by default on every collar; the owner turns it on here, after confirming.
 function renderShock(c) {
@@ -1331,6 +1374,7 @@ $('simNoise').onchange = () => simUpdate({ noise_m: Math.min(30, Math.round(from
 async function refresh() {
   try {
     const h = await api('health');
+    if (JSON.stringify(h) !== JSON.stringify(lastHealth)) { lastHealth = h; if (h.mesh_connected) baseInfo.fetched = 0; renderRadio(); }
     $('health').textContent = h.mesh_connected ? 'Radio connected' : h.mesh_configured ? 'Radio not connected' : 'No radio set up';
     $('health').title = h.mesh_connected ? '' : h.mesh_configured ? `Retrying every 30 s. ${h.mesh_error || ''}`.trim()
       : 'Set the Meshtastic node\'s serial port or IP address in the app configuration.';

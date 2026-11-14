@@ -7,9 +7,13 @@ services:
       - "8099:8099"
     volumes:
       - ./base/data:/data
+    # The base radio. Use its /dev/serial/by-id/... name so it survives reboots; ESP32-S3 boards
+    # show up as /dev/ttyACM0, CP2102/CH340 boards as /dev/ttyUSB0. To flash collars over USB from
+    # the app, map their port too (or use "USB on this computer" in the browser instead).
     devices:
       - /dev/ttyUSB0:/dev/ttyUSB0
     environment:
       GEOCOLLAR_MESH_SERIAL: /dev/ttyUSB0
+      # GEOCOLLAR_HOME: "40.0, -75.0"   # where the map starts
       # GEOCOLLAR_MESH_HOST: 192.168.1.50
     restart: unless-stopped

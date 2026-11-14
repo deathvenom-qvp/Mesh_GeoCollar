@@ -140,7 +140,8 @@ class MeshLink:
         return len(chunks)
 
     def base_info(self) -> dict:
-        """The base node's ID and public key (base64), for setting up collars."""
+        """What the page shows about the base radio: identity, public key (base64, for collars'
+        admin keys), firmware and radio settings, and anything that would stop collars working."""
         if not self.iface:
             return {}
         import base64
@@ -148,13 +149,47 @@ class MeshLink:
         info = self.iface.getMyNodeInfo() or {}
         user = info.get("user", {})
         key = user.get("publicKey") or ""
+        out = {"node_id": user.get("id", ""), "long_name": user.get("longName", ""),
+               "hw_model": user.get("hwModel", ""), "connection": f"network {self.host}" if self.host else f"USB {self.serial_port or '(auto)'}"}
+        node = getattr(self.iface, "localNode", None)
+        cfg = getattr(node, "localConfig", None)
+        try:
+            if not key and cfg is not None and cfg.security.public_key:
+                key = base64.b64encode(cfg.security.public_key).decode()
+        except AttributeError:
+            pass
+        out["public_key"] = key
+        meta = getattr(self.iface, "metadata", None)
+        out["firmware"] = getattr(meta, "firmware_version", "") or ""
+        issues = []
+        if cfg is not None:
+            from meshtastic.protobuf import config_pb2
+
+            lora = cfg.lora
+            out["region"] = config_pb2.Config.LoRaConfig.RegionCode.Name(lora.region)
+            out["preset"] = config_pb2.Config.LoRaConfig.ModemPreset.Name(lora.modem_preset) if lora.use_preset else "custom"
+            out["role"] = config_pb2.Config.DeviceConfig.Role.Name(cfg.device.role)
+            if lora.region == 0:
+                issues.append("The LoRa region is not set, so the radio does not transmit. Set it in the Meshtastic app (Settings > LoRa).")
+            if not lora.tx_enabled:
+                issues.append("Transmit is turned off in the LoRa settings.")
+        chans = getattr(node, "channels", None) or []
+        if chans:
+            primary = chans[0].settings
+            out["channel"] = primary.name or "(default)"
+            out["public_channel"] = any(c.role and bytes(c.settings.psk) in (b"", b"\x01") for c in chans)
+        if user.get("isLicensed"):
+            issues.append("Licensed (ham) mode is on, which turns off encryption; collars cannot trust this base.")
         if not key:
-            try:
-                raw = self.iface.localNode.localConfig.security.public_key
-                key = base64.b64encode(raw).decode() if raw else ""
-            except AttributeError:
-                key = ""
-        return {"node_id": user.get("id", ""), "long_name": user.get("longName", ""), "public_key": key}
+            issues.append("The radio has no public key. Update it to Meshtastic 2.5 or later.")
+        ver = out["firmware"].split(".")
+        try:
+            if ver[0] and (int(ver[0]), int(ver[1])) < (2, 5):
+                issues.append(f"Meshtastic {out['firmware']} is too old; collars need 2.5 or later on the base.")
+        except (ValueError, IndexError):
+            pass
+        out["issues"] = issues
+        return out
 
     def send_owner(self, node_id: str, dog: str, owner: str, phone: str) -> None:
         """The dog's name and the owner's contact, for the collar's lost beacon."""

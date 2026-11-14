@@ -81,3 +81,35 @@ def test_hello_from_a_new_collar_is_passed_on():
                       "decoded": {"portnum": "300", "payload": protocol.encode_hello(False, False, 80)}})
     assert heard == [("!18abcd01", {"has_admin_key": False, "has_fences": False, "battery_pct": 80,
                                     "long_name": "Meshtastic cd01", "short_name": "cd01", "rssi": -90, "snr": None, "hops": 1})]
+
+
+def test_base_info_reports_settings_and_problems():
+    from meshtastic.protobuf import channel_pb2, config_pb2, localonly_pb2
+
+    class Node:
+        localConfig = localonly_pb2.LocalConfig()
+        channels = [channel_pb2.Channel(index=0, role=channel_pb2.Channel.Role.PRIMARY)]
+
+    Node.localConfig.lora.use_preset = True
+    Node.localConfig.lora.modem_preset = config_pb2.Config.LoRaConfig.ModemPreset.LONG_FAST
+    Node.channels[0].settings.psk = b"\x01"
+
+    class Meta:
+        firmware_version = "2.7.15.567b8ea"
+
+    class Iface:
+        localNode = Node()
+        metadata = Meta()
+
+        def getMyNodeInfo(self):
+            return {"user": {"id": "!0badbase", "longName": "Base", "hwModel": "HELTEC_V3", "publicKey": "a2V5"}}
+
+    link = MeshLink(lambda *_: None, serial_port="/dev/ttyUSB0")
+    link.iface = Iface()
+    info = link.base_info()
+    assert info["node_id"] == "!0badbase" and info["public_key"] == "a2V5" and info["preset"] == "LONG_FAST"
+    assert info["region"] == "UNSET" and info["public_channel"] and info["connection"] == "USB /dev/ttyUSB0"
+    assert any("region is not set" in i for i in info["issues"])
+    Node.localConfig.lora.region = config_pb2.Config.LoRaConfig.RegionCode.US
+    Node.localConfig.lora.tx_enabled = True
+    assert link.base_info()["issues"] == []

@@ -10,6 +10,31 @@ dog is. The page opens from the **GeoCollar** entry in the Home Assistant sideba
 - One or more collars running the GeoCollar firmware, on the same Meshtastic channel settings
   as the base node.
 
+## Setting up the base radio
+
+The base radio is an ordinary Meshtastic node running stock Meshtastic 2.5 or later (2.8 is
+best): a Heltec V3, a LilyGO T-Beam, a RAK WisBlock, a Station G2 and so on. It does not run
+GeoCollar firmware. Before connecting it to this app:
+
+1. Flash stock Meshtastic with the [Meshtastic web flasher](https://flasher.meshtastic.org).
+2. In the Meshtastic phone app (or [client.meshtastic.org](https://client.meshtastic.org)), set the
+   **LoRa region** for your country. Leave the preset at the default (LongFast) unless you have a
+   reason to change it; collars get the same settings.
+3. Leave the channels at the default, or set up a private primary channel and keep LongFast with
+   the default key as a secondary one, so lost-dog messages still reach other Meshtastic users.
+4. Put the antenna as high as you can. The base's range is the yard you can cover.
+
+**USB or network?** USB is the better choice: plug the radio into the Home Assistant machine with
+a data cable. It is powered, needs no Wi-Fi setup, and keeps working if Wi-Fi drops. Use the
+network instead when the Home Assistant machine sits somewhere with poor radio range (a basement or
+a rack): put the radio by a window or in the attic on Wi-Fi or Ethernet (port 4403, Meshtastic's
+network API, which is on whenever Wi-Fi or Ethernet is enabled). On ESP32 boards, turning on Wi-Fi
+turns off Bluetooth, so you configure the node over the network from then on.
+
+Once connected, click the radio badge at the top of the page (or **Base radio** under it) to see
+the radio's node, firmware, region, preset and channel, and any problem that would stop collars
+working, such as no region set or firmware too old.
+
 ## Configuration
 
 Set **one** of these on the **Configuration** tab, then restart the app:
@@ -23,8 +48,9 @@ Pick the USB device from the list rather than typing `/dev/ttyUSB0`: the `/dev/s
 names stay the same after a reboot. A network node must have Meshtastic's network API on
 (port 4403, the default when Wi-Fi is enabled).
 
-Only one program can use a node's USB port at a time, so don't point another Meshtastic tool or
-integration at the same USB node while this app runs. If the node is unplugged or rebooted, the
+Only one program can use a node at a time, so don't point another Meshtastic tool or
+integration (including Home Assistant's own Meshtastic integration) at the same node while this
+app runs. Over the network, a Meshtastic node also serves only one client at a time. If the node is unplugged or rebooted, the
 app keeps retrying every 30 seconds; the badge at the top of the page shows whether the radio is
 connected, and hovering it shows the last error.
 
