@@ -85,7 +85,7 @@ connected, and hovering it shows the last error.
 
 The easy way: plug the new collar into the base machine, open **Collar firmware**, pick **USB on
 base**, type the dog's name, leave **Then set it up for this base** ticked and press **Flash** (or
-**Set up only** if it already runs GeoCollar). The base reads the collar's node ID from its chip,
+**Set up only** if it already runs GeoCollar). The base learns the collar's node ID from it,
 adds it, puts the base's public key in the collar's admin keys, and copies the base's LoRa
 settings and channels to it.
 
@@ -107,6 +107,10 @@ the dog; otherwise it looks like stock Meshtastic (same version number) in the M
 serial log says "GeoCollar: ready" at start. A fresh install has no LoRa region, so it can't
 transmit anything until it is set up: use **Set up only** (or set the region and the base's key by
 hand). Until a collar reports, its panel says what it is waiting for.
+
+Setting the region on a fresh collar makes its key, and Meshtastic 2.8 then changes its node ID to
+match; the setup follows it and keeps the collar's name and fences. The setup ends by reconnecting
+after the collar restarts and checking that its settings stuck.
 
 By hand, collars only obey messages from base nodes they trust:
 

@@ -292,6 +292,20 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
             store.set_collar_info(node_id, "locked", True)
         store.set_collar_info(node_id, "public_key", None)  # re-learn it from the next report
 
+    def adopt_setup(job, result: dict, name: str | None) -> None:
+        """After a USB setup: keep the collar's record if its node ID changed, add it if new."""
+        new, old = result.get("node_id"), result.get("previous_node_id")
+        if not new:
+            return
+        if old and old != new and store.collar(old) is not None:
+            if store.collar(new) is None:
+                store.move_collar(old, new)
+            else:
+                store.remove_collar(old)
+            job.log(f"Moved the collar's record from {old} to its new node ID {new}")
+        result["new_collar"] = note_device(new, "usb", name)
+        note_setup(new, result)
+
     for node_id, c in store.collars().items():
         if c.get("sim"):
             sim.add(node_id, c["sim"])
@@ -581,19 +595,26 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
 
         def run(job):
             result = fw.flash_usb(job, builds, body.build, body.port, body.mode, settings.get("mesh_serial", ""))
-            node_id = body.node_id or result.get("node_id")
-            if node_id and not body.node_id:
+            # The ID read from the chip is the collar's node ID only until it has a key: right after a
+            # full install, or for a collar already listed under it. A set-up 2.8 collar's ID is a
+            # hash of its key, so an update can't be matched by chip ID; the setup below finds it.
+            chip_id = result.get("node_id")
+            node_id = body.node_id or (chip_id if chip_id and (body.mode == "full" or store.collar(chip_id)) else None)
+            if node_id and not body.node_id and not body.setup:
                 result["new_collar"] = note_device(node_id, "usb", body.name)
                 if result["new_collar"]:
                     job.log(f"Added {node_id} to the base as a new collar")
-            record_flash(node_id, m, "usb")
             if body.mode == "full" and node_id:  # erased: the collar has a new key pair now
                 store.set_collar_info(node_id, "public_key", None)
             if body.setup:
                 c = store.collar(node_id) if node_id else None
                 name = c["name"] if c and c["name"] != node_id else (body.name or "")
                 result.update(fw.setup_collar(job, body.port, getattr(link, "iface", None), name, lock=body.lock))
-                note_setup(node_id, result)
+                if node_id and node_id != result.get("previous_node_id") and store.collar(node_id) is not None:
+                    result.setdefault("previous_node_id", node_id)
+                adopt_setup(job, result, body.name)
+                node_id = result.get("node_id") or node_id
+            record_flash(node_id, m, "usb")
             return result
 
         return start("usb", f"Flash over USB ({body.port})", run)
@@ -609,10 +630,8 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
 
         def run(job):
             result = fw.setup_collar(job, body.port, getattr(link, "iface", None), (body.name or "").strip(),
-                                     boot_wait_s=10, lock=body.lock)
-            if result.get("node_id"):
-                result["new_collar"] = note_device(result["node_id"], "usb", body.name)
-                note_setup(result["node_id"], result)
+                                     boot_wait_s=45, lock=body.lock)
+            adopt_setup(job, result, body.name)
             return result
 
         return start("usb", f"Set up the collar on {body.port}", run)
@@ -646,9 +665,7 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
                                          lock=lock)
             finally:
                 asyncio.run_coroutine_threadsafe(ws.send_json({"done": True}), loop)
-            if result.get("node_id"):
-                result["new_collar"] = note_device(result["node_id"], "usb", dog or None)
-                note_setup(result["node_id"], result)
+            adopt_setup(job, result, dog or None)
             return result
 
         try:
@@ -807,6 +824,10 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
         node_id = body.node_id.lower()
         if not re.fullmatch(r"![0-9a-f]{8}", node_id):
             raise HTTPException(400, "bad node ID")
+        # The chip's ID is the node ID only until the collar makes its key (see flash-usb), so an
+        # update adds nothing new; "Set up only" finds the real ID.
+        if body.mode != "full" and store.collar(node_id) is None:
+            return {"node_id": node_id, "new_collar": False, "collar": None}
         new = note_device(node_id, body.via, body.name)
         record_flash(node_id, m, body.via)
         if body.mode == "full":  # erased: the collar has a new key pair now

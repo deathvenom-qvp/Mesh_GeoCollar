@@ -341,59 +341,197 @@ class FakeIface:
         self.closed = True
 
 
-def test_setup_collar_over_usb(monkeypatch):
-    from meshtastic.protobuf import channel_pb2, config_pb2
+class FakeMeshtasticDevice:
+    """A stand-in for a collar on USB that behaves like Meshtastic 2.8 where it matters: settings
+    sent to another node number go nowhere; setting the region on a fresh device makes its key and
+    moves its node number to a hash of the key; managed mode ignores all later USB admin (commit
+    included); changes inside an edit transaction are lost unless committed. Each open() is a new
+    USB connection, through the same SocketStream bridge the browser relay uses, with the real
+    Meshtastic library on top."""
 
+    def __init__(self, num=0xAB52A4E5, region=0, managed=False, admin_keys=()):
+        from meshtastic.protobuf import channel_pb2, localonly_pb2
+
+        self.num = num
+        self.saved = localonly_pb2.LocalConfig()
+        self.saved.lora.region = region
+        self.saved.security.is_managed = managed
+        self.saved.security.admin_key.extend(admin_keys)
+        if region:
+            self.saved.security.public_key = b"P" * 32
+        self.saved_channels = [channel_pb2.Channel(index=i, role=1 if i == 0 else 0) for i in range(8)]
+        self.long_name = "GeoCollar a4e5"
+        self.ram = None
+        self.txn = False
+        self.ignored = []
+
+    def open(self, _port=None):
+        from meshtastic.protobuf import localonly_pb2
+
+        # A new connection after a restart sees what was saved.
+        self.ram = localonly_pb2.LocalConfig()
+        self.ram.CopyFrom(self.saved)
+        self.ram_channels = [type(c)() for c in self.saved_channels]
+        for a, b in zip(self.ram_channels, self.saved_channels):
+            a.CopyFrom(b)
+        self.txn = False
+        self.buf = b""
+        self.stream = fw.SocketStream(self.on_bytes, read_timeout=0.05)
+        return fw.open_socket_node(self.stream)
+
+    def save(self):
+        if not self.txn:
+            self.saved.CopyFrom(self.ram)
+            for a, b in zip(self.saved_channels, self.ram_channels):
+                a.CopyFrom(b)
+
+    def on_bytes(self, data):
+        from meshtastic.protobuf import admin_pb2, mesh_pb2
+
+        self.buf += data
+        while (i := self.buf.find(b"\x94\xc3")) >= 0 and len(self.buf) >= i + 4:
+            n = (self.buf[i + 2] << 8) | self.buf[i + 3]
+            if len(self.buf) < i + 4 + n:
+                return
+            tr = mesh_pb2.ToRadio()
+            tr.ParseFromString(self.buf[i + 4 : i + 4 + n])
+            self.buf = self.buf[i + 4 + n :]
+            if tr.HasField("want_config_id"):
+                threading.Thread(target=self.send_config, args=(tr.want_config_id,), daemon=True).start()
+            elif tr.HasField("packet") and tr.packet.decoded.portnum == 6:  # ADMIN_APP
+                m = admin_pb2.AdminMessage()
+                m.ParseFromString(tr.packet.decoded.payload)
+                self.admin(tr.packet.to, m)
+
+    def admin(self, to, m):
+        import zlib
+
+        kind = m.WhichOneof("payload_variant")
+        if to != self.num:
+            self.ignored.append(("to another node", kind))
+            return
+        if self.ram.security.is_managed:
+            self.ignored.append(("managed", kind))
+            return
+        if kind == "begin_edit_settings":
+            self.txn = True
+        elif kind == "commit_edit_settings":
+            self.txn = False
+            self.save()
+        elif kind == "set_config":
+            which = m.set_config.WhichOneof("payload_variant")
+            if which == "lora" and not self.ram.lora.region and m.set_config.lora.region:
+                self.ram.security.public_key = b"P" * 32  # the key is made now...
+                self.num = zlib.crc32(b"P" * 32)  # ...and the node number follows it
+            if which == "security":
+                keep = bytes(self.ram.security.public_key)
+                getattr(self.ram, which).CopyFrom(m.set_config.security)
+                self.ram.security.public_key = keep
+            elif which in ("lora", "bluetooth"):
+                getattr(self.ram, which).CopyFrom(getattr(m.set_config, which))
+            self.save()
+        elif kind == "set_channel":
+            self.ram_channels[m.set_channel.index].CopyFrom(m.set_channel)
+            self.save()
+        elif kind == "set_owner":
+            self.long_name = m.set_owner.long_name or self.long_name
+
+    def send_config(self, config_id):
+        from meshtastic.protobuf import mesh_pb2
+
+        out = [mesh_pb2.FromRadio()]
+        out[0].my_info.my_node_num = self.num
+        fr = mesh_pb2.FromRadio()
+        fr.node_info.num = self.num
+        fr.node_info.user.id = f"!{self.num:08x}"
+        fr.node_info.user.long_name = self.long_name
+        out.append(fr)
+        for name in ("device", "lora", "security", "bluetooth"):
+            fr = mesh_pb2.FromRadio()
+            getattr(fr.config, name).CopyFrom(getattr(self.ram, name))
+            out.append(fr)
+        for c in self.ram_channels:
+            fr = mesh_pb2.FromRadio()
+            fr.channel.CopyFrom(c)
+            out.append(fr)
+        fr = mesh_pb2.FromRadio()
+        fr.config_complete_id = config_id
+        out.append(fr)
+        for f in out:
+            self.stream.feed(FakeMeshtasticDevice.frame(f))
+
+    @staticmethod
+    def frame(msg) -> bytes:
+        b = msg.SerializeToString()
+        return bytes([0x94, 0xC3, len(b) >> 8, len(b) & 255]) + b
+
+
+def fake_base():
+    from meshtastic.protobuf import channel_pb2, config_pb2, localonly_pb2
+
+    node = type("N", (), {})()
+    node.localConfig = localonly_pb2.LocalConfig()
+    node.localConfig.security.public_key = b"B" * 32
+    node.localConfig.lora.region = config_pb2.Config.LoRaConfig.RegionCode.US
+    node.localConfig.lora.modem_preset = config_pb2.Config.LoRaConfig.ModemPreset.MEDIUM_FAST
+    node.localConfig.lora.tx_enabled = True
+    node.channels = [channel_pb2.Channel(index=i) for i in range(8)]
+    node.channels[0].role = channel_pb2.Channel.Role.PRIMARY
+    node.channels[0].settings.psk = b"\x01"
+    return type("I", (), {"localNode": node})()
+
+
+def test_setup_collar_sticks_on_a_fresh_meshtastic_28_collar():
+    import zlib
+
+    dev = FakeMeshtasticDevice()  # fresh install: no region, no key, node number from the MAC
+    r = fw.setup_collar(fw.Job("usb", "t"), "/dev/ttyACM0", fake_base(), "Rex the Dog", open_iface=dev.open,
+                        boot_wait_s=5, restart_s=0)
+    new_id = f"!{zlib.crc32(b'P' * 32):08x}"
+    assert r["checked"] and r["node_id"] == new_id and r["previous_node_id"] == "!ab52a4e5"
+    assert r["locked"] and 100000 <= r["ble_pin"] <= 999999
+    sec = dev.saved.security
+    assert sec.is_managed and not sec.admin_channel_enabled and [bytes(k) for k in sec.admin_key] == [b"B" * 32]
+    assert dev.saved.lora == fake_base().localNode.localConfig.lora
+    assert dev.saved.bluetooth.enabled and dev.saved.bluetooth.fixed_pin == r["ble_pin"]
+    assert dev.long_name == "Rex the Dog"
+    assert ("to another node", "set_config") not in dev.ignored  # nothing was lost to the old number
+
+    # Again: locked to this base already, so nothing is written.
+    r = fw.setup_collar(fw.Job("usb", "t"), "/dev/ttyACM0", fake_base(), "", open_iface=dev.open, boot_wait_s=5)
+    assert r["already_locked"] and r["node_id"] == new_id
+
+    # Locked to someone else's base: refused; only a full install frees it.
+    other = FakeMeshtasticDevice(region=1, managed=True, admin_keys=[b"O" * 32])
+    with pytest.raises(fw.FirmwareError, match="locked to another base"):
+        fw.setup_collar(fw.Job("usb", "t"), "/dev/ttyACM0", fake_base(), "", open_iface=other.open, boot_wait_s=5)
+
+    # Unlocked set-up when asked; a collar that already had a region keeps its node number. Three
+    # admin keys at most: the last one gives way.
+    free = FakeMeshtasticDevice(region=1, admin_keys=[b"1" * 32, b"2" * 32, b"3" * 32])
+    r = fw.setup_collar(fw.Job("usb", "t"), "/dev/ttyACM0", fake_base(), "", open_iface=free.open, lock=False,
+                        boot_wait_s=5, restart_s=0)
+    assert r["checked"] and r["node_id"] == "!ab52a4e5" and r["ble_pin"] is None
+    assert not free.saved.security.is_managed
+    assert [bytes(k) for k in free.saved.security.admin_key] == [b"1" * 32, b"2" * 32, b"B" * 32]
+
+    with pytest.raises(fw.FirmwareError, match="not connected"):
+        fw.setup_collar(fw.Job("usb", "t"), "/dev/ttyACM0", None)
+
+
+def test_setup_retries_while_the_collar_boots(monkeypatch):
     monkeypatch.setattr(fw.time, "sleep", lambda s: None)
-    base = FakeNode(public_key=b"B" * 32)
-    base.localConfig.lora.region = config_pb2.Config.LoRaConfig.RegionCode.US
-    base.localConfig.lora.modem_preset = config_pb2.Config.LoRaConfig.ModemPreset.MEDIUM_FAST
-    base.channels[0].role = channel_pb2.Channel.Role.PRIMARY
-    base.channels[0].settings.psk = b"\x01"
-    collar = FakeNode(admin_keys=[b"1" * 32, b"2" * 32, b"3" * 32])
-    iface = FakeIface(collar)
+    dev = FakeMeshtasticDevice(region=1)
     tries = []
 
     def open_iface(port):
         tries.append(port)
         if len(tries) < 3:
             raise OSError("still booting")
-        return iface
+        return dev.open(port)
 
-    job = fw.Job("usb", "t")
-    r = fw.setup_collar(job, "/dev/ttyACM0", FakeIface(base, 0x11111111), "Rex the Dog", open_iface=open_iface)
-    assert r["node_id"] == "!18abcd01" and r["locked"] and 100000 <= r["ble_pin"] <= 999999
-    assert len(tries) == 3 and iface.closed
-    assert collar.localConfig.security.is_managed and not collar.localConfig.security.admin_channel_enabled
-    assert collar.localConfig.bluetooth.fixed_pin == r["ble_pin"] and collar.localConfig.bluetooth.mode == 1  # FIXED_PIN
-    keys = [bytes(k) for k in collar.localConfig.security.admin_key]
-    assert keys == [b"1" * 32, b"2" * 32, b"B" * 32]  # three at most: the last one gives way
-    assert collar.localConfig.lora.region == base.localConfig.lora.region
-    assert collar.localConfig.lora.modem_preset == base.localConfig.lora.modem_preset
-    assert collar.localConfig.bluetooth.enabled
-    assert collar.channels[0].settings.psk == b"\x01"
-    assert collar.calls[0] == "begin" and collar.calls[-1] == "commit"
-    assert "owner:Rex the Dog/RTD" in collar.calls
-    # Locking comes last, after everything else is written.
-    assert collar.calls[-2] == "config:security" and collar.calls.index("config:lora") < collar.calls.index("config:security")
-
-    # Again: locked to this base already, so nothing is written.
-    collar.calls.clear()
-    r = fw.setup_collar(fw.Job("usb", "t"), "/dev/ttyACM0", FakeIface(base), "", open_iface=lambda p: iface)
-    assert r["already_locked"] and collar.calls == [] and len(collar.localConfig.security.admin_key) == 3
-
-    # Locked to someone else's base: refused; only a full install frees it.
-    other = FakeNode(public_key=b"O" * 32)
-    with pytest.raises(fw.FirmwareError, match="locked to another base"):
-        fw.setup_collar(fw.Job("usb", "t"), "/dev/ttyACM0", FakeIface(other), "", open_iface=lambda p: iface)
-
-    # Unlocked set-up when asked.
-    free = FakeNode()
-    r = fw.setup_collar(fw.Job("usb", "t"), "/dev/ttyACM0", FakeIface(base), "", open_iface=lambda p: FakeIface(free), lock=False)
-    assert not free.localConfig.security.is_managed and r["ble_pin"] is None
-
-    with pytest.raises(fw.FirmwareError, match="not connected"):
-        fw.setup_collar(fw.Job("usb", "t"), "/dev/ttyACM0", None)
+    r = fw.setup_collar(fw.Job("usb", "t"), "/dev/ttyACM0", fake_base(), "", open_iface=open_iface, boot_wait_s=5)
+    assert r["checked"] and len(tries) >= 5  # 2 failures, then: setup, after the region, after the restart
 
 
 def test_new_collars_from_usb_browser_and_mesh(client, tmp_path, monkeypatch):
@@ -401,8 +539,12 @@ def test_new_collars_from_usb_browser_and_mesh(client, tmp_path, monkeypatch):
     make_build(tmp_path / "in")
     m = app.state.builds.add(tmp_path / "in", "release")
 
-    # Flashed from the browser, which read the MAC address: added as a new collar.
+    # Flashed from the browser, which read the MAC address. After an update that is not the node
+    # ID of a set-up Meshtastic 2.8 collar (a hash of its key), so nothing is added...
     r = c.post("/api/firmware/flashed", json={"node_id": "!18ABCD01", "build": m["id"], "name": "Rex"}).json()
+    assert not r["new_collar"] and c.get("/api/collars").json() == {}
+    # ...but after a full install it is, until setup gives the collar its key.
+    r = c.post("/api/firmware/flashed", json={"node_id": "!18ABCD01", "build": m["id"], "name": "Rex", "mode": "full"}).json()
     assert r["new_collar"] and r["collar"]["name"] == "Rex" and r["collar"]["firmware"]["build"] == m["id"]
     r = c.post("/api/firmware/flashed", json={"node_id": "!18abcd01", "build": m["id"]}).json()
     assert not r["new_collar"] and r["collar"]["name"] == "Rex"
@@ -451,11 +593,13 @@ def test_setup_from_the_browser_over_a_websocket(tmp_path, monkeypatch):
         while len(reply) < 4:
             reply += stream.read(4 - len(reply))
         assert reply == b"pong" and name == "Rex" and lock is False
-        return {"node_id": "!a1b2c3d4", "ble_pin": None, "locked": False}
+        return {"node_id": "!a1b2c3d4", "previous_node_id": "!0badf00d", "ble_pin": None, "locked": False}
 
     monkeypatch.setattr(fw, "setup_collar", fake_setup)
     monkeypatch.setattr(fw, "open_socket_node", lambda stream: stream)
     c = TestClient(create_app({"data_dir": str(tmp_path)}))
+    # Flashed (full install) as !0badf00d; setup gives it a key, and with it a new node ID.
+    c.post("/api/collars", json={"node_id": "!0badf00d", "name": "Rex"})
     with c.websocket_connect("/api/firmware/setup-web?name=Rex&lock=false",
                              headers={"origin": "http://testserver"}) as ws:
         job = ws.receive_json()["job"]
@@ -468,93 +612,11 @@ def test_setup_from_the_browser_over_a_websocket(tmp_path, monkeypatch):
             break
         time.sleep(0.05)
     assert j["state"] == "done", j
-    assert c.get("/api/collars").json()["!a1b2c3d4"]["name"] == "Rex"
+    collars = c.get("/api/collars").json()
+    assert list(collars) == ["!a1b2c3d4"] and collars["!a1b2c3d4"]["name"] == "Rex"
 
     # Another site's page can't open it: WebSockets ignore CORS.
     with pytest.raises(WebSocketDisconnect):
         with c.websocket_connect("/api/firmware/setup-web", headers={"origin": "https://evil.example"}) as ws:
             ws.receive_json()
 
-
-class FakeSerialDevice:
-    """Speaks just enough of Meshtastic's serial API (framed ToRadio / FromRadio) for the real
-    Meshtastic library to connect over a SocketStream and send admin messages."""
-
-    def __init__(self):
-        self.buf = b""
-        self.stream = fw.SocketStream(self.on_bytes, read_timeout=0.05)
-        self.admin = []
-
-    @staticmethod
-    def frame(msg) -> bytes:
-        b = msg.SerializeToString()
-        return bytes([0x94, 0xC3, len(b) >> 8, len(b) & 255]) + b
-
-    def on_bytes(self, data):
-        from meshtastic.protobuf import admin_pb2, mesh_pb2
-
-        self.buf += data
-        while (i := self.buf.find(b"\x94\xc3")) >= 0 and len(self.buf) >= i + 4:
-            n = (self.buf[i + 2] << 8) | self.buf[i + 3]
-            if len(self.buf) < i + 4 + n:
-                return
-            tr = mesh_pb2.ToRadio()
-            tr.ParseFromString(self.buf[i + 4 : i + 4 + n])
-            self.buf = self.buf[i + 4 + n :]
-            if tr.HasField("want_config_id"):
-                threading.Thread(target=self.send_config, args=(tr.want_config_id,), daemon=True).start()
-            elif tr.HasField("packet") and tr.packet.decoded.portnum == 6:  # ADMIN_APP
-                m = admin_pb2.AdminMessage()
-                m.ParseFromString(tr.packet.decoded.payload)
-                self.admin.append(m)
-
-    def send_config(self, config_id):
-        from meshtastic.protobuf import mesh_pb2
-
-        out = [mesh_pb2.FromRadio()]
-        out[0].my_info.my_node_num = 0xA1B2C3D4
-        fr = mesh_pb2.FromRadio()
-        fr.node_info.num = 0xA1B2C3D4
-        fr.node_info.user.id = "!a1b2c3d4"
-        out.append(fr)
-        for name in ("device", "lora", "security", "bluetooth"):
-            fr = mesh_pb2.FromRadio()
-            getattr(fr.config, name).SetInParent()
-            out.append(fr)
-        for i in range(8):
-            fr = mesh_pb2.FromRadio()
-            fr.channel.index = i
-            fr.channel.role = 1 if i == 0 else 0
-            out.append(fr)
-        fr = mesh_pb2.FromRadio()
-        fr.config_complete_id = config_id
-        out.append(fr)
-        for f in out:
-            self.stream.feed(self.frame(f))
-
-
-def test_setup_runs_over_the_browser_relay_with_the_real_meshtastic_library():
-    from meshtastic.protobuf import channel_pb2, localonly_pb2
-
-    base_node = type("N", (), {})()
-    base_node.localConfig = localonly_pb2.LocalConfig()
-    base_node.localConfig.security.public_key = b"K" * 32
-    base_node.localConfig.lora.region = 1
-    base_node.channels = [channel_pb2.Channel(index=i) for i in range(8)]
-    base_node.channels[0].role = 1
-    base_node.channels[0].settings.psk = b"\x01"
-    base_iface = type("I", (), {"localNode": base_node})()
-
-    dev = FakeSerialDevice()
-    job = fw.Job("usb", "test")
-    result = fw.setup_collar(job, "this computer's USB", base_iface, "Rex",
-                             open_iface=lambda _p: fw.open_socket_node(dev.stream), boot_wait_s=5)
-    time.sleep(0.3)
-    assert result["node_id"] == "!a1b2c3d4" and result["locked"] and 100000 <= result["ble_pin"] <= 999999
-    kinds = [m.WhichOneof("payload_variant") for m in dev.admin]
-    assert "begin_edit_settings" in kinds and kinds[-1] == "commit_edit_settings"
-    assert kinds.index("begin_edit_settings") < kinds.index("set_config")
-    security = [m.set_config.security for m in dev.admin if m.WhichOneof("payload_variant") == "set_config"
-                and m.set_config.WhichOneof("payload_variant") == "security"][-1]
-    assert list(security.admin_key) == [b"K" * 32] and security.is_managed
-    assert any(m.WhichOneof("payload_variant") == "set_owner" and m.set_owner.long_name == "Rex" for m in dev.admin)

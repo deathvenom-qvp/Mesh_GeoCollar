@@ -495,8 +495,35 @@ def open_socket_node(stream: SocketStream):
     return SocketInterface(timeout=60)
 
 
+def _node_id(iface) -> str | None:
+    info = iface.getMyNodeInfo() or {}
+    if "num" in info:
+        return f"!{info['num']:08x}"
+    return (info.get("user") or {}).get("id")
+
+
+def _close(iface) -> None:
+    try:
+        iface.close()
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _open_collar(job: Job, port: str, open_iface, wait_s: float, what: str):
+    job.set_step(f"Waiting for the collar on {port} {what}", None)
+    deadline = time.monotonic() + wait_s
+    while True:
+        job.check_cancel()
+        try:
+            return open_iface(port)
+        except Exception as e:  # noqa: BLE001 - still booting; any failure means try again
+            if time.monotonic() > deadline:
+                raise FirmwareError(f"could not talk to the collar on {port}: {e}") from e
+            time.sleep(3)
+
+
 def setup_collar(job: Job, port: str, base_iface, name: str = "", open_iface=open_serial_node,
-                 boot_wait_s: float = 60, lock: bool = True) -> dict:
+                 boot_wait_s: float = 60, lock: bool = True, restart_s: float = 9) -> dict:
     """Over USB, make a collar trust and talk to this base: put the base's public key in its admin
     keys, give it the base's LoRa settings and channels, keep Bluetooth on for the lost beacon, and
     name it after the dog.
@@ -504,54 +531,82 @@ def setup_collar(job: Job, port: str, base_iface, name: str = "", open_iface=ope
     With lock (the default) the collar is also locked to this base: Meshtastic's managed mode
     refuses settings changes from Bluetooth, USB and the network, so only this base (by its key)
     can change the collar, and Bluetooth pairing needs a random PIN. Undoing it takes a full
-    install, which erases the collar. Returns the node ID and the Bluetooth PIN."""
+    install, which erases it.
+
+    Three things about Meshtastic 2.8 shape the order:
+    - A fresh collar has no region. Setting one mints its key pair, and its node number becomes a
+      hash of the public key, so messages addressed to the old number go nowhere. So the region
+      goes first, on its own, and the setup reconnects to learn the final node number.
+    - Managed mode blocks every later message over USB, including the commit of an edit
+      transaction. So no transaction: each setting saves as it is written, and the lock goes last.
+    - Bluetooth and security changes restart the collar 7 s after the last one. After that the
+      setup reconnects and checks that the settings stuck.
+
+    Returns the node ID (and the one before setup, if it changed), the Bluetooth PIN, and whether
+    the settings were checked after the restart."""
     if base_iface is None:
         raise FirmwareError("the base's own Meshtastic radio is not connected, so there is nothing to copy")
     base = base_iface.localNode
     base_key = bytes(base.localConfig.security.public_key)
     if not base_key:
         raise FirmwareError("the base radio has no public key yet (Meshtastic 2.5 or later makes one)")
+    base_lora = base.localConfig.lora
+    base_chans = list(base.channels or [])
 
-    job.set_step(f"Waiting for the collar on {port} to start", None)
-    deadline = time.monotonic() + boot_wait_s
-    iface, last = None, None
-    while iface is None:
-        job.check_cancel()
-        try:
-            iface = open_iface(port)
-        except Exception as e:  # noqa: BLE001 - still booting; any failure means try again
-            last = e
-            if time.monotonic() > deadline:
-                raise FirmwareError(f"could not talk to the collar on {port}: {last}") from e
-            time.sleep(3)
+    iface = _open_collar(job, port, open_iface, boot_wait_s, "to start")
     try:
-        info = iface.getMyNodeInfo() or {}
-        node_id = (info.get("user") or {}).get("id") or (f"!{info['num']:08x}" if "num" in info else None)
-        job.log(f"Collar is Meshtastic node {node_id}")
+        first_id = _node_id(iface)
+        job.log(f"Collar is Meshtastic node {first_id}")
         node = iface.localNode
         sec = node.localConfig.security
-        keys = [bytes(k) for k in sec.admin_key]
         if sec.is_managed:
-            if base_key in keys:
+            if base_key in [bytes(k) for k in sec.admin_key]:
                 job.set_step("This collar is already locked to this base; nothing to change over USB.", 1.0)
-                return {"node_id": node_id, "already_locked": True}
+                return {"node_id": first_id, "already_locked": True}
             raise FirmwareError("this collar is locked to another base. Only a full install (which erases it) "
                                 "can free it; then set it up again")
-        job.set_step("Setting up the collar", None)
-        node.beginSettingsTransaction()
 
-        if base_key not in keys:
-            if len(keys) >= 3:  # Meshtastic keeps three admin keys; replace the last one
-                del sec.admin_key[-1]
-            sec.admin_key.append(base_key)
-            job.log("Added the base's public key to the collar's admin keys")
+        # 1. Region and preset, on their own (see above).
+        job.set_step("Setting the collar's region and preset", 0.1)
+        moved = not node.localConfig.lora.region or not bytes(sec.public_key)
+        if node.localConfig.lora.SerializeToString() != base_lora.SerializeToString():
+            node.localConfig.lora.CopyFrom(base_lora)
+            node.writeConfig("lora")
+            job.log("Copied the base's LoRa settings (region and preset)")
         else:
-            job.log("The collar already trusts this base")
+            moved = False
+            job.log("The collar already has the base's LoRa settings")
+    finally:
+        _close(iface)
 
-        node.localConfig.lora.CopyFrom(base.localConfig.lora)
-        node.writeConfig("lora")
-        job.log("Copied the base's LoRa settings (region and preset)")
+    if moved:
+        # The new key, and with it the final node number, arrive with a fresh connection.
+        time.sleep(2)
+        iface = _open_collar(job, port, open_iface, 30, "to come back with its new key")
+    else:
+        iface = _open_collar(job, port, open_iface, 30, "again")
+    try:
+        node_id = _node_id(iface)
+        if node_id != first_id:
+            job.log(f"Its node ID is now {node_id} (Meshtastic derives it from the key it just made)")
+        node = iface.localNode
+        job.set_step("Setting up the collar", 0.3)
 
+        # 2. Channels and name: saved as written, no restart.
+        for i, ch in enumerate(base_chans):
+            if i >= len(node.channels):
+                break
+            node.channels[i].CopyFrom(ch)
+            node.writeChannel(i)
+        job.log("Copied the base's channels")
+        if not any(c.role and bytes(c.settings.psk) in (b"", b"\x01") for c in base_chans):
+            job.log("Note: no channel with the default public key, so the lost-dog message reaches only your own nodes")
+        if name:
+            short = "".join(w[0] for w in name.split()[:4]).upper() or name[:4]
+            node.setOwner(long_name=name[:39], short_name=short[:4])
+            job.log(f"Named the collar {name}")
+
+        # 3. Bluetooth, then security with the lock: each restarts the collar 7 s later.
         from meshtastic.protobuf import config_pb2
 
         bt = node.localConfig.bluetooth
@@ -568,40 +623,53 @@ def setup_collar(job: Job, port: str, base_iface, name: str = "", open_iface=ope
         node.writeConfig("bluetooth")
         job.log("Bluetooth on" + (", pairing PIN set (shown in the collar's panel)" if pin else ""))
 
-        public = False
-        for i, ch in enumerate(base.channels or []):
-            if i >= len(node.channels):
-                break
-            node.channels[i].CopyFrom(ch)
-            node.writeChannel(i)
-            psk = bytes(ch.settings.psk)
-            if ch.role and (psk in (b"", b"\x01")):
-                public = True
-        job.log("Copied the base's channels")
-        if not public:
-            job.log("Note: no channel with the default public key, so the lost-dog message reaches only your own nodes")
-
-        if name:
-            short = "".join(w[0] for w in name.split()[:4]).upper() or name[:4]
-            node.setOwner(long_name=name[:39], short_name=short[:4])
-            job.log(f"Named the collar {name}")
-
-        # Last, so everything above is written while the collar still takes local settings.
+        sec = node.localConfig.security
+        keys = [bytes(k) for k in sec.admin_key]
+        if base_key not in keys:
+            if len(keys) >= 3:  # Meshtastic keeps three admin keys; replace the last one
+                del sec.admin_key[-1]
+            sec.admin_key.append(base_key)
         sec.admin_channel_enabled = False  # the old shared-channel admin: off
-        if lock:
-            sec.is_managed = True
-        node.writeConfig("security")
-        if lock:
-            job.log("Locked the collar to this base: its settings can now only be changed by this base, "
-                    "or by a full install that erases it")
-        node.commitSettingsTransaction()
-        job.set_step("Done. The collar restarts with the new settings.", 1.0)
-        return {"node_id": node_id, "ble_pin": pin, "locked": lock}
+        sec.is_managed = bool(lock)
+        node.writeConfig("security")  # last: once managed, the collar ignores USB settings
+        job.log("Added the base's public key to the collar's admin keys"
+                + (" and locked it to this base: its settings can now only be changed by this base, "
+                   "or by a full install that erases it" if lock else ""))
     finally:
-        try:
-            iface.close()
-        except Exception:  # noqa: BLE001
-            pass
+        _close(iface)
+
+    # 4. Check, after the restart, that it all stuck.
+    job.set_step("Waiting for the collar to restart, to check its settings", 0.7)
+    time.sleep(restart_s)
+    try:
+        iface = _open_collar(job, port, open_iface, boot_wait_s, "to restart")
+    except FirmwareError as e:
+        job.log(f"Could not reconnect to check the settings ({e}). The collar shows here once it reports.")
+        job.set_step("Done. Unchecked: the collar didn't reconnect over USB after restarting.", 1.0)
+        return {"node_id": node_id, "previous_node_id": first_id, "ble_pin": pin, "locked": lock, "checked": False}
+    try:
+        node = iface.localNode
+        problems = []
+        if node.localConfig.lora.region != base_lora.region:
+            problems.append("region")
+        if node.localConfig.lora.modem_preset != base_lora.modem_preset:
+            problems.append("preset")
+        if base_key not in [bytes(k) for k in node.localConfig.security.admin_key]:
+            problems.append("the base's key")
+        if base_chans and node.channels and bytes(node.channels[0].settings.psk) != bytes(base_chans[0].settings.psk):
+            problems.append("primary channel")
+        if bool(node.localConfig.security.is_managed) != bool(lock):
+            problems.append("lock")
+        final_id = _node_id(iface)
+    finally:
+        _close(iface)
+    if problems:
+        raise FirmwareError("the collar restarted without these settings: " + ", ".join(problems)
+                            + ". Try again; if it keeps failing, do a full install first")
+    job.log("Checked after the restart: the collar kept its new settings")
+    job.set_step("Done. The collar is set up for this base and reports within a minute or two.", 1.0)
+    return {"node_id": final_id or node_id, "previous_node_id": first_id, "ble_pin": pin, "locked": lock,
+            "checked": True}
 
 
 # -------------------------------------------------------------------------------------------------

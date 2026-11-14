@@ -1847,11 +1847,11 @@ $('fwWebGo').onclick = async () => {
   }
 };
 
-// After flashing, the collar restarts and its USB port comes back, sometimes as a new port
-// object; the browser keeps the permission, so find it again without asking.
-async function findPortAgain(old) {
+// When the collar restarts, its USB port goes away and comes back, sometimes as a new port
+// object; the browser keeps the permission, so find it again without asking. Returns it opened.
+async function findPortAgain(old, stopped = () => false) {
   const want = old.getInfo();
-  for (let i = 0; i < 20; i++) {
+  for (let i = 0; i < 40 && !stopped(); i++) {
     await new Promise(r => setTimeout(r, 1500));
     const ports = (await navigator.serial.getPorts()).filter(p => {
       const info = p.getInfo();
@@ -1859,13 +1859,14 @@ async function findPortAgain(old) {
     });
     const p = ports.includes(old) ? old : ports[0];
     if (!p) continue;
-    try { await p.open({ baudRate: 115200 }); return p; } catch { /* still restarting */ }
+    try { if (!p.readable) await p.open({ baudRate: 115200 }); return p; } catch { /* still restarting */ }
   }
   return null;
 }
 
 // "Set up only" for a collar on this computer: the base does the setup (the same as on its own
-// USB) and this page relays the collar's serial port to it over a WebSocket.
+// USB) and this page relays the collar's serial port to it over a WebSocket. The collar restarts
+// near the end and the base reconnects to check its settings, so the relay finds the port again.
 function webSetup(port, name, lock) {
   const url = new URL('api/firmware/setup-web', location.href);
   url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -1875,37 +1876,51 @@ function webSetup(port, name, lock) {
     try { if (!port.readable) await port.open({ baudRate: 115200 }); }
     catch (e) { reject(new Error(`Could not open the collar's port: ${e.message}. Close any other app using it (such as the Meshtastic web client).`)); return; }
     fwWebBusy = true; renderFw(); fwSay('');
-    const reader = port.readable.getReader(), writer = port.writable.getWriter();
     const ws = new WebSocket(url);
     ws.binaryType = 'arraybuffer';
-    let open = true, started = false;
+    let open = true, started = false, cur = port, reader = null, writer = null;
+    const release = async () => {
+      const r = reader, w = writer;
+      reader = writer = null;
+      try { if (r) await r.cancel(); } catch { /* port already gone */ }
+      try { if (r) r.releaseLock(); if (w) w.releaseLock(); } catch { /* released */ }
+      try { await cur.close(); } catch { /* the collar restarted */ }
+    };
     const finish = async () => {
       if (!open) return;
       open = false;
-      try { await reader.cancel(); } catch { /* port already gone */ }
-      try { reader.releaseLock(); writer.releaseLock(); await port.close(); } catch { /* the collar restarted */ }
+      await release();
       try { ws.close(); } catch { /* closed */ }
       fwWebBusy = false; renderFw();
       if (!started) reject(new Error('The base did not start the setup. Is another firmware job running?'));
     };
+    const pump = async () => {
+      reader = cur.readable.getReader();
+      writer = cur.writable.getWriter();
+      const r = reader;
+      try {
+        while (open) {
+          const { value, done } = await r.read();
+          if (done) break;
+          if (value && ws.readyState === WebSocket.OPEN) ws.send(value);
+        }
+      } catch { /* the port went away: the collar is restarting */ }
+      if (!open) return;
+      await release();
+      const again = await findPortAgain(cur, () => !open);
+      if (!again || !open) { finish(); return; }
+      cur = again;
+      pump();
+    };
     ws.onmessage = ev => {
-      if (typeof ev.data !== 'string') { writer.write(new Uint8Array(ev.data)).catch(finish); return; }
+      if (typeof ev.data !== 'string') { if (writer) writer.write(new Uint8Array(ev.data)).catch(() => {}); return; }
       const m = JSON.parse(ev.data);
       if (m.job) { started = true; watchJob(m.job); resolve(m.job); }
       if (m.error) { started = true; reject(new Error(m.error)); finish(); }
       if (m.done) finish();
     };
     ws.onclose = finish;
-    ws.onopen = async () => {
-      try {
-        while (open) {
-          const { value, done } = await reader.read();
-          if (done) break;
-          if (value && ws.readyState === WebSocket.OPEN) ws.send(value);
-        }
-      } catch { /* the port went away (the collar restarts at the end of setup) */ }
-      finish();
-    };
+    ws.onopen = pump;
   });
 }
 $('fwWebSetup').onclick = async () => {

@@ -43,6 +43,19 @@ class Store:
             self._save()
             return dict(c)
 
+    def move_collar(self, old: str, new: str) -> bool:
+        """Keep a collar's name, fences and history when its node ID changes (Meshtastic 2.8 derives
+        it from the key a fresh collar makes during setup)."""
+        with self._lock:
+            c = self._data["collars"].pop(old, None)
+            if c is None:
+                return False
+            if c.get("name") == old:
+                c["name"] = new
+            self._data["collars"][new] = c
+            self._save()
+            return True
+
     def remove_collar(self, node_id: str) -> bool:
         with self._lock:
             found = self._data["collars"].pop(node_id, None) is not None

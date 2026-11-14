@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.14.3
+
+- Fixed: **Set up only** said it worked but changed nothing on the collar. Two things in
+  Meshtastic 2.8 broke it. Setting the region on a fresh collar makes its key and changes its
+  node ID to match, so every later setting went to the old ID and was dropped. And locking the
+  collar (managed mode) blocked the final save. Setup now sets the region first and reconnects,
+  saves each setting as it goes, locks last, then reconnects after the collar restarts and checks
+  that everything stuck.
+- A collar whose node ID changes during setup keeps its name, fences and history under the new ID.
+- After an update (not a full install), the ID read from the chip no longer adds a collar: on
+  Meshtastic 2.8 it isn't the node ID of a set-up collar. Setup finds the real one.
+- Setting up from this computer's browser keeps going when the collar restarts during setup.
+
 ## 0.14.2
 
 - **Set up a collar from this computer's browser**: under Collar firmware, **USB on this computer**
