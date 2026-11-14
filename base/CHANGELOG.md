@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.7.1
+
+- Fix importing a whole-county parcel file ("Maximum call stack size exceeded"). Large files now
+  keep the 500 parcels nearest the selected collar, or the middle of the map.
+
 ## 0.7.0
 
 - Property lines: import parcels from your county's GIS site as GeoJSON, KML or a shapefile

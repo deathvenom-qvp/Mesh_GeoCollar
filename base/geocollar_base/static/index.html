@@ -1173,7 +1173,7 @@ function watchJob(id) {
   const tick = async () => {
     let j;
     try { j = await api(`firmware/jobs/${id}?since=${fwJobLog.length}`); } catch { fwJobTimer = setTimeout(tick, 3000); return; }
-    fwJobLog.push(...j.log);
+    fwJobLog = fwJobLog.concat(j.log);
     renderJob(j);
     if (j.state === 'running') fwJobTimer = setTimeout(tick, 1000);
     else { fwRefresh(); refresh(); }
@@ -1392,7 +1392,13 @@ async function readParcelFiles(files) {
   const byExt = {};
   for (const f of files) byExt[f.name.split('.').pop().toLowerCase()] = f;
   const features = [];
-  const addFc = fc => { for (const x of [].concat(fc)) features.push(...(x.type === 'FeatureCollection' ? x.features : x.type === 'Feature' ? [x] : [{ type: 'Feature', properties: {}, geometry: x }])); };
+  // A loop, not push(...list): county files hold 100,000+ parcels, more than a call's argument limit.
+  const addFc = fc => {
+    for (const x of [].concat(fc)) {
+      if (x.type === 'FeatureCollection') for (const f of x.features || []) features.push(f);
+      else features.push(x.type === 'Feature' ? x : { type: 'Feature', properties: {}, geometry: x });
+    }
+  };
   for (const f of files) {
     const ext = f.name.split('.').pop().toLowerCase();
     if (ext === 'geojson' || ext === 'json') addFc(JSON.parse(await f.text()));
@@ -1434,26 +1440,33 @@ $('parcelFile').onchange = async () => {
   if (!files.length) return;
   parcelSay('Reading…');
   try {
-    // Round like the base stores them (1e-7 degrees, about 1 cm), so re-imports are recognised.
-    const r7 = c => typeof c[0] === 'number' ? [round7(c[0]), round7(c[1])] : c.map(r7);
-    let found = polygonsOnly(await readParcelFiles(files)).map(f => ({ ...f, geometry: { type: f.geometry.type, coordinates: r7(f.geometry.coordinates) } }));
+    let found = polygonsOnly(await readParcelFiles(files));
     if (!found.length) throw new Error('No parcel outlines (polygons) found in that file.');
-    const first = found[0].geometry.type === 'Polygon' ? found[0].geometry.coordinates[0][0] : found[0].geometry.coordinates[0][0][0];
+    const firstPt = f => f.geometry.type === 'Polygon' ? f.geometry.coordinates[0][0] : f.geometry.coordinates[0][0][0];
+    const first = firstPt(found[0]);
     if (Math.abs(first[0]) > 180 || Math.abs(first[1]) > 90)
       throw new Error('That file is not in longitude/latitude. Export it as WGS84 (EPSG:4326), or import the zipped shapefile with its .prj.');
+    let note = '';
+    const total = found.length;
+    const room = MAX_PARCELS - parcels.features.length;
+    if (total > room) {
+      // A whole-county export: keep the parcels nearest the selected collar, or else the middle of
+      // the map (by each parcel's first corner, which is quick and close enough for parcels).
+      const st = selected && collars[selected] && collars[selected].status;
+      const atDog = !!(st && (st.lat || st.lon));
+      const c = atDog ? L.latLng(st.lat, st.lon) : map.getCenter(), k = Math.cos(c.lat * Math.PI / 180);
+      const d2 = f => { const [x, y] = firstPt(f); return ((x - c.lng) * k) ** 2 + (y - c.lat) ** 2; };
+      found = found.map(f => [d2(f), f]).sort((a, b) => a[0] - b[0]).slice(0, Math.max(0, room)).map(x => x[1]);
+      note = ` The file had ${total.toLocaleString()} parcels, so only the ${found.length} nearest ${atDog ? collars[selected].name : 'the middle of the map'} were kept.`
+        + ' If they are the wrong ones, press Remove all, centre the map on your property and import again.';
+    }
+    // Round like the base stores them (1e-7 degrees, about 1 cm), so re-imports are recognised.
+    const r7 = c => typeof c[0] === 'number' ? [round7(c[0]), round7(c[1])] : c.map(r7);
+    found = found.map(f => ({ ...f, geometry: { type: f.geometry.type, coordinates: r7(f.geometry.coordinates) } }));
     const have = new Set(parcels.features.map(parcelKey));
     found = found.filter(f => !have.has(parcelKey(f)));
-    let note = '';
-    const room = MAX_PARCELS - parcels.features.length;
-    if (found.length > room) {
-      // A whole-county export: keep the parcels nearest the map's centre.
-      const c = map.getCenter();
-      const dist = f => { const b = L.geoJSON(f).getBounds().getCenter(); return c.distanceTo(b); };
-      found = found.map(f => [dist(f), f]).sort((a, b) => a[0] - b[0]).slice(0, Math.max(0, room)).map(x => x[1]);
-      note = ` The file had more than ${MAX_PARCELS} parcels, so only the ${found.length} nearest the map's centre were kept.`;
-    }
     if (!found.length) { parcelSay('Those parcels are already imported.' + note); return; }
-    await saveParcels({ type: 'FeatureCollection', features: [...parcels.features, ...found] });
+    await saveParcels({ type: 'FeatureCollection', features: parcels.features.concat(found) });
     $('parcelShow').checked = true; showParcels();
     map.fitBounds(L.geoJSON({ type: 'FeatureCollection', features: found }).getBounds(), { maxZoom: 19, padding: [40, 40] });
     parcelSay(`Imported ${found.length} parcel${found.length > 1 ? 's' : ''}. Click one on the map to use it as a keep-in zone.${note}`);

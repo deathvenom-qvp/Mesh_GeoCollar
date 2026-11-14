@@ -78,7 +78,8 @@ Click a parcel and choose **Use as keep-in zone** to turn its outline into a zon
 selected collar. Outlines with more than 32 corners are simplified, and the page says by how many
 metres the line moved. Tax-map lines are often 1 to 5 m off, so compare the zone with the
 satellite view before sending it, and keep the danger band well inside anything that matters,
-such as a road. A whole-county file is cut down to the 500 parcels nearest the map's centre.
+such as a road. A whole-county file is cut down to the 500 parcels nearest the selected collar, or the middle of
+the map if it has no position yet, so centre the map on your property before importing one.
 
 ## Trying it without a collar
 

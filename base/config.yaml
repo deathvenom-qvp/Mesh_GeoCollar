@@ -2,7 +2,7 @@
 # Settings > Add-ons (called Apps in newer releases) > store > ⋮ > Repositories, then install
 # "GeoCollar base". Home Assistant builds the image from the Dockerfile on first install.
 name: GeoCollar base
-version: "0.7.0"
+version: "0.7.1"
 slug: geocollar_base
 description: Draw geofences and track Meshtastic dog collars. Built on Meshtastic; collar protocol by OpenShock.
 url: https://github.com/deathvenom-qvp/Mesh_GeoCollar
