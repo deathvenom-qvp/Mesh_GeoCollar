@@ -318,6 +318,7 @@ class SimCollar:
         self.battery = 100.0
         self.engine = FenceEngine()
         self.engine.settings.shock_enabled = bool(settings.get("shock_enabled", False))
+        self.engine.settings.shock_level = int(settings.get("shock_level", 10))
         self.fence_version = 0
         self.pulses = protocol.Pulses()
         self._pulse_kind: str | None = None  # beep / vibrate being repeated
@@ -338,6 +339,7 @@ class SimCollar:
             "lat": round(self.lat, 7), "lon": round(self.lon, 7), "mode": self.mode,
             "speed_mps": self.speed_mps, "report_s": self.report_s, "noise_m": self.noise_m,
             "target": self.target, "shock_enabled": self.engine.settings.shock_enabled,
+            "shock_level": self.engine.settings.shock_level,
         }
 
     def update(self, changes: dict) -> None:
@@ -404,6 +406,14 @@ class SimCollar:
             self.engine.force_lost()
         elif action == A.CLEAR_LOST:
             self.engine.clear_lost()
+        elif action == A.SHOCK_ON:
+            if intensity >= 1:
+                s.shock_enabled = True
+                s.shock_level = min(intensity, s.max_shock_level)
+                self._event("info", f"shock turned on, level {s.shock_level}")
+        elif action == A.SHOCK_OFF:
+            s.shock_enabled = False
+            self._event("info", "shock turned off")
         elif action == A.SILENCE_LOST:
             was = self.beacon.active
             self.beacon.silence()

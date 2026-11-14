@@ -78,7 +78,7 @@ Same 20-byte layout; Breach is sent the moment the collar enters Lost, and every
 
 | Offset | Size | Field |
 | --- | --- | --- |
-| 2 | 1 | action: 1 shock, 2 vibrate, 3 beep, 10 corrections off, 11 corrections on, 12 force lost, 13 clear lost, 14 request status, 15 silence the lost beacon (until the dog is next back inside) |
+| 2 | 1 | action: 1 shock, 2 vibrate, 3 beep, 10 corrections off, 11 corrections on, 12 force lost, 13 clear lost, 14 request status, 15 silence the lost beacon (until the dog is next back inside), 16 shock on at level `intensity` (1..99, capped by the collar's maximum, 30), 17 shock off |
 | 3 | 1 | intensity 0..99 |
 | 4 | 2 | duration, ms (the collar caps this at 3000) |
 

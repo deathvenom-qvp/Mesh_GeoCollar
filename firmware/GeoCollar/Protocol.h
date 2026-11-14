@@ -46,6 +46,8 @@ enum class CommandAction : uint8_t {
     ClearLost = 13,
     RequestStatus = 14,
     SilenceLost = 15, // stop the lost beacon until the dog is next back inside
+    ShockOn = 16,     // allow shock, at level `intensity` (1..99, capped by the collar's maximum)
+    ShockOff = 17,
 };
 
 struct Command {

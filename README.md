@@ -119,8 +119,8 @@ the map tiles need internet.
 
 ## Safety
 
-- Shock is **off by default**. When enabled it is capped in level, count per breach and count per
-  hour, and never fires on a poor GPS fix or in lost mode.
+- Shock is **off by default**. The owner turns it on per collar in the base app, after confirming.
+  When enabled it is capped in level, count per breach and count per hour, and never fires on a poor GPS fix or in lost mode.
 - Corrections stop as soon as the dog is confirmed outside: correcting a dog that is trying to come
   home teaches the wrong thing.
 - Fit a hardware disable switch (GPIO 7 to ground) and test with the electrodes removed.

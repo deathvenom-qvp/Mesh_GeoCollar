@@ -112,6 +112,7 @@ class CommandIn(BaseModel):
     action: str  # beep, vibrate, shock, corrections_off, corrections_on, force_lost, clear_lost, request_status, silence_lost
     intensity: int = 0
     duration_ms: int = 1000
+    confirm: bool = False  # shock_on must be confirmed by the owner
 
 
 MAX_PARCELS = 500
@@ -395,13 +396,24 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
             action = protocol.CommandAction[body.action.upper()]
         except KeyError as e:
             raise HTTPException(400, f"unknown action {body.action}") from e
+        if action == protocol.CommandAction.SHOCK_ON:
+            if not body.confirm:
+                raise HTTPException(400, "turning shock on needs confirmation")
+            if not 1 <= body.intensity <= protocol.MAX_SHOCK_LEVEL:
+                raise HTTPException(400, f"shock level must be 1 to {protocol.MAX_SHOCK_LEVEL}")
         if node_id in sim:
             sim.command(node_id, action, body.intensity)
-            sim.report_now(node_id)
-            return {"sent": action.name}
-        if not link.connected:
+            if node_id in sim and action in (protocol.CommandAction.SHOCK_ON, protocol.CommandAction.SHOCK_OFF):
+                store.set_sim(node_id, sim.collars[node_id].settings())
+        elif not link.connected:
             raise HTTPException(503, "not connected to a Meshtastic node")
-        link.send_command(node_id, action, body.intensity, body.duration_ms)
+        else:
+            link.send_command(node_id, action, body.intensity, body.duration_ms)
+        if action == protocol.CommandAction.SHOCK_ON:
+            store.set_collar_info(node_id, "shock_level", body.intensity)
+            log.warning("shock turned on for %s at level %d", node_id, body.intensity)
+        if node_id in sim:
+            sim.report_now(node_id)
         return {"sent": action.name}
 
     # -- Property lines (parcels imported from county GIS files) --------------------------------

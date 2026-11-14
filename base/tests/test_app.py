@@ -182,3 +182,29 @@ def test_collar_missing_owner_info_gets_it_on_next_report(tmp_path):
     assert link.sent == [("!a1b2c3d4", protocol.encode_owner("Rex", "", ""))]
     client.app.state.on_status("!a1b2c3d4", status)
     assert len(link.sent) == 1  # only once
+
+
+def test_shock_switch_needs_confirmation(tmp_path):
+    client, link = make(tmp_path)
+    client.post("/api/collars", json={"node_id": "!a1b2c3d4", "name": "Rex"})
+    url = "/api/collars/!a1b2c3d4/command"
+    assert client.post(url, json={"action": "shock_on", "intensity": 10}).status_code == 400  # not confirmed
+    assert client.post(url, json={"action": "shock_on", "intensity": 31, "confirm": True}).status_code == 400
+    assert client.post(url, json={"action": "shock_on", "intensity": 0, "confirm": True}).status_code == 400
+    assert client.post(url, json={"action": "shock_on", "intensity": 12, "confirm": True}).status_code == 200
+    assert link.sent[-1][1] == protocol.encode_command(protocol.CommandAction.SHOCK_ON, 12)
+    assert link.sent[-1][1].hex() == "0204100ce803"
+    assert client.get("/api/collars").json()["!a1b2c3d4"]["shock_level"] == 12
+    assert client.post(url, json={"action": "shock_off"}).status_code == 200
+    assert link.sent[-1][1] == protocol.encode_command(protocol.CommandAction.SHOCK_OFF)
+
+
+def test_simulated_shock_switch(tmp_path):
+    client, _ = make(tmp_path)
+    node = client.post("/api/sim", json={"lat": 40, "lon": -75}).json()["node_id"]
+    url = f"/api/collars/{node}/command"
+    client.post(url, json={"action": "shock_on", "intensity": 8, "confirm": True})
+    c = client.get("/api/collars").json()[node]
+    assert c["status"]["shock_enabled"] and c["sim"]["shock_level"] == 8
+    client.post(url, json={"action": "shock_off"})
+    assert not client.get("/api/collars").json()[node]["status"]["shock_enabled"]

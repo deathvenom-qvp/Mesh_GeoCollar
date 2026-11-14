@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.12.0
+
+- Shock can now be turned on for real collars: **Turn shock on…** at the top of a collar's panel,
+  with a level (1 to 30 of 99) and a confirmation tick box. The collar saves it and reports it
+  back; the per-escape and per-hour limits still apply. **Turn shock off** needs no confirmation.
+  Needs the new collar firmware. Replaces the simulator's own shock tick box.
+
 ## 0.11.0
 
 - Address search on the map (top right): type an address or place and press Enter. Looked up

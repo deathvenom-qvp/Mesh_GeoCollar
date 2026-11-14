@@ -21,6 +21,7 @@ MIN_PULSE_S = 2
 MAX_DOG_NAME = 24  # bytes of UTF-8, as in firmware/GeoCollar/Protocol.h
 MAX_OWNER_NAME = 24
 MAX_PHONE = 20
+MAX_SHOCK_LEVEL = 30  # the collar firmware's cap (Settings::maxShockLevel)
 
 
 class MsgType(IntEnum):
@@ -42,6 +43,8 @@ class CommandAction(IntEnum):
     CLEAR_LOST = 13
     REQUEST_STATUS = 14
     SILENCE_LOST = 15  # stop the lost beacon until the dog is next back inside
+    SHOCK_ON = 16  # allow shock at level `intensity`, capped by the collar's maximum
+    SHOCK_OFF = 17
 
 
 class CollarState(IntEnum):

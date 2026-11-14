@@ -116,6 +116,10 @@
   .rename { display: flex; gap: 6px; align-items: center; }
   .rename input { width: 12em; }
   .rename[hidden], .row[hidden] { display: none; }
+  .shockbox { margin-top: 8px; padding: 8px; border: 1px solid var(--line); border-radius: 8px; font-size: 13px; }
+  .shockbox input[type=range] { width: 100%; }
+  button.danger { background: var(--bad); color: #fff; border-color: var(--bad); }
+  button.danger:disabled { opacity: .5; }
   .beacon { margin: 8px 0 0; }
   .beacon .actions { margin-top: 6px; }
   .contact { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-top: 6px; }
@@ -302,6 +306,18 @@
       </div>
       <div class="stats" id="selStats"></div>
       <div id="beaconBox"></div>
+      <div class="shockbox" id="shockBox">
+        <div class="row spread"><span id="shockState"></span><button id="shockToggle"></button></div>
+        <div id="shockConfirm" hidden>
+          <label class="field">Shock level <span class="muted" id="shockLevelVal"></span>
+            <input type="range" id="shockLevel" min="1" max="30" step="1" value="10"></label>
+          <div class="muted">The collar shocks only in a zone's danger band, at most 2 times per
+            escape and 4 per hour, never past the line, and never above level 30 of 99. Start low and try it on your own hand first.</div>
+          <label class="row" style="gap:6px;margin-top:6px"><input type="checkbox" id="shockAgree"> I have checked the collar fits and the level is right for my dog</label>
+          <div class="actions" style="margin-top:6px"><button class="danger" id="shockOnGo" disabled>Turn shock on</button>
+            <button class="link" id="shockCancel">Cancel</button></div>
+        </div>
+      </div>
     </section>
 
     <section>
@@ -359,7 +375,6 @@
           <input type="range" id="simSpeed" min="0.5" max="12" step="0.5"></label>
         <label class="field">Report every (s) <input type="number" id="simReport" min="1" max="600" step="1"></label>
         <label class="field">GPS error (<span class="unit">m</span>) <input type="number" id="simNoise" min="0" max="30" step="0.5"></label>
-        <label class="field wide row"><input type="checkbox" id="simShock"> Shock enabled on this collar</label>
       </div>
       <div class="muted" style="margin-top:6px">A real collar reports when its state changes, every 10 minutes, and every 30 s when lost. The simulator reports more often so you can watch it.</div>
       <h2 style="margin-top:12px">What the collar did</h2>
@@ -839,8 +854,8 @@ function checks() {
   if (zones.length && !keepIns.length) warnings.push('There is no keep-in zone, so the dog may roam anywhere outside the keep-out zones.');
   if (zones.some(z => z.props.danger_m > 0) && shockOffOnCollar())
     warnings.push(collars[selected].sim
-      ? `The danger band is on, but shock is switched off on ${collars[selected].name} itself, so the danger band vibrates for now. To allow shock, tick "Shock enabled on this collar" under Simulation.`
-      : `The danger band is on, but shock is switched off on ${collars[selected].name} itself, so the danger band vibrates for now. Shock can only be turned on at the collar, as a safety measure.`);
+      ? `The danger band is on, but shock is switched off on ${collars[selected].name} itself, so the danger band vibrates for now. To allow shock, use "Turn shock on" at the top of this collar's panel.`
+      : `The danger band is on, but shock is switched off on ${collars[selected].name} itself, so the danger band vibrates for now. To allow shock, use "Turn shock on" at the top of this collar's panel.`);
   const s = selected && collars[selected] && collars[selected].status;
   if (s && (s.lat || s.lon) && zones.length && isDirty()) {
     const outside = zones.filter(z => pointInRing(s.lat, s.lon, ringOf(z.layer)) !== (z.props.kind === 'keep_in'));
@@ -1052,13 +1067,14 @@ function renderSelected() {
   $('selName').textContent = c.name;
   $('selId').textContent = selected;
   renderBeacon(c);
+  renderShock(c);
   const s = c.status;
   const rows = [];
   if (s) {
     rows.push(['State', stateLabel(s.state)], ['Last report', ago(Date.now() / 1000 - s.received)]);
     if (s.battery_pct != null && s.battery_pct !== 255) rows.push(['Battery', `${s.battery_pct}%`]);
     if (s.sats) rows.push(['GPS', `${s.sats} sats, PDOP ${s.pdop}`]);
-    rows.push(['Corrections', s.corrections_enabled ? 'On' : 'Off'], ['Shock', s.shock_enabled ? 'Enabled' : 'Disabled']);
+    rows.push(['Corrections', s.corrections_enabled ? 'On' : 'Off']);
     rows.push(['Lost alert', s.beacon_active ? 'On: Bluetooth and mesh' : s.beacon_silenced ? 'Silenced until back inside' : 'Off']);
   } else rows.push(['State', 'No report yet']);
   if (c.update_mode) rows.push(['Firmware', 'Waiting in update mode']);
@@ -1126,6 +1142,36 @@ async function loadDiscovery() {
   renderNewCollars();
   if (!baseInfo.public_key) { try { baseInfo = await api('base'); renderBaseKey(); } catch { /* radio not connected */ } }
 }
+
+// Shock: off by default on every collar; the owner turns it on here, after confirming.
+function renderShock(c) {
+  const s = c.status, on = !!(s && s.shock_enabled);
+  const level = c.shock_level || (c.sim && c.sim.shock_level);
+  $('shockState').replaceChildren(el('b', {}, 'Shock: '), !s ? 'unknown until the collar reports'
+    : on ? `on${level ? `, level ${level}` : ''}` : 'off');
+  $('shockToggle').textContent = on ? 'Turn shock off' : 'Turn shock on…';
+  $('shockToggle').className = on ? '' : 'link';
+  $('shockToggle').hidden = !$('shockConfirm').hidden;
+}
+const resetShockConfirm = () => { $('shockConfirm').hidden = true; $('shockAgree').checked = false; $('shockOnGo').disabled = true; };
+$('shockLevel').oninput = () => { $('shockLevelVal').textContent = `${$('shockLevel').value} of 99`; };
+$('shockAgree').onchange = () => { $('shockOnGo').disabled = !$('shockAgree').checked; };
+$('shockToggle').onclick = async () => {
+  const c = collars[selected];
+  if (c.status && c.status.shock_enabled) { await sendCmd('shock_off', 'Shock off'); return; }
+  $('shockLevel').value = c.shock_level || 10; $('shockLevel').oninput();
+  $('shockConfirm').hidden = false; renderShock(c);
+};
+$('shockCancel').onclick = () => { resetShockConfirm(); renderShock(collars[selected]); };
+$('shockOnGo').onclick = async () => {
+  try {
+    await api(`collars/${encodeURIComponent(selected)}/command`, { method: 'POST',
+      body: JSON.stringify({ action: 'shock_on', intensity: +$('shockLevel').value, confirm: true }) });
+    say(`Sent: shock on at level ${$('shockLevel').value}. It shows as on once the collar confirms.`);
+  } catch (e) { say(e.message); }
+  resetShockConfirm();
+  refresh();
+};
 
 // ---------------------------------------------------------------------------------------------
 // Lost-dog beacon: the dog's name and the owner's contact
@@ -1222,7 +1268,6 @@ function renderSim() {
   set('simSpeed', sim.speed_mps); set('simReport', sim.report_s); set('simNoise', Math.round(toUnit(sim.noise_m) * 2) / 2);
   $('simNoise').max = Math.round(toUnit(30));
   $('simSpeedVal').textContent = `${speedText($('simSpeed').value)} (${speedName(+$('simSpeed').value)})`;
-  $('simShock').checked = sim.shock_enabled;
   const fmt = t => new Date(t * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
   $('simEvents').replaceChildren(...(sim.events.length ? sim.events.map(e => el('li', {}, el('time', {}, fmt(e.t)), el('span', { class: 'k-' + e.kind }, e.text)))
     : [el('li', { class: 'muted' }, 'Nothing yet. Corrections, lost mode and fence updates show here.')]));
@@ -1279,7 +1324,6 @@ $('simSpeed').oninput = () => { $('simSpeedVal').textContent = `${speedText($('s
 $('simSpeed').onchange = () => simUpdate({ speed_mps: +$('simSpeed').value });
 $('simReport').onchange = () => simUpdate({ report_s: +$('simReport').value });
 $('simNoise').onchange = () => simUpdate({ noise_m: Math.min(30, Math.round(fromUnit(+$('simNoise').value) * 10) / 10) });
-$('simShock').onchange = () => simUpdate({ shock_enabled: $('simShock').checked });
 
 // ---------------------------------------------------------------------------------------------
 // Data
@@ -1318,6 +1362,7 @@ function select(id) {
   if (drawKind) endDraw();
   if (selected && isDirty()) drafts[selected] = zonesToGeoJSON();
   selected = id;
+  resetShockConfirm();
   const c = collars[id];
   loadZones(drafts[id] || c.fences);
   delete drafts[id];

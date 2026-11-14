@@ -483,6 +483,21 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
             break;
         case proto::CommandAction::RequestStatus:
             break;
+        case proto::CommandAction::ShockOn:
+            // The owner turned shock on in the base app (after confirming). The level is capped by
+            // the firmware's maximum, and the per-breach and per-hour limits still apply.
+            if (cmd.intensity >= 1) {
+                s.shockEnabled = true;
+                s.shockLevel = cmd.intensity < s.maxShockLevel ? cmd.intensity : s.maxShockLevel;
+                saveState();
+                LOG_INFO("GeoCollar: shock on, level %u", s.shockLevel);
+            }
+            break;
+        case proto::CommandAction::ShockOff:
+            s.shockEnabled = false;
+            saveState();
+            LOG_INFO("GeoCollar: shock off");
+            break;
         case proto::CommandAction::SilenceLost:
             beacon_.silence();
             ble_.update(nullptr, millis());
