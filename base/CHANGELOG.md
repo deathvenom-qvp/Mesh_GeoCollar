@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.14.5
+
+- Fixed: a collar set up over USB could keep saying hello and never report. The base's radio can
+  only send a collar encrypted messages once it has the collar's public key, and a collar set up
+  on Meshtastic 2.8 has a new key and node ID that the radio hadn't heard yet. Setup now gives the
+  radio the collar's key (marked verified, so a NodeInfo on the air can't replace it), and the
+  base accepts reports only with that key. **Set up only** on a collar already locked to this base
+  does this too. For a collar set up by hand, the base swaps NodeInfo with it when it says hello.
+- A collar's panel says why the base's last message to it failed, such as no public key for it
+  or no acknowledgement.
+
 ## 0.14.4
 
 - Fixed: **Set up only** failed with "the collar restarted without these settings: the base's

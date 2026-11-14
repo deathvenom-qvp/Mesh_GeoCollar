@@ -1375,7 +1375,17 @@ function renderBeacon(c) {
       ? (c.locked ? `Not heard from ${c.name} since it was set up. Check that it is on and near the base: after it starts it says hello every minute for 15 minutes, and the base answers.`
         : `Not heard from ${c.name} yet. A collar can only talk to the base once it is set up for it (region, channels and the base's key); a freshly installed one can't transmit at all. Plug it into the base or this computer and use "Set up only" under Collar firmware.`)
       : !h.has_admin_key ? `${c.name} is on the air but does not trust this base yet, so it ignores it. Plug it into the base or this computer and use "Set up only" under Collar firmware.`
-      : `${c.name} is on the air and the base has answered. It reports once it gets the answer; if it keeps saying hello, it may trust a different base: use "Set up only" to set it up for this one.`));
+      : `${c.name} is on the air and the base has answered. It reports once it gets the answer. If it keeps saying hello, plug it into the base or this computer and use "Set up only" under Collar firmware: that gives the base's radio its key (or sets it up for this base, if it trusts another).`));
+  }
+  const se = c.send_error;
+  if (se && !c.sim && (!s || se.at > (s.received || 0))) {
+    const why = {
+      PKI_SEND_FAIL_PUBLIC_KEY: `its radio doesn't have ${c.name}'s public key yet, so it sent nothing. The base has asked the collar for it over the air; or plug the collar into the base or this computer and use "Set up only", which gives the base its key.`,
+      PKI_UNKNOWN_PUBKEY: `${c.name} doesn't know the base's key. The base has sent it; the next message should get through.`,
+      MAX_RETRANSMIT: `${c.name} never acknowledged it. It may be off or out of range.`,
+      NO_CHANNEL: `${c.name} couldn't read it: it isn't on the base's channels. Use "Set up only" to copy them to it.`,
+    }[se.reason] || `the radio said ${se.reason}.`;
+    parts.push(el('div', { class: 'callout bad beacon' }, `The base's last message to ${c.name} (${ago(Date.now() / 1000 - se.at)}) failed: ${why}`));
   }
   const rc = c.radio_changed;
   if (rc && rc.moved) parts.push(el('div', { class: 'callout beacon' },

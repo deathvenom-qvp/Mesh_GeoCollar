@@ -190,6 +190,9 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
         connect = bool(settings.get("mesh_serial") or settings.get("mesh_host"))
     else:
         connect = False
+    # The collar's public key as read over USB at setup, which the radio needs to write to it.
+    link.key_for = lambda n: (store.collar(n) or {}).get("public_key")
+    link.on_send_error = lambda n, r: on_send_error(n, r)
 
     sim = Simulator(store.record_status, store.set_sim)
 
@@ -242,6 +245,27 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
         if c and node_id not in sim and c.get("owner_sent") != owner_for(node_id):
             push_owner(node_id)
 
+    def ask_node_info(node_id: str) -> None:
+        """The radio can't PKI-encrypt to a collar whose public key it doesn't have (one set up by
+        hand, or before the base kept the key from USB setup). Swap NodeInfo with it, at most every
+        10 minutes; the collar answers once in 12 hours."""
+        c = store.collar(node_id) or {}
+        if c.get("sim") or not link.connected or time.time() - (c.get("nodeinfo_asked") or 0) < 600:
+            return
+        try:
+            link.request_node_info(node_id)
+        except Exception as e:  # noqa: BLE001 - tried again on its next hello
+            log.warning("could not ask %s for its NodeInfo: %s", node_id, e)
+            return
+        store.set_collar_info(node_id, "nodeinfo_asked", time.time())
+
+    def on_send_error(node_id: str, reason: str) -> None:
+        if store.collar(node_id) is None:
+            return
+        store.set_collar_info(node_id, "send_error", {"reason": reason, "at": time.time()})
+        if reason in ("PKI_SEND_FAIL_PUBLIC_KEY", "PKI_UNKNOWN_PUBKEY"):
+            ask_node_info(node_id)
+
     # -- New collars: a GeoCollar collar no base has adopted says hello on the mesh now and then.
     DISCOVERED_KEEP_S = 24 * 3600
 
@@ -256,6 +280,8 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
                 return
             store.set_collar_info(node_id, "hello", {**hello, "seen": time.time()})
             if hello.get("has_admin_key"):
+                if link.connected and not c.get("public_key") and not link.radio_key(node_id):
+                    ask_node_info(node_id)  # the answer can't be encrypted to it yet
                 push_owner(node_id)
             return
         found = {k: v for k, v in (store.setting("discovered", {}) or {}).items()
@@ -290,7 +316,14 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
             store.set_collar_info(node_id, "ble_pin", result["ble_pin"])
         if result.get("locked") or result.get("already_locked"):
             store.set_collar_info(node_id, "locked", True)
-        store.set_collar_info(node_id, "public_key", None)  # re-learn it from the next report
+        # The key read over USB: reports must carry it, and the radio needs it to write to the collar.
+        store.set_collar_info(node_id, "public_key", result.get("public_key") or None)
+        store.set_collar_info(node_id, "key_mismatch", None)
+        if result.get("public_key") and link.connected:
+            try:
+                link.ensure_contact(node_id)
+            except Exception as e:  # noqa: BLE001 - done again before the next message to it
+                log.warning("could not give the base radio the key of %s: %s", node_id, e)
 
     def adopt_setup(job, result: dict, name: str | None) -> None:
         """After a USB setup: keep the collar's record if its node ID changed, add it if new."""
@@ -331,6 +364,7 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
     app.state.sim = sim
     app.state.on_status = on_status
     app.state.on_hello = on_hello
+    app.state.on_send_error = on_send_error
     # Leaflet and Leaflet-Geoman are vendored so the page works without a CDN (e.g. on a LAN).
     app.mount("/static", StaticFiles(directory=STATIC), name="static")
 

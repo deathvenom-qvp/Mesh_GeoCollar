@@ -97,6 +97,7 @@ class Store:
             c["status"] = status
             c.pop("radio_changed", None)  # heard on the base's current settings
             c.pop("hello", None)  # it reports to this base now
+            c.pop("send_error", None)  # and the base's messages reach it
             if status.get("lat") or status.get("lon"):
                 c["track"].append([status["received"], status["lat"], status["lon"]])
                 del c["track"][:-TRACK_LIMIT]

@@ -28,9 +28,15 @@ class MeshLink:
     """
 
     def __init__(self, on_status: Callable[[str, dict], None], serial_port: str = "", host: str = "",
-                 on_hello: Callable[[str, dict], None] | None = None):
+                 on_hello: Callable[[str, dict], None] | None = None,
+                 key_for: Callable[[str], str | None] | None = None,
+                 on_send_error: Callable[[str, str], None] | None = None):
         self.on_status = on_status
         self.on_hello = on_hello
+        # The collar's public key (base64) as read over USB at setup, or None: the radio needs it
+        # in its node list to PKI-encrypt anything to the collar.
+        self.key_for = key_for
+        self.on_send_error = on_send_error
         self.serial_port = serial_port
         self.host = host
         self.iface = None
@@ -130,9 +136,84 @@ class MeshLink:
     def _send(self, node_id: str, data: bytes) -> None:
         if not self.iface:
             raise RuntimeError("not connected to a Meshtastic node")
+        self.ensure_contact(node_id)
         self.iface.sendData(
-            data, destinationId=node_id, portNum=protocol.PORT_NUM, wantAck=True, pkiEncrypted=True
+            data, destinationId=node_id, portNum=protocol.PORT_NUM, wantAck=True, pkiEncrypted=True,
+            onResponse=lambda p: self._on_routing(node_id, p), onResponseAckPermitted=True,
         )
+
+    def _on_routing(self, node_id: str, packet: dict) -> None:
+        """The radio's answer to a message we sent: an ack, or why it failed. The usual failure is
+        PKI_SEND_FAIL_PUBLIC_KEY: the radio has no public key for the collar, so it sent nothing."""
+        reason = ((packet.get("decoded") or {}).get("routing") or {}).get("errorReason", "NONE")
+        if reason in ("NONE", None):
+            return
+        log.warning("message to %s failed: %s", node_id, reason)
+        if self.on_send_error:
+            self.on_send_error(node_id, str(reason))
+
+    # ---------------------------------------------------------------------------------------------
+    # Public keys. The radio PKI-encrypts to a collar only if its node list has the collar's key.
+    # It learns keys from NodeInfo on the air; the base also tells it the key read over USB.
+    # ---------------------------------------------------------------------------------------------
+    def radio_key(self, node_id: str) -> str:
+        """The collar's public key (base64) as the radio has it, or "" if it has none."""
+        if not self.iface:
+            return ""
+        try:
+            num = int(node_id.lstrip("!"), 16)
+        except ValueError:
+            return ""
+        node = (getattr(self.iface, "nodesByNum", None) or {}).get(num) or {}
+        return (node.get("user") or {}).get("publicKey") or ""
+
+    def ensure_contact(self, node_id: str) -> bool:
+        """If the radio lacks the collar's key from setup (or has another), add the collar to its
+        node list with that key, marked verified so a NodeInfo on the air can't replace it. Returns
+        True if it sent one."""
+        key = self.key_for(node_id) if self.key_for else None
+        if not key or not self.iface or self.radio_key(node_id) == key:
+            return False
+        import base64
+
+        from meshtastic.protobuf import admin_pb2
+
+        num = int(node_id.lstrip("!"), 16)
+        m = admin_pb2.AdminMessage()
+        c = m.add_contact
+        c.node_num = num
+        c.manually_verified = True
+        c.user.id = node_id
+        c.user.long_name = f"GeoCollar {node_id[-4:]}"
+        c.user.short_name = node_id[-4:]
+        c.user.public_key = base64.b64decode(key)
+        self.iface.localNode._sendAdmin(m, wantResponse=False)  # noqa: SLF001 - the library's add_contact takes a URL
+        # The library's copy of the radio's node list doesn't hear about it; keep it in step.
+        node = self.iface._getOrCreateByNum(num)  # noqa: SLF001
+        node.setdefault("user", {})["publicKey"] = key
+        log.info("gave the base radio the public key of %s from its USB setup", node_id)
+        return True
+
+    def request_node_info(self, node_id: str) -> None:
+        """Swap NodeInfo with a collar: send the base's (name and public key) and ask for its own.
+        Meshtastic answers this at most once every 12 hours per asker."""
+        if not self.iface:
+            raise RuntimeError("not connected to a Meshtastic node")
+        from meshtastic.protobuf import mesh_pb2, portnums_pb2
+
+        info = (self.iface.getMyNodeInfo() or {}).get("user", {})
+        user = mesh_pb2.User(id=info.get("id", ""), long_name=info.get("longName", ""),
+                             short_name=info.get("shortName", ""))
+        cfg = getattr(getattr(self.iface, "localNode", None), "localConfig", None)
+        if cfg is not None and cfg.security.public_key:
+            user.public_key = bytes(cfg.security.public_key)
+        try:
+            user.hw_model = mesh_pb2.HardwareModel.Value(info.get("hwModel", "UNSET"))
+        except ValueError:
+            pass
+        self.iface.sendData(user, destinationId=int(node_id.lstrip("!"), 16),
+                            portNum=portnums_pb2.PortNum.NODEINFO_APP, wantResponse=True)
+        log.info("asked %s for its NodeInfo (the base radio has no public key for it)", node_id)
 
     def send_fences(self, node_id: str, zones: list[protocol.Zone], fence_version: int,
                     pulses: protocol.Pulses | None = None) -> int:
@@ -221,6 +302,7 @@ class MeshLink:
         if not self.iface:
             raise RuntimeError("not connected to a Meshtastic node")
         num = int(node_id.lstrip("!"), 16)
+        self.ensure_contact(node_id)
         key = self.iface._getOrCreateByNum(num).get("adminSessionPassKey")  # noqa: SLF001 - library-internal store
         if key:
             message.session_passkey = key

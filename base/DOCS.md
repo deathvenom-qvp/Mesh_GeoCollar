@@ -113,6 +113,13 @@ match; the setup follows it and keeps the collar's name and fences. The collar r
 during setup (once for Bluetooth, once for the base's key and the lock), so it takes about a
 minute. The setup ends by reconnecting and checking that its settings stuck.
 
+Setup also gives the base's radio the collar's public key. The radio can only send the collar
+encrypted messages once it has that key, and it is marked as verified, so a NodeInfo from another
+node can't replace it; the base also accepts reports only when they carry that key. **Set up only**
+on a collar that is already locked to this base does just this part. A collar set up by hand gets
+its key to the base over the air: when it says hello and the base's radio doesn't know its key, the
+base swaps NodeInfo with it. If the base's messages to a collar fail, its panel says why.
+
 By hand, collars only obey messages from base nodes they trust:
 
 1. In the Meshtastic app, open the base node and copy its **public key** (Settings > Security).

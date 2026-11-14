@@ -566,7 +566,7 @@ def setup_collar(job: Job, port: str, base_iface, name: str = "", open_iface=ope
         if sec.is_managed:
             if base_key in [bytes(k) for k in sec.admin_key]:
                 job.set_step("This collar is already locked to this base; nothing to change over USB.", 1.0)
-                return {"node_id": first_id, "already_locked": True}
+                return {"node_id": first_id, "already_locked": True, "public_key": _key_b64(sec)}
             raise FirmwareError("this collar is locked to another base. Only a full install (which erases it) "
                                 "can free it; then set it up again")
 
@@ -598,6 +598,7 @@ def setup_collar(job: Job, port: str, base_iface, name: str = "", open_iface=ope
         if node_id != first_id:
             job.log(f"Its node ID is now {node_id} (Meshtastic derives it from the key it just made)")
         node = iface.localNode
+        collar_key = _key_b64(node.localConfig.security)  # the base's radio needs it to write to the collar
         job.set_step("Setting up the collar", 0.3)
 
         # 2. Channels and name: saved as written, no restart.
@@ -666,12 +667,13 @@ def setup_collar(job: Job, port: str, base_iface, name: str = "", open_iface=ope
             job.log(f"Could not reconnect to check the settings ({e}). The collar shows here once it reports.")
             job.set_step("Done. Unchecked: the collar didn't reconnect over USB after restarting.", 1.0)
             return {"node_id": node_id, "previous_node_id": first_id, "ble_pin": pin, "locked": lock,
-                    "checked": False}
+                    "checked": False, "public_key": collar_key}
         again = False
         try:
             node = iface.localNode
             problems = _setup_problems(node, base_lora, base_chans, base_key, lock, pin)
             final_id = _node_id(iface)
+            collar_key = _key_b64(node.localConfig.security) or collar_key
             if (attempt == 1 and problems and set(problems) <= {"the base's key", "lock"}
                     and not node.localConfig.security.is_managed):
                 job.log("The collar restarted without " + " and ".join(problems) + "; writing them again")
@@ -687,7 +689,14 @@ def setup_collar(job: Job, port: str, base_iface, name: str = "", open_iface=ope
     job.log("Checked after the restart: the collar kept its new settings")
     job.set_step("Done. The collar is set up for this base and reports within a minute or two.", 1.0)
     return {"node_id": final_id or node_id, "previous_node_id": first_id, "ble_pin": pin, "locked": lock,
-            "checked": True}
+            "checked": True, "public_key": collar_key}
+
+
+def _key_b64(sec) -> str:
+    import base64
+
+    key = bytes(sec.public_key)
+    return base64.b64encode(key).decode() if len(key) == 32 else ""
 
 
 def _write_security(node, base_key: bytes, lock: bool) -> None:

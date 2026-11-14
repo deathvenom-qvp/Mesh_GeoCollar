@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
+import time
+
 from fastapi.testclient import TestClient
 
 from geocollar_base import protocol
@@ -26,9 +28,26 @@ class FakeLink:
     def __init__(self):
         self.connected = True
         self.sent = []
+        self.radio_keys = {}  # node ID -> public key the radio has
+        self.asked = []  # NodeInfo requests
+        self.contacts = []  # keys given to the radio
 
     def close(self):
         pass
+
+    def radio_key(self, node_id):
+        return self.radio_keys.get(node_id, "")
+
+    def request_node_info(self, node_id):
+        self.asked.append(node_id)
+
+    def ensure_contact(self, node_id):
+        key = self.key_for(node_id)
+        if key and self.radio_keys.get(node_id) != key:
+            self.radio_keys[node_id] = key
+            self.contacts.append((node_id, key))
+            return True
+        return False
 
     def send_fences(self, node_id, zones, version, pulses=None):
         chunks = protocol.fence_chunks(zones, version, pulses)
@@ -262,6 +281,44 @@ def test_a_known_collar_saying_hello_gets_an_answer(tmp_path):
     # Its first report clears the hello.
     client.app.state.on_status("!a1b2c3d4", {"state": "NO_FENCE", "lat": 0, "lon": 0, "pki": True, "sender_key": "a2V5"})
     assert "hello" not in client.get("/api/collars").json()["!a1b2c3d4"]
+
+
+def test_a_collar_whose_key_the_radio_lacks_is_asked_for_it(tmp_path):
+    # Set up by hand (or before the base kept the key from setup): the radio can't encrypt to it.
+    client, link = make(tmp_path)
+    client.post("/api/collars", json={"node_id": "!a1b2c3d4", "name": "Rex"})
+    st = client.app.state
+    st.on_hello("!a1b2c3d4", {"has_admin_key": True})
+    assert link.asked == ["!a1b2c3d4"]
+    st.on_send_error("!a1b2c3d4", "PKI_SEND_FAIL_PUBLIC_KEY")
+    c = client.get("/api/collars").json()["!a1b2c3d4"]
+    assert c["send_error"]["reason"] == "PKI_SEND_FAIL_PUBLIC_KEY" and link.asked == ["!a1b2c3d4"]  # 10 min apart
+    # Once the radio has its key, the hello needs no NodeInfo swap; a report clears the error.
+    link.radio_keys["!a1b2c3d4"] = "a2V5"
+    st.on_status("!a1b2c3d4", {"state": "NO_FENCE", "lat": 0, "lon": 0, "pki": True, "sender_key": "a2V5"})
+    assert "send_error" not in client.get("/api/collars").json()["!a1b2c3d4"]
+
+
+def test_setup_gives_the_radio_the_collars_key(tmp_path, monkeypatch):
+    # "Set up only" on a collar that is already locked to this base still teaches the base its key.
+    from geocollar_base import firmware as fw
+
+    client, link = make(tmp_path)
+    client.post("/api/collars", json={"node_id": "!a1b2c3d4", "name": "Rex"})
+    monkeypatch.setattr(fw, "serial_ports", lambda: [{"device": "/dev/ttyACM0"}])
+    monkeypatch.setattr(fw, "setup_collar", lambda job, port, base, name="", **kw: {
+        "node_id": "!a1b2c3d4", "already_locked": True, "public_key": "S0VZMQ=="})
+    job = client.post("/api/firmware/setup-usb", json={"port": "/dev/ttyACM0"})
+    assert job.status_code == 200
+    for _ in range(100):
+        if client.get(f"/api/firmware/jobs/{job.json()['id']}").json()["state"] != "running":
+            break
+        time.sleep(0.05)
+    c = client.get("/api/collars").json()["!a1b2c3d4"]
+    assert c["public_key"] == "S0VZMQ==" and c["locked"] and link.contacts == [("!a1b2c3d4", "S0VZMQ==")]
+    # Reports must now carry that key.
+    client.app.state.on_status("!a1b2c3d4", {"state": "LOST", "pki": True, "sender_key": "T1RIRVI="})
+    assert client.get("/api/collars").json()["!a1b2c3d4"].get("key_mismatch")
 
 
 def test_a_collar_that_does_not_trust_the_base_is_not_sent_anything(tmp_path):

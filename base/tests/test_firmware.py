@@ -516,6 +516,7 @@ def test_setup_collar_sticks_on_a_fresh_meshtastic_28_collar():
     new_id = f"!{zlib.crc32(b'P' * 32):08x}"
     assert r["checked"] and r["node_id"] == new_id and r["previous_node_id"] == "!ab52a4e5"
     assert r["locked"] and 100000 <= r["ble_pin"] <= 999999
+    assert r["public_key"] == "UFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFA="  # b"P" * 32, for the base's radio
     sec = dev.saved.security
     assert sec.is_managed and not sec.admin_channel_enabled and [bytes(k) for k in sec.admin_key] == [b"B" * 32]
     assert dev.saved.lora == fake_base().localNode.localConfig.lora
@@ -526,7 +527,7 @@ def test_setup_collar_sticks_on_a_fresh_meshtastic_28_collar():
 
     # Again: locked to this base already, so nothing is written.
     r = fw.setup_collar(fw.Job("usb", "t"), "/dev/ttyACM0", fake_base(), "", open_iface=dev.open, boot_wait_s=5)
-    assert r["already_locked"] and r["node_id"] == new_id
+    assert r["already_locked"] and r["node_id"] == new_id and r["public_key"].startswith("UFBQ")
 
     # Locked to someone else's base: refused; only a full install frees it.
     other = FakeMeshtasticDevice(region=1, managed=True, admin_keys=[b"O" * 32])
