@@ -370,6 +370,7 @@ const dogLayer = L.featureGroup().addTo(map);
 // ---------------------------------------------------------------------------------------------
 let collars = {};          // from the API
 let selected = null;       // node id
+let shownShockOff = false; // shock-off state the zone list was last drawn with
 let zones = [];            // [{ layer, props: { name, kind, danger_m, warning_m, attention_m } }] for the selected collar
 let activeZone = null;     // the zone being edited
 let drawKind = null;       // kind of the zone being drawn, while drawing
@@ -578,8 +579,10 @@ function checks() {
   const keepIns = zones.filter(z => z.props.kind === 'keep_in');
   if (keepIns.length > 1) warnings.push('The collar requires the dog to be inside every keep-in zone at once. Unless the keep-in zones overlap, use one keep-in zone with keep-out zones inside it.');
   if (zones.length && !keepIns.length) warnings.push('There is no keep-in zone, so the dog may roam anywhere outside the keep-out zones.');
-  if (zones.some(z => z.props.danger_m > 0) && selected && collars[selected] && collars[selected].status && !collars[selected].status.shock_enabled)
-    warnings.push('Shock is disabled on this collar, so danger bands vibrate instead of shocking.');
+  if (zones.some(z => z.props.danger_m > 0) && shockOffOnCollar())
+    warnings.push(collars[selected].sim
+      ? `The danger band is on, but shock is switched off on ${collars[selected].name} itself, so the danger band vibrates for now. To allow shock, tick "Shock enabled on this collar" under Simulation.`
+      : `The danger band is on, but shock is switched off on ${collars[selected].name} itself, so the danger band vibrates for now. Shock can only be turned on at the collar, as a safety measure.`);
   const s = selected && collars[selected] && collars[selected].status;
   if (s && (s.lat || s.lon) && zones.length && isDirty()) {
     const outside = zones.filter(z => pointInRing(s.lat, s.lon, ringOf(z.layer)) !== (z.props.kind === 'keep_in'));
@@ -622,7 +625,14 @@ function renderZones() {
   renderBands();
 }
 
+// The collar's own master shock switch (off by default), separate from each zone's danger band.
+function shockOffOnCollar() {
+  const c = selected && collars[selected];
+  return !!(c && c.status && !c.status.shock_enabled);
+}
+
 function bandRows(z) {
+  shownShockOff = shockOffOnCollar();
   const stop = e => e.stopPropagation();
   const dangerOn = z.props.danger_m > 0;
   const kids = [];
@@ -630,14 +640,16 @@ function bandRows(z) {
     const off = b.key === 'danger_m' && !dangerOn;
     kids.push(
       b.key === 'danger_m'
-        ? el('input', { type: 'checkbox', checked: dangerOn, title: 'Turn the danger (shock) band on or off for this zone', 'aria-label': 'Danger band on',
+        ? el('input', { type: 'checkbox', checked: dangerOn, title: 'Turn the danger band on or off for this zone. Shock also needs shock enabled on the collar itself.', 'aria-label': 'Danger band on',
             onclick: stop, onchange: e => {
               if (e.target.checked) z.props.danger_m = z.lastDanger || DEFAULT_BANDS.danger_m;
               else { z.lastDanger = z.props.danger_m; z.props.danger_m = 0; }
               renderZones();
             } })
         : el('span', { class: 'sw', style: `background:var(${b.color})` }),
-      el('span', { class: off ? 'off' : '' }, el('b', {}, b.name), ` (${b.does})`, i === 0 ? el('span', { class: 'muted' }, ' at the line') : null),
+      el('span', { class: off ? 'off' : '' }, el('b', {}, b.name),
+        b.key === 'danger_m' && !off && shockOffOnCollar() ? ' (vibrate, shock off on collar)' : ` (${b.does})`,
+        i === 0 ? el('span', { class: 'muted' }, ' at the line') : null),
       off ? el('span', { class: 'muted' }, 'off') : el('input', { type: 'number', min: 0, max: MAX_BAND_M, step: 1, value: z.props[b.key], 'aria-label': `${b.name} band width in metres`,
         onclick: stop, oninput: e => { z.props[b.key] = e.target.value === '' ? NaN : Number(e.target.value); renderStatusArea(); scheduleBands(); } }),
       el('span', { class: 'muted' }, off ? '' : 'm'));
@@ -877,6 +889,8 @@ async function refresh() {
   renderDogs();
   renderSelected();
   if (selected) renderStatusArea();
+  // The danger row's label follows the collar's shock switch; redraw it only when that changes.
+  if (shockOffOnCollar() !== shownShockOff && !drawKind && document.activeElement?.type !== 'number') { shownShockOff = shockOffOnCollar(); renderZones(); }
   if (firstLoad) {
     firstLoad = false;
     const ids = Object.keys(collars);
