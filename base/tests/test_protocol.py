@@ -9,7 +9,9 @@ SQUARE = [(40.0, -75.0), (40.0, -74.998), (40.002, -74.998), (40.002, -75.0)]
 
 
 def test_command_golden():
-    assert p.encode_command(p.CommandAction.VIBRATE, 40, 1500).hex() == "02040228dc05"
+    assert p.encode_command(p.CommandAction.VIBRATE, 40, 1500, 1763085600).hex() == "02040228dc05208d1669"  # as firmware
+    assert p.next_fence_version(4, None) == 5 and p.next_fence_version(4, 9) == 10 and p.next_fence_version(9, 4) == 10
+    assert p.next_fence_version(65535, None) == 1 and p.next_fence_version(65530, 3) == 4  # wraps, never 0
 
 
 def test_command_rejects_bad_intensity():

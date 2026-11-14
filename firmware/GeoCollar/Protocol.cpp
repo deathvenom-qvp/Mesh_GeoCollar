@@ -188,6 +188,7 @@ size_t encodeCommand(uint8_t *out, size_t cap, const Command &c)
     w.u8(static_cast<uint8_t>(c.action));
     w.u8(c.intensity);
     w.u16(c.durationMs);
+    w.u32(c.seq);
     return w.done();
 }
 
@@ -199,7 +200,8 @@ bool decodeCommand(const uint8_t *buf, size_t len, Command &c)
     c.action = static_cast<CommandAction>(r.u8());
     c.intensity = r.u8();
     c.durationMs = r.u16();
-    return r.ok;
+    c.seq = r.u32();
+    return r.ok && r.pos == len;
 }
 
 size_t encodeFenceChunk(uint8_t *out, size_t cap, const FenceChunk &c)

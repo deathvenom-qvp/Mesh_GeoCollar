@@ -82,11 +82,13 @@ class UsbFlashIn(BaseModel):
     node_id: str | None = None  # which collar is plugged in; found from its MAC address when left out
     name: str | None = None  # the dog's name, if this turns out to be a new collar
     setup: bool = False  # afterwards, set the collar up for this base (admin key, LoRa, channels)
+    lock: bool = True  # and lock it to this base
 
 
 class UsbSetupIn(BaseModel):
     port: str
     name: str | None = None
+    lock: bool = True  # lock the collar to this base (Meshtastic managed mode)
 
 
 class DeviceFlashedIn(BaseModel):
@@ -94,6 +96,7 @@ class DeviceFlashedIn(BaseModel):
     build: str
     via: str = "browser"
     name: str | None = None
+    mode: str = "update"
 
 
 class OtaIn(BaseModel):
@@ -201,8 +204,23 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
         return True
 
     def on_status(node_id: str, status: dict) -> None:
-        store.record_status(node_id, status)
+        status = dict(status)
+        pki, key = status.pop("pki", False), status.pop("sender_key", "")
         c = store.collar(node_id)
+        if c is None:
+            log.info("ignoring a report from %s, which is not a collar on this base", node_id)
+            return
+        if not pki or not key:
+            log.warning("ignoring a report from %s that was not PKI-encrypted (spoofed?)", node_id)
+            return
+        if c.get("public_key") and c["public_key"] != key:
+            log.warning("ignoring a report from %s: its public key changed (spoofed, or the collar was erased; "
+                        "remove and re-add the collar to accept the new key)", node_id)
+            store.set_collar_info(node_id, "key_mismatch", time.time())
+            return
+        if not c.get("public_key"):
+            store.set_collar_info(node_id, "public_key", key)
+        store.record_status(node_id, status)
         # A collar that has not got the current name and contact yet gets them when it next reports.
         if c and node_id not in sim and c.get("owner_sent") != owner_for(node_id):
             push_owner(node_id)
@@ -215,7 +233,12 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
             return
         found = {k: v for k, v in (store.setting("discovered", {}) or {}).items()
                  if time.time() - v.get("seen", 0) < DISCOVERED_KEEP_S}
+        prev = found.get(node_id)
+        if prev and time.time() - prev.get("seen", 0) < 30:
+            return  # heard it recently; don't rewrite the data file for every hello
         found[node_id] = {**hello, "seen": time.time(), "via": "mesh"}
+        if len(found) > 20:  # anyone can say hello, so keep only the 20 most recent
+            found = dict(sorted(found.items(), key=lambda kv: kv[1].get("seen", 0))[-20:])
         store.set_setting("discovered", found)
 
     def note_device(node_id: str, via: str, name: str | None) -> bool:
@@ -232,6 +255,15 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
         if found.pop(node_id, None) is not None:
             store.set_setting("discovered", found)
         return is_new
+
+    def note_setup(node_id: str | None, result: dict) -> None:
+        if not node_id or store.collar(node_id) is None:
+            return
+        if result.get("ble_pin"):
+            store.set_collar_info(node_id, "ble_pin", result["ble_pin"])
+        if result.get("locked") or result.get("already_locked"):
+            store.set_collar_info(node_id, "locked", True)
+        store.set_collar_info(node_id, "public_key", None)  # re-learn it from the next report
 
     for node_id, c in store.collars().items():
         if c.get("sim"):
@@ -408,7 +440,7 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
         elif not link.connected:
             raise HTTPException(503, "not connected to a Meshtastic node")
         else:
-            link.send_command(node_id, action, body.intensity, body.duration_ms)
+            link.send_command(node_id, action, body.intensity, body.duration_ms, store.next_command_seq())
         if action == protocol.CommandAction.SHOCK_ON:
             store.set_collar_info(node_id, "shock_level", body.intensity)
             log.warning("shock turned on for %s at level %d", node_id, body.intensity)
@@ -527,10 +559,13 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
                 if result["new_collar"]:
                     job.log(f"Added {node_id} to the base as a new collar")
             record_flash(node_id, m, "usb")
+            if body.mode == "full" and node_id:  # erased: the collar has a new key pair now
+                store.set_collar_info(node_id, "public_key", None)
             if body.setup:
                 c = store.collar(node_id) if node_id else None
                 name = c["name"] if c and c["name"] != node_id else (body.name or "")
-                result.update(fw.setup_collar(job, body.port, getattr(link, "iface", None), name))
+                result.update(fw.setup_collar(job, body.port, getattr(link, "iface", None), name, lock=body.lock))
+                note_setup(node_id, result)
             return result
 
         return start("usb", f"Flash over USB ({body.port})", run)
@@ -541,11 +576,15 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
         base_radio = settings.get("mesh_serial", "")
         if base_radio and os.path.realpath(body.port) == os.path.realpath(base_radio):
             raise HTTPException(400, "that port is the base station's own Meshtastic radio")
+        if not any(p["device"] == body.port for p in fw.serial_ports()):
+            raise HTTPException(400, f"{body.port} is not a serial port on this machine")
 
         def run(job):
-            result = fw.setup_collar(job, body.port, getattr(link, "iface", None), (body.name or "").strip(), boot_wait_s=10)
+            result = fw.setup_collar(job, body.port, getattr(link, "iface", None), (body.name or "").strip(),
+                                     boot_wait_s=10, lock=body.lock)
             if result.get("node_id"):
                 result["new_collar"] = note_device(result["node_id"], "usb", body.name)
+                note_setup(result["node_id"], result)
             return result
 
         return start("usb", f"Set up the collar on {body.port}", run)
@@ -559,6 +598,8 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
             raise HTTPException(400, "bad node ID")
         new = note_device(node_id, body.via, body.name)
         record_flash(node_id, m, body.via)
+        if body.mode == "full":  # erased: the collar has a new key pair now
+            store.set_collar_info(node_id, "public_key", None)
         return {"node_id": node_id, "new_collar": new, "collar": store.collar(node_id)}
 
     @app.post("/api/collars/{node_id}/firmware/flashed")

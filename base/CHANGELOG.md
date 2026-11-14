@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.13.0
+
+Security review. Needs the new collar firmware, and the base and collars must be updated
+together: older collars ignore the new command format's extra bytes, but the new firmware refuses
+commands from an older base.
+
+- Lock collars to their base: setting a collar up over USB now turns on Meshtastic's managed mode
+  (by default), so no other base, phone or computer can change its settings without a full,
+  erasing install. It also replaces Meshtastic's default Bluetooth PIN with a random one, shown
+  in the collar's panel, and turns off the old shared-channel admin.
+- No replays: commands carry a growing sequence number and the collar refuses old ones; it also
+  refuses fence sets older than the ones it has. The base starts new fence versions after the
+  one the collar reports, so a reinstalled base catches up.
+- No spoofed reports: the base accepts status reports only from collars you added, only when
+  PKI-encrypted, and only from the key it first saw from that collar. Before, any node could
+  send a report and appear as a collar.
+- Parcel names from imported files are shown as text in map tooltips (they could carry HTML).
+- New-collar hellos are capped at 20 and written at most every 30 s per collar.
+- Stricter checks on the "Set up only" port and on git refs for building from source.
+
 ## 0.12.1
 
 - **Base radio** panel (click the radio badge): how the base radio is connected, its node,

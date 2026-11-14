@@ -50,7 +50,7 @@ namespace
 
 constexpr const char *kStateFile = "/prefs/geocollar.bin";
 constexpr uint32_t kStateMagic = 0x47434F4C; // "GCOL"
-constexpr uint16_t kStateFormat = 5; // 2: GPS pacing settings; 3: per-zone bands; 4: pulse intervals; 5: owner
+constexpr uint16_t kStateFormat = 6; // 2: GPS pacing; 3: per-zone bands; 4: pulse intervals; 5: owner; 6: command seq
 constexpr uint32_t kBeaconRefreshMs = 10 * 1000; // re-apply the beacon advertisement this often
 // Until a base adopts the collar it says hello on the primary channel, so the base app can list it:
 // every minute for the first 15 minutes after boot, then every 15 minutes.
@@ -243,7 +243,9 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
         if (isFromUs(&mp))
             return ProcessMessage::CONTINUE;
         if (!mp.pki_encrypted || !AdminKeys::isAuthorized(mp.public_key.bytes)) {
-            LOG_WARN("GeoCollar: ignoring packet from 0x%08x (not an authorized base)", mp.from);
+            // Other collars' hellos land here too, so only a direct message is worth a warning.
+            if (isToUs(&mp))
+                LOG_WARN("GeoCollar: ignoring packet from 0x%08x (not an authorized base)", mp.from);
             return ProcessMessage::STOP;
         }
         baseNode_ = mp.from;
@@ -258,7 +260,10 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
             proto::FenceChunk chunk;
             if (proto::decodeFenceChunk(buf, len, chunk) && assembler_.add(chunk)) {
                 FenceSet fences;
-                if (proto::decodeFenceSet(assembler_.data(), assembler_.length(), assembler_.version(), fences)) {
+                if (!proto::fenceVersionAcceptable(assembler_.version(), engine_.fences().version)) {
+                    LOG_WARN("GeoCollar: refusing fence v%u, older than v%u (a replay?)", assembler_.version(),
+                             engine_.fences().version);
+                } else if (proto::decodeFenceSet(assembler_.data(), assembler_.length(), assembler_.version(), fences)) {
                     engine_.setFences(fences);
                     beacon_.reset();
                     saveState();
@@ -268,8 +273,16 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
             }
         } else if (type == proto::MsgType::Command) {
             proto::Command cmd;
-            if (proto::decodeCommand(buf, len, cmd))
-                handleCommand(cmd);
+            if (!proto::decodeCommand(buf, len, cmd)) {
+                LOG_WARN("GeoCollar: malformed command");
+            } else if (cmd.seq <= lastCmdSeq_) {
+                LOG_WARN("GeoCollar: refusing command %u, not newer than %u (a replay?)", (unsigned)cmd.seq,
+                         (unsigned)lastCmdSeq_);
+            } else {
+                lastCmdSeq_ = cmd.seq;
+                handleCommand(cmd); // every command path below saves state or sends status
+                saveState();
+            }
         } else if (type == proto::MsgType::Owner) {
             proto::OwnerInfo o;
             if (proto::decodeOwner(buf, len, o)) {
@@ -570,6 +583,7 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
         f.write(blob, blobLen);
         f.write((const uint8_t *)&engine_.settings(), sizeof(Settings));
         f.write((const uint8_t *)&owner_, sizeof(owner_));
+        f.write((const uint8_t *)&lastCmdSeq_, sizeof(lastCmdSeq_));
         if (!f.close())
             LOG_ERROR("GeoCollar: failed to save %s", kStateFile);
     }
@@ -588,13 +602,15 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
         static uint8_t blob[proto::kMaxFenceBlob];
         Settings settings;
         proto::OwnerInfo owner;
+        uint32_t seq = 0;
         bool ok = f.read((uint8_t *)&magic, sizeof(magic)) == sizeof(magic) && magic == kStateMagic &&
-                  f.read((uint8_t *)&format, sizeof(format)) == sizeof(format) && (format == kStateFormat || format == 4) &&
+                  f.read((uint8_t *)&format, sizeof(format)) == sizeof(format) && format >= 4 && format <= kStateFormat &&
                   f.read((uint8_t *)&base, sizeof(base)) == sizeof(base) &&
                   f.read((uint8_t *)&version, sizeof(version)) == sizeof(version) &&
                   f.read((uint8_t *)&len16, sizeof(len16)) == sizeof(len16) && len16 <= sizeof(blob) &&
                   f.read(blob, len16) == len16 && f.read((uint8_t *)&settings, sizeof(settings)) == sizeof(settings) &&
-                  (format < 5 || f.read((uint8_t *)&owner, sizeof(owner)) == sizeof(owner)); // 4: no owner yet
+                  (format < 5 || f.read((uint8_t *)&owner, sizeof(owner)) == sizeof(owner)) && // 4: no owner yet
+                  (format < 6 || f.read((uint8_t *)&seq, sizeof(seq)) == sizeof(seq));
         f.close();
         FenceSet fences;
         if (ok && proto::decodeFenceSet(blob, len16, version, fences)) {
@@ -603,6 +619,7 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
             baseNode_ = base;
             owner.dog[sizeof(owner.dog) - 1] = owner.owner[sizeof(owner.owner) - 1] = owner.phone[sizeof(owner.phone) - 1] = 0;
             owner_ = owner;
+            lastCmdSeq_ = seq;
         } else {
             LOG_WARN("GeoCollar: saved state unreadable, starting without fences");
         }
@@ -623,6 +640,7 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
     uint32_t lastPacedSecs_ = UINT32_MAX; // nothing set yet: the first pass records the owner's value
     uint32_t lastStatusMs_ = 0;
     uint32_t lastHelloMs_ = 0;
+    uint32_t lastCmdSeq_ = 0; // newest command accepted; older or repeated ones are replays
 };
 
 GeoCollarModule *geoCollarModule = nullptr;

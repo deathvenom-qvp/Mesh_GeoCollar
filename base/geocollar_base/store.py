@@ -51,10 +51,13 @@ class Store:
 
     def set_fences(self, node_id: str, geojson: dict) -> int:
         """Store new fences and return the new fence version number."""
+        from .protocol import next_fence_version
+
         with self._lock:
             c = self._data["collars"][node_id]
             c["fences"] = geojson
-            c["fence_version"] = (c.get("fence_version", 0) + 1) & 0xFFFF or 1
+            reported = (c.get("status") or {}).get("fence_version")
+            c["fence_version"] = next_fence_version(c.get("fence_version", 0), reported)
             self._save()
             return c["fence_version"]
 
@@ -71,10 +74,12 @@ class Store:
             self._save()
 
     def record_status(self, node_id: str, status: dict) -> None:
+        """Record a report from a collar on this base. Reports from unknown nodes are dropped:
+        a collar is only ever added on purpose."""
         with self._lock:
-            c = self._data["collars"].setdefault(
-                node_id, {"name": node_id, "fences": None, "fence_version": 0, "status": None, "track": []}
-            )
+            c = self._data["collars"].get(node_id)
+            if c is None:
+                return
             status = dict(status, received=time.time())
             c["status"] = status
             if status.get("lat") or status.get("lon"):
@@ -93,6 +98,16 @@ class Store:
             else:
                 c[key] = value
             self._save()
+
+    def next_command_seq(self) -> int:
+        """A number that grows with every command: the clock in seconds, or one more than the last
+        if the clock is behind. Stored, so it keeps growing across restarts."""
+        with self._lock:
+            s = self._data.setdefault("settings", {})
+            seq = max(int(s.get("cmd_seq", 0)) + 1, int(time.time()))
+            s["cmd_seq"] = seq
+            self._save()
+            return seq
 
     def setting(self, key: str, default=None):
         with self._lock:

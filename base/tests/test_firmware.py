@@ -362,7 +362,10 @@ def test_setup_collar_over_usb(monkeypatch):
 
     job = fw.Job("usb", "t")
     r = fw.setup_collar(job, "/dev/ttyACM0", FakeIface(base, 0x11111111), "Rex the Dog", open_iface=open_iface)
-    assert r == {"node_id": "!18abcd01"} and len(tries) == 3 and iface.closed
+    assert r["node_id"] == "!18abcd01" and r["locked"] and 100000 <= r["ble_pin"] <= 999999
+    assert len(tries) == 3 and iface.closed
+    assert collar.localConfig.security.is_managed and not collar.localConfig.security.admin_channel_enabled
+    assert collar.localConfig.bluetooth.fixed_pin == r["ble_pin"] and collar.localConfig.bluetooth.mode == 1  # FIXED_PIN
     keys = [bytes(k) for k in collar.localConfig.security.admin_key]
     assert keys == [b"1" * 32, b"2" * 32, b"B" * 32]  # three at most: the last one gives way
     assert collar.localConfig.lora.region == base.localConfig.lora.region
@@ -370,12 +373,24 @@ def test_setup_collar_over_usb(monkeypatch):
     assert collar.localConfig.bluetooth.enabled
     assert collar.channels[0].settings.psk == b"\x01"
     assert collar.calls[0] == "begin" and collar.calls[-1] == "commit"
-    assert "owner:Rex the Dog/RTD" in collar.calls and "config:security" in collar.calls
+    assert "owner:Rex the Dog/RTD" in collar.calls
+    # Locking comes last, after everything else is written.
+    assert collar.calls[-2] == "config:security" and collar.calls.index("config:lora") < collar.calls.index("config:security")
 
-    # Again: already trusted, nothing duplicated.
+    # Again: locked to this base already, so nothing is written.
     collar.calls.clear()
-    fw.setup_collar(fw.Job("usb", "t"), "/dev/ttyACM0", FakeIface(base), "", open_iface=lambda p: iface)
-    assert "config:security" not in collar.calls and len(collar.localConfig.security.admin_key) == 3
+    r = fw.setup_collar(fw.Job("usb", "t"), "/dev/ttyACM0", FakeIface(base), "", open_iface=lambda p: iface)
+    assert r["already_locked"] and collar.calls == [] and len(collar.localConfig.security.admin_key) == 3
+
+    # Locked to someone else's base: refused; only a full install frees it.
+    other = FakeNode(public_key=b"O" * 32)
+    with pytest.raises(fw.FirmwareError, match="locked to another base"):
+        fw.setup_collar(fw.Job("usb", "t"), "/dev/ttyACM0", FakeIface(other), "", open_iface=lambda p: iface)
+
+    # Unlocked set-up when asked.
+    free = FakeNode()
+    r = fw.setup_collar(fw.Job("usb", "t"), "/dev/ttyACM0", FakeIface(base), "", open_iface=lambda p: FakeIface(free), lock=False)
+    assert not free.localConfig.security.is_managed and r["ble_pin"] is None
 
     with pytest.raises(fw.FirmwareError, match="not connected"):
         fw.setup_collar(fw.Job("usb", "t"), "/dev/ttyACM0", None)

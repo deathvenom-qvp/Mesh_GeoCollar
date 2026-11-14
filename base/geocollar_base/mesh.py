@@ -119,6 +119,10 @@ class MeshLink:
             return
         node_id = packet.get("fromId") or f"!{packet['from']:08x}"
         record = asdict(status)
+        # Who really sent it: a collar's reports are PKI direct messages, so the radio knows the
+        # sender's public key. The app checks it against the key it saw first from that collar.
+        record["pki"] = bool(packet.get("pkiEncrypted"))
+        record["sender_key"] = packet.get("publicKey") or ""
         record["msg_type"] = status.msg_type.name
         record["state"] = status.state.name
         self.on_status(node_id, record)
@@ -195,8 +199,9 @@ class MeshLink:
         """The dog's name and the owner's contact, for the collar's lost beacon."""
         self._send(node_id, protocol.encode_owner(dog, owner, phone))
 
-    def send_command(self, node_id: str, action: protocol.CommandAction, intensity: int = 0, duration_ms: int = 1000):
-        self._send(node_id, protocol.encode_command(action, intensity, duration_ms))
+    def send_command(self, node_id: str, action: protocol.CommandAction, intensity: int = 0, duration_ms: int = 1000,
+                     seq: int = 0):
+        self._send(node_id, protocol.encode_command(action, intensity, duration_ms, seq))
 
     # ---------------------------------------------------------------------------------------------
     # Remote admin, for firmware updates. The collar already trusts this base node's public key as

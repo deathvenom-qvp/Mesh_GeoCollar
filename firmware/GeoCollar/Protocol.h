@@ -54,7 +54,18 @@ struct Command {
     CommandAction action;
     uint8_t intensity;
     uint16_t durationMs;
+    // Increases with every command from the base (it is the base's clock in seconds, or one more
+    // than the last). The collar refuses a number it has already passed, so a recorded command
+    // cannot be played back to it later.
+    uint32_t seq;
 };
+
+/// True when fence version `incoming` is the same as or newer than `current` (16-bit, wrapping),
+/// so an old fence set recorded off the air cannot replace newer fences.
+inline bool fenceVersionAcceptable(uint16_t incoming, uint16_t current)
+{
+    return current == 0 || static_cast<int16_t>(incoming - current) >= 0;
+}
 
 struct FenceChunk {
     uint16_t fenceVersion;
@@ -88,7 +99,7 @@ struct OwnerInfo {
 };
 
 constexpr size_t kStatusLength = 2 + 2 + 1 + 1 + 4 + 4 + 2 + 1 + 2 + 1;
-constexpr size_t kCommandLength = 2 + 1 + 1 + 2;
+constexpr size_t kCommandLength = 2 + 1 + 1 + 2 + 4;
 
 /// Peek at a message's type. Returns false if the buffer is not a GeoCollar v1 message.
 bool messageType(const uint8_t *buf, size_t len, MsgType &type);

@@ -441,6 +441,8 @@
         <label class="field wide">Port <select id="fwPort"></select></label>
         <label class="wide row muted" style="gap:6px"><input type="checkbox" id="fwSetup" checked>
           Then set it up for this base: trust the base, copy its radio settings and channels, name it after the dog</label>
+        <label class="wide row muted" style="gap:6px"><input type="checkbox" id="fwLock" checked>
+          And lock it to this base: no other base, phone or computer can change its settings. Undoing this needs a full install, which erases it.</label>
         <div class="wide actions"><button class="primary" id="fwUsbGo">Flash</button>
           <button id="fwSetupOnly" title="For a collar that already runs GeoCollar firmware">Set up only</button>
           <button id="fwRescan">Rescan ports</button></div>
@@ -1085,6 +1087,8 @@ function renderSelected() {
     rows.push(['Corrections', s.corrections_enabled ? 'On' : 'Off']);
     rows.push(['Lost alert', s.beacon_active ? 'On: Bluetooth and mesh' : s.beacon_silenced ? 'Silenced until back inside' : 'Off']);
   } else rows.push(['State', 'No report yet']);
+  if (!c.sim) rows.push(['Locked to this base', c.locked ? 'Yes' : 'Not set up from this base']);
+  if (c.ble_pin) rows.push(['Bluetooth PIN', String(c.ble_pin)]);
   if (c.update_mode) rows.push(['Firmware', 'Waiting in update mode']);
   else if (c.firmware) rows.push(['Firmware', `${shortCommit(c.firmware.commit)}, ${c.firmware.via === 'wifi' ? 'Wi-Fi' : 'USB'} ${ago(Date.now() / 1000 - c.firmware.flashed_at)}`]);
   $('selStats').replaceChildren(...rows.flatMap(([k, v]) => [el('span', {}, k), el('span', {}, v)]));
@@ -1242,6 +1246,9 @@ function renderContact() {
 function renderBeacon(c) {
   const s = c.status, box = $('beaconBox');
   const parts = [];
+  if (c.key_mismatch) parts.push(el('div', { class: 'callout bad beacon' },
+    `Ignored a report ${ago(Date.now() / 1000 - c.key_mismatch)} that claimed to be ${c.name} but was signed with a different key. `
+    + 'Another node may be pretending to be this collar. If you fully re-installed this collar yourself, set it up again over USB (or remove and re-add it) so the base accepts its new key.'));
   if (s && s.beacon_active) {
     const text = `${c.name} has been outside for over 90 s. The collar is on Bluetooth as "${beaconName(unnamed(c, selected) ? '' : c.name, contact.phone)}" every other 90 s and asks for help on the mesh every 5 minutes.`;
     parts.push(el('div', { class: 'callout bad beacon' }, text,
@@ -1623,11 +1630,11 @@ $('fwUsbGo').onclick = () => {
   const full = $('fwMode').value === 'full';
   if (full && !confirm('Full install erases everything on the collar, including its keys and fences. Continue?')) return;
   startJob('firmware/flash-usb', { build: fwSel, port: $('fwPort').value, mode: $('fwMode').value, node_id: $('fwCollar').value || null,
-    name: $('fwNewName').value.trim() || null, setup: $('fwSetup').checked });
+    name: $('fwNewName').value.trim() || null, setup: $('fwSetup').checked, lock: $('fwLock').checked });
 };
 $('fwSetupOnly').onclick = () => {
   const id = $('fwCollar').value, name = id ? collars[id].name : $('fwNewName').value.trim();
-  startJob('firmware/setup-usb', { port: $('fwPort').value, name: name || null });
+  startJob('firmware/setup-usb', { port: $('fwPort').value, name: name || null, lock: $('fwLock').checked });
 };
 
 // Flash from this browser with esptool-js over Web Serial. The files come from the base.
@@ -1677,7 +1684,7 @@ $('fwWebGo').onclick = async () => {
     await loader.after('hard_reset');
     job.state = 'done'; job.progress = 1; job.step = 'Done. The collar is restarting.'; logLine(job.step);
     if (foundId && (!nodeId || nodeId === foundId)) {
-      const r = await api('firmware/flashed', { method: 'POST', body: JSON.stringify({ node_id: foundId, build: m.id, via: 'usb', name: $('fwNewName').value.trim() || null }) }).catch(() => null);
+      const r = await api('firmware/flashed', { method: 'POST', body: JSON.stringify({ node_id: foundId, build: m.id, via: 'usb', name: $('fwNewName').value.trim() || null, mode }) }).catch(() => null);
       if (r && r.new_collar) {
         logLine(`Added ${r.collar.name} (${foundId}) to the base.`);
         job.step = `Done. Added ${r.collar.name} as a new collar. Its Meshtastic settings still need this base's key: plug it into the base and use "Set up only", or see "Add a collar".`;
@@ -1708,7 +1715,8 @@ const parcelLayer = L.geoJSON(null, {
     ? { color: css('--parcel'), weight: 3, dashArray: null, fill: true, fillOpacity: 0.18, fillColor: css('--parcel') }
     : { color: css('--parcel'), weight: 2, dashArray: '6 5', fill: true, fillOpacity: 0.04, fillColor: css('--parcel') },
   onEachFeature: (f, layer) => {
-    layer.bindTooltip(() => parcelTitle(f.properties || {}), { sticky: true, direction: 'top', opacity: 0.9 });
+    // Leaflet reads a string as HTML, and parcel names come from whatever file was imported.
+    layer.bindTooltip(() => el('span', {}, parcelTitle(f.properties || {})), { sticky: true, direction: 'top', opacity: 0.9 });
     layer.on('click', e => {
       if (drawKind || pickMode) return; // let the click reach the map, to place a corner or a point
       L.DomEvent.stopPropagation(e);

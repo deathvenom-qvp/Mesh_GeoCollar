@@ -103,7 +103,7 @@ class Status:
 
 
 _STATUS = struct.Struct("<BBHBBiiHBhB")
-_COMMAND = struct.Struct("<BBBBH")
+_COMMAND = struct.Struct("<BBBBHI")  # ... duration ms, then a sequence number (anti-replay)
 _CHUNK_HEADER = struct.Struct("<BBHBB")
 
 
@@ -111,10 +111,24 @@ def _to_i(deg: float) -> int:
     return int(round(deg * 1e7))
 
 
-def encode_command(action: CommandAction, intensity: int = 0, duration_ms: int = 1000) -> bytes:
+def encode_command(action: CommandAction, intensity: int = 0, duration_ms: int = 1000, seq: int = 0) -> bytes:
+    """seq must grow with every command to a collar: the collar refuses one it has already passed,
+    so a command recorded off the air cannot be played back later."""
     if not 0 <= intensity <= 99:
         raise ValueError("intensity must be 0..99")
-    return _COMMAND.pack(VERSION, MsgType.COMMAND, action, intensity, duration_ms)
+    if not 0 <= duration_ms <= 0xFFFF:
+        raise ValueError("duration must be 0..65535 ms")
+    return _COMMAND.pack(VERSION, MsgType.COMMAND, action, intensity, duration_ms, seq & 0xFFFFFFFF)
+
+
+def next_fence_version(stored: int, reported: int | None) -> int:
+    """The version for new fences: one past both the base's own count and what the collar says it
+    holds (16-bit, wrapping, never 0). The collar refuses versions older than the one it has, so
+    a reinstalled base must catch up with the collar."""
+    base = stored or 0
+    if reported and (reported - base) & 0xFFFF and ((reported - base) & 0xFFFF) < 0x8000:
+        base = reported
+    return (base + 1) & 0xFFFF or 1
 
 
 def fit_text(text: str, limit: int) -> str:

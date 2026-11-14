@@ -56,7 +56,9 @@ inside and clear of every band (lost mode needs 3 such fixes). With several zone
 band of any zone wins.
 
 The collar saves a complete set to flash and reports its fence version in every Status, so the
-base can resend until the versions match.
+base can resend until the versions match. It refuses a set whose version is older than the one it holds
+(16-bit, wrapping), so an old set recorded off the air cannot replace newer fences; the base
+numbers new sets after the version the collar last reported.
 
 ## 2. Status and 3. Breach (collar to base)
 
@@ -81,6 +83,12 @@ Same 20-byte layout; Breach is sent the moment the collar enters Lost, and every
 | 2 | 1 | action: 1 shock, 2 vibrate, 3 beep, 10 corrections off, 11 corrections on, 12 force lost, 13 clear lost, 14 request status, 15 silence the lost beacon (until the dog is next back inside), 16 shock on at level `intensity` (1..99, capped by the collar's maximum, 30), 17 shock off |
 | 3 | 1 | intensity 0..99 |
 | 4 | 2 | duration, ms (the collar caps this at 3000) |
+| 6 | 4 | sequence number: the base's clock in seconds, or one more than its last if the clock is behind |
+
+The collar refuses a command whose sequence number is not higher than the last one it accepted
+(saved across reboots), and one without a sequence number, so a command recorded off the air
+cannot be played back. Golden bytes: vibrate 40 for 1500 ms, sequence 1763085600:
+`02 04 02 28 dc05 208d1669`.
 
 A manual shock is only sent when shock is enabled on the collar, and is capped at its maximum level.
 

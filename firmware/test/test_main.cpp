@@ -365,11 +365,15 @@ static void testProtocol()
     uint8_t buf[256];
 
     // Golden vectors, shared with base/tests/test_protocol.py.
-    Command c{CommandAction::Vibrate, 40, 1500};
+    Command c{CommandAction::Vibrate, 40, 1500, 1763085600};
     size_t n = encodeCommand(buf, sizeof(buf), c);
-    CHECK(hex(buf, n) == "02040228dc05");
+    CHECK(n == kCommandLength && hex(buf, n) == "02040228dc05208d1669");
     Command c2{};
-    CHECK(decodeCommand(buf, n, c2) && c2.action == CommandAction::Vibrate && c2.intensity == 40 && c2.durationMs == 1500);
+    CHECK(decodeCommand(buf, n, c2) && c2.action == CommandAction::Vibrate && c2.intensity == 40 && c2.durationMs == 1500 &&
+          c2.seq == 1763085600);
+    CHECK(!decodeCommand(buf, 6, c2)); // the old form, without a sequence number, is refused
+    CHECK(fenceVersionAcceptable(5, 4) && fenceVersionAcceptable(4, 4) && !fenceVersionAcceptable(3, 4));
+    CHECK(fenceVersionAcceptable(2, 65530) && !fenceVersionAcceptable(65530, 2) && fenceVersionAcceptable(1, 0));
 
     StatusReport s{3, 4, 87, 400001234, -750004321, 180, 9, -12, 1};
     n = encodeStatus(buf, sizeof(buf), MsgType::Breach, s);

@@ -35,7 +35,8 @@ class FakeLink:
         self.sent += [(node_id, c) for c in chunks]
         return len(chunks)
 
-    def send_command(self, node_id, action, intensity=0, duration_ms=1000):
+    def send_command(self, node_id, action, intensity=0, duration_ms=1000, seq=0):
+        self.seqs = getattr(self, "seqs", []) + [seq]
         self.sent.append((node_id, protocol.encode_command(action, intensity, duration_ms)))
 
     def send_owner(self, node_id, dog, owner, phone):
@@ -61,7 +62,7 @@ def test_collar_fence_and_command_flow(tmp_path):
 
     r = client.post("/api/collars/!a1b2c3d4/command", json={"action": "vibrate", "intensity": 40, "duration_ms": 1500})
     assert r.status_code == 200
-    assert link.sent[-1] == ("!a1b2c3d4", bytes.fromhex("02040228dc05"))
+    assert link.sent[-1][0] == "!a1b2c3d4" and link.sent[-1][1][:6] == bytes.fromhex("02040228dc05")
 
     assert client.post("/api/collars/!a1b2c3d4/command", json={"action": "explode"}).status_code == 400
     assert client.put("/api/collars/!nope/fences", json=FENCE).status_code == 404
@@ -70,6 +71,7 @@ def test_collar_fence_and_command_flow(tmp_path):
 
 def test_status_is_recorded(tmp_path):
     client, _ = make(tmp_path)
+    client.post("/api/collars", json={"node_id": "!a1b2c3d4", "name": "Rex"})
     client.app.state.store.record_status("!a1b2c3d4", {"state": "LOST", "lat": 40.001, "lon": -75.001})
     collars = client.get("/api/collars").json()
     assert collars["!a1b2c3d4"]["status"]["state"] == "LOST"
@@ -177,7 +179,7 @@ def test_collar_missing_owner_info_gets_it_on_next_report(tmp_path):
     assert link.sent == []
     link.connected = True
     # The link hands reports to the app; this is what MeshLink calls.
-    status = {"state": "INSIDE", "lat": 40.0, "lon": -75.0, "beacon_active": False}
+    status = {"state": "INSIDE", "lat": 40.0, "lon": -75.0, "beacon_active": False, "pki": True, "sender_key": "a2V5"}
     client.app.state.on_status("!a1b2c3d4", status)
     assert link.sent == [("!a1b2c3d4", protocol.encode_owner("Rex", "", ""))]
     client.app.state.on_status("!a1b2c3d4", status)
@@ -193,7 +195,7 @@ def test_shock_switch_needs_confirmation(tmp_path):
     assert client.post(url, json={"action": "shock_on", "intensity": 0, "confirm": True}).status_code == 400
     assert client.post(url, json={"action": "shock_on", "intensity": 12, "confirm": True}).status_code == 200
     assert link.sent[-1][1] == protocol.encode_command(protocol.CommandAction.SHOCK_ON, 12)
-    assert link.sent[-1][1].hex() == "0204100ce803"
+    assert link.sent[-1][1][:6].hex() == "0204100ce803"
     assert client.get("/api/collars").json()["!a1b2c3d4"]["shock_level"] == 12
     assert client.post(url, json={"action": "shock_off"}).status_code == 200
     assert link.sent[-1][1] == protocol.encode_command(protocol.CommandAction.SHOCK_OFF)
@@ -208,3 +210,36 @@ def test_simulated_shock_switch(tmp_path):
     assert c["status"]["shock_enabled"] and c["sim"]["shock_level"] == 8
     client.post(url, json={"action": "shock_off"})
     assert not client.get("/api/collars").json()[node]["status"]["shock_enabled"]
+
+
+def test_reports_must_come_from_the_collar(tmp_path):
+    client, link = make(tmp_path)
+    on_status = client.app.state.on_status
+    good = {"state": "INSIDE", "lat": 40.0, "lon": -75.0, "fence_version": 0, "pki": True, "sender_key": "S0VZMQ=="}
+    on_status("!99999999", good)  # not a collar on this base: dropped, not added
+    assert "!99999999" not in client.get("/api/collars").json()
+
+    client.post("/api/collars", json={"node_id": "!a1b2c3d4", "name": "Rex"})
+    on_status("!a1b2c3d4", {**good, "pki": False, "state": "LOST"})  # channel-encrypted: anyone could send it
+    assert client.get("/api/collars").json()["!a1b2c3d4"]["status"] is None
+    on_status("!a1b2c3d4", good)  # first real report: key remembered
+    c = client.get("/api/collars").json()["!a1b2c3d4"]
+    assert c["status"]["state"] == "INSIDE" and c["public_key"] == "S0VZMQ==" and "pki" not in c["status"]
+    on_status("!a1b2c3d4", {**good, "sender_key": "T1RIRVI=", "state": "LOST"})  # another node using its ID
+    c = client.get("/api/collars").json()["!a1b2c3d4"]
+    assert c["status"]["state"] == "INSIDE" and c.get("key_mismatch")
+
+
+def test_commands_carry_growing_sequence_numbers(tmp_path):
+    client, link = make(tmp_path)
+    client.post("/api/collars", json={"node_id": "!a1b2c3d4", "name": "Rex"})
+    for _ in range(3):
+        client.post("/api/collars/!a1b2c3d4/command", json={"action": "beep"})
+    assert link.seqs[0] > 1_700_000_000 and link.seqs == sorted(set(link.seqs))
+
+
+def test_new_fence_version_catches_up_with_the_collar(tmp_path):
+    client, _ = make(tmp_path)
+    client.post("/api/collars", json={"node_id": "!a1b2c3d4", "name": "Rex"})
+    client.app.state.on_status("!a1b2c3d4", {"state": "INSIDE", "fence_version": 41, "pki": True, "sender_key": "S0VZ"})
+    assert client.put("/api/collars/!a1b2c3d4/fences", json=FENCE).json()["fence_version"] == 42

@@ -195,6 +195,27 @@ find the collar on the network, enter the collar's address (from your router's d
 set **Network to search for collars being updated** on the Configuration tab, such as
 `192.168.1.0/24`.
 
+## Security: who can control a collar
+
+- A collar obeys GeoCollar messages only when they are PKI-encrypted direct messages from a
+  public key in its admin keys, which is your base's key after setup. Another base, even one set
+  up exactly like yours, has a different key and is ignored. Meshtastic's own remote settings
+  follow the same rule.
+- **Lock it to this base** (on by default when you set a collar up over USB) turns on Meshtastic's
+  managed mode. The collar then refuses settings changes from Bluetooth, USB and the network
+  too, so only your base can change it. The only way round it is a full install over USB, which
+  erases the collar, keys and all. Pick your base's channels before setting collars up; a locked
+  collar keeps the ones it was given until it is reinstalled. Locking also gives the collar a
+  random Bluetooth PIN, shown in its panel.
+- Every command carries a sequence number and every fence set a version, and the collar refuses
+  old ones, so recorded radio packets cannot be played back to it.
+- The base accepts reports only from collars you added, only PKI-encrypted, and only from the
+  public key it first saw from that collar. A report signed with another key is ignored and
+  flagged in the collar's panel. After a full install of a collar, set it up again (or remove and
+  re-add it) so the base learns its new key.
+- During a Wi-Fi update, Meshtastic's update loader waits on your home network for the new image
+  for a few minutes. Update collars on a network you trust.
+
 ## Data and access
 
 Collars, fences and recent positions are kept in the app's `/data` folder and included in Home
