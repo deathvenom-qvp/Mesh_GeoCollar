@@ -17,6 +17,7 @@
 #include "Fence.h"
 #include "Protocol.h"
 
+#include "Channels.h"
 #include "FSCommon.h"
 #include "MeshService.h"
 #include "NodeDB.h"
@@ -32,6 +33,16 @@
 #include <cstring>
 #include <esp32-hal-rmt.h>
 
+#if !defined(CONFIG_IDF_TARGET_ESP32S2) && !MESHTASTIC_EXCLUDE_BLUETOOTH
+#include "main.h"
+#include "nimble/NimbleBluetooth.h"
+#include <BLEAdvertising.h>
+#include <BLEDevice.h>
+#define GEOCOLLAR_HAS_BLE 1
+#else
+#define GEOCOLLAR_HAS_BLE 0
+#endif
+
 using namespace geocollar;
 
 namespace
@@ -39,7 +50,8 @@ namespace
 
 constexpr const char *kStateFile = "/prefs/geocollar.bin";
 constexpr uint32_t kStateMagic = 0x47434F4C; // "GCOL"
-constexpr uint16_t kStateFormat = 4; // 2: GPS pacing settings; 3: per-zone bands; 4: pulse intervals
+constexpr uint16_t kStateFormat = 5; // 2: GPS pacing settings; 3: per-zone bands; 4: pulse intervals; 5: owner
+constexpr uint32_t kBeaconRefreshMs = 10 * 1000; // re-apply the beacon advertisement this often
 
 /// Sends CaiXianLin frames on the data-line GPIO without blocking the Meshtastic scheduler:
 /// one frame per call to poll(), each started asynchronously on the RMT peripheral.
@@ -121,6 +133,92 @@ class CollarTransmitter
     rmt_data_t symbols_[caixianlin::kFrameLength];
 };
 
+/// The Bluetooth half of the lost beacon. It borrows Meshtastic's own BLE advertising instead of
+/// starting a second stack: during the "on" phase the advertisement carries only the beacon name,
+/// sent once a second (the slowest usual interval, to save battery), and during the "off" phase
+/// advertising stops altogether. Meshtastic's normal advertising comes back when the beacon ends.
+/// Needs Bluetooth enabled in the collar's Meshtastic settings: with it disabled, Meshtastic frees
+/// the Bluetooth memory at boot and it cannot be started again without a reboot.
+class BeaconAdvertiser
+{
+  public:
+    /// Call every second or so with the wanted state (nullptr name = beacon off).
+    void update(const char *name, uint32_t nowMs)
+    {
+#if GEOCOLLAR_HAS_BLE
+        const bool ble = nimbleBluetooth && nimbleBluetooth->isActive();
+        if (!ble) {
+            if (name && !warned_) {
+                LOG_WARN("GeoCollar: lost beacon has no Bluetooth (enable Bluetooth in the Meshtastic settings)");
+                warned_ = true;
+            }
+            mode_ = Mode::Normal;
+            return;
+        }
+        if (nimbleBluetooth->isConnected())
+            return; // the owner's phone is connected: leave Bluetooth alone
+        if (!name) {
+            if (mode_ != Mode::Normal) {
+                BLEAdvertising *adv = BLEDevice::getAdvertising();
+                adv->stop();
+                adv->setMinInterval(0x20); // the library defaults Meshtastic advertises with
+                adv->setMaxInterval(0x40);
+                nimbleBluetooth->startAdvertising();
+                mode_ = Mode::Normal;
+                LOG_INFO("GeoCollar: lost beacon Bluetooth off, normal advertising back");
+            }
+            return;
+        }
+        if (name[0] == 0) { // the off half of the cycle
+            if (mode_ != Mode::Off) {
+                BLEDevice::getAdvertising()->stop();
+                mode_ = Mode::Off;
+            }
+            return;
+        }
+        // Re-apply now and then, in case Meshtastic restarted its own advertising (e.g. after a
+        // phone disconnected).
+        if (mode_ == Mode::Beacon && strcmp(name, name_) == 0 && nowMs - appliedMs_ < kBeaconRefreshMs)
+            return;
+        BLEAdvertising *adv = BLEDevice::getAdvertising();
+        adv->stop();
+        adv->reset();
+        char primary[27];
+        strncpy(primary, name, sizeof(primary) - 1); // 31 bytes less flags and the name header
+        primary[sizeof(primary) - 1] = 0;
+        BLEAdvertisementData data;
+        data.setFlags(0x06); // general discoverable, no classic Bluetooth
+        data.setName(primary);
+        adv->setAdvertisementData(data);
+        BLEAdvertisementData scan;
+        scan.setName(name);
+        adv->setScanResponseData(scan);
+        adv->setMinInterval(1600); // 1 s, in 0.625 ms units
+        adv->setMaxInterval(1600);
+        if (!adv->start(0))
+            LOG_ERROR("GeoCollar: lost beacon advertising failed");
+        else if (mode_ != Mode::Beacon)
+            LOG_INFO("GeoCollar: lost beacon advertising \"%s\"", name);
+        strncpy(name_, name, sizeof(name_) - 1);
+        appliedMs_ = nowMs;
+        mode_ = Mode::Beacon;
+#else
+        (void)nowMs;
+        if (name && !warned_) {
+            LOG_WARN("GeoCollar: lost beacon has no Bluetooth in this build");
+            warned_ = true;
+        }
+#endif
+    }
+
+  private:
+    enum class Mode : uint8_t { Normal, Beacon, Off };
+    Mode mode_ = Mode::Normal;
+    bool warned_ = false;
+    char name_[32] = {};
+    uint32_t appliedMs_ = 0;
+};
+
 class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
 {
   public:
@@ -159,6 +257,7 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
                 FenceSet fences;
                 if (proto::decodeFenceSet(assembler_.data(), assembler_.length(), assembler_.version(), fences)) {
                     engine_.setFences(fences);
+                    beacon_.reset();
                     saveState();
                     LOG_INFO("GeoCollar: fence v%u loaded, %u zones", fences.version, fences.zoneCount);
                     sendStatus(proto::MsgType::Status);
@@ -168,6 +267,14 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
             proto::Command cmd;
             if (proto::decodeCommand(buf, len, cmd))
                 handleCommand(cmd);
+        } else if (type == proto::MsgType::Owner) {
+            proto::OwnerInfo o;
+            if (proto::decodeOwner(buf, len, o)) {
+                owner_ = o;
+                saveState();
+                LOG_INFO("GeoCollar: dog's name \"%s\", owner contact set", owner_.dog);
+                sendStatus(proto::MsgType::Status);
+            }
         }
         return ProcessMessage::STOP;
     }
@@ -180,6 +287,7 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
 
         checkPosition();
         repeatPulse();
+        runBeacon();
         applyGpsPacing();
 
         const uint32_t now = millis();
@@ -212,6 +320,8 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
         engine_.settings().correctionsEnabled = savedEnable;
 
         lastClearance_ = d.clearanceM;
+        if (!d.fixRejected)
+            beacon_.onFix(engine_.state() != CollarState::NoFence && d.clearanceM < 0, millis());
         if (pulser_.onDecision(d, engine_.fences(), millis()))
             applyCorrection(d.correction, d.intensity);
         if (d.sendBreach)
@@ -229,14 +339,78 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
         uint32_t &current = config.position.gps_update_interval;
         if (current != lastPacedSecs_)
             ownerGpsSecs_ = current;
-        const uint32_t want =
-            gpsIntervalSecs(engine_.settings(), engine_.state(), lastClearance_, alertWidthM(engine_.fences()));
+        const uint32_t want = gpsIntervalSecs(engine_.settings(), engine_.state(), lastClearance_,
+                                              alertWidthM(engine_.fences()), beacon_.active());
         const uint32_t target = want ? want : ownerGpsSecs_;
         if (current != target) {
             LOG_DEBUG("GeoCollar: GPS interval %us -> %us", (unsigned)current, (unsigned)target);
             current = target;
         }
         lastPacedSecs_ = current;
+    }
+
+    /// The lost-dog beacon: Bluetooth name on and off in 90 s turns, and a plain-text plea on the
+    /// mesh every 5 minutes, from 90 s after the dog went past a line until it is back inside or the
+    /// owner silences it.
+    void runBeacon()
+    {
+        const uint32_t now = millis();
+        const bool wasActive = beacon_.active();
+        beacon_.tick(now);
+        const bool active = beacon_.active();
+        if (active != wasActive) {
+            LOG_INFO("GeoCollar: lost beacon %s", active ? "on" : "off");
+            sendStatus(engine_.state() == CollarState::Lost ? proto::MsgType::Breach : proto::MsgType::Status);
+        }
+        if (!active) {
+            ble_.update(nullptr, now);
+            return;
+        }
+        char name[30];
+        if (beacon_.bleOn(now))
+            beaconName(owner_.dog[0] ? owner_.dog : "Dog", owner_.phone, name, sizeof(name));
+        else
+            name[0] = 0;
+        ble_.update(name, now);
+        if (beacon_.meshDue(now))
+            sendPlea();
+    }
+
+    /// Broadcast the plea as an ordinary text message on a channel strangers can read: the first one
+    /// with the well-known default key or no key. With none, it goes on the primary channel, which
+    /// only nodes sharing that channel can read.
+    void sendPlea()
+    {
+        char text[200];
+        const size_t n = beaconText(owner_.dog[0] ? owner_.dog : "Dog", owner_.owner, owner_.phone, lastFix_.latI,
+                                    lastFix_.lonI, text, sizeof(text));
+        meshtastic_MeshPacket *p = allocDataPacket();
+        if (!p || n > sizeof(p->decoded.payload.bytes)) {
+            if (p)
+                packetPool.release(p);
+            return;
+        }
+        p->to = NODENUM_BROADCAST;
+        p->channel = publicChannel();
+        p->want_ack = false;
+        p->decoded.portnum = meshtastic_PortNum_TEXT_MESSAGE_APP;
+        memcpy(p->decoded.payload.bytes, text, n);
+        p->decoded.payload.size = n;
+        LOG_INFO("GeoCollar: lost plea on channel %u: %s", (unsigned)p->channel, text);
+        service->sendToMesh(p, RX_SRC_LOCAL, false);
+    }
+
+    static uint8_t publicChannel()
+    {
+        for (uint8_t i = 0; i < channels.getNumChannels(); i++) {
+            const meshtastic_Channel &ch = channels.getByIndex(i);
+            if (ch.role == meshtastic_Channel_Role_DISABLED)
+                continue;
+            const auto &psk = ch.settings.psk;
+            if (psk.size == 0 || (psk.size == 1 && psk.bytes[0] == 1))
+                return i;
+        }
+        return channels.getPrimaryIndex();
     }
 
     /// Repeat beep / vibrate between fixes at the pulse interval sent with the fences.
@@ -304,6 +478,10 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
             break;
         case proto::CommandAction::RequestStatus:
             break;
+        case proto::CommandAction::SilenceLost:
+            beacon_.silence();
+            ble_.update(nullptr, millis());
+            break;
         }
         sendStatus(proto::MsgType::Status);
     }
@@ -322,7 +500,8 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
         s.sats = lastFix_.sats;
         const float c = lastClearance_;
         s.clearanceM = c > 32767 ? 32767 : (c < -32768 ? -32768 : (int16_t)c);
-        s.flags = (engine_.settings().correctionsEnabled ? 1 : 0) | (engine_.settings().shockEnabled ? 2 : 0);
+        s.flags = (engine_.settings().correctionsEnabled ? 1 : 0) | (engine_.settings().shockEnabled ? 2 : 0) |
+                  (beacon_.active() ? 4 : 0) | (beacon_.silenced() ? 8 : 0);
 
         meshtastic_MeshPacket *p = allocDataPacket();
         if (!p)
@@ -336,6 +515,7 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
     }
 
     // Persistence: [magic u32][format u16][base node u32][fence version u16][blob len u16][blob][Settings]
+    // [OwnerInfo]
     void saveState()
     {
         uint8_t blob[proto::kMaxFenceBlob];
@@ -354,6 +534,7 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
         f.write((const uint8_t *)&len16, sizeof(len16));
         f.write(blob, blobLen);
         f.write((const uint8_t *)&engine_.settings(), sizeof(Settings));
+        f.write((const uint8_t *)&owner_, sizeof(owner_));
         if (!f.close())
             LOG_ERROR("GeoCollar: failed to save %s", kStateFile);
     }
@@ -371,18 +552,22 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
         uint32_t base = 0;
         static uint8_t blob[proto::kMaxFenceBlob];
         Settings settings;
+        proto::OwnerInfo owner;
         bool ok = f.read((uint8_t *)&magic, sizeof(magic)) == sizeof(magic) && magic == kStateMagic &&
-                  f.read((uint8_t *)&format, sizeof(format)) == sizeof(format) && format == kStateFormat &&
+                  f.read((uint8_t *)&format, sizeof(format)) == sizeof(format) && (format == kStateFormat || format == 4) &&
                   f.read((uint8_t *)&base, sizeof(base)) == sizeof(base) &&
                   f.read((uint8_t *)&version, sizeof(version)) == sizeof(version) &&
                   f.read((uint8_t *)&len16, sizeof(len16)) == sizeof(len16) && len16 <= sizeof(blob) &&
-                  f.read(blob, len16) == len16 && f.read((uint8_t *)&settings, sizeof(settings)) == sizeof(settings);
+                  f.read(blob, len16) == len16 && f.read((uint8_t *)&settings, sizeof(settings)) == sizeof(settings) &&
+                  (format < 5 || f.read((uint8_t *)&owner, sizeof(owner)) == sizeof(owner)); // 4: no owner yet
         f.close();
         FenceSet fences;
         if (ok && proto::decodeFenceSet(blob, len16, version, fences)) {
             engine_.setFences(fences);
             engine_.settings() = settings;
             baseNode_ = base;
+            owner.dog[sizeof(owner.dog) - 1] = owner.owner[sizeof(owner.owner) - 1] = owner.phone[sizeof(owner.phone) - 1] = 0;
+            owner_ = owner;
         } else {
             LOG_WARN("GeoCollar: saved state unreadable, starting without fences");
         }
@@ -391,6 +576,9 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
     FenceEngine engine_;
     CorrectionPulser pulser_;
     CollarTransmitter tx_;
+    LostBeacon beacon_;
+    BeaconAdvertiser ble_;
+    proto::OwnerInfo owner_;
     proto::FenceAssembler assembler_;
     NodeNum baseNode_ = 0;
     uint32_t lastFixTimestamp_ = 0;

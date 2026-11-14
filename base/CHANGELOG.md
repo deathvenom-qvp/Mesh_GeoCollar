@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.9.0
+
+- Lost-dog beacon. Collars are named after the dog (Rename next to the name), and a new **If a
+  dog gets lost** section holds your name and phone. 90 s after a dog goes past a line, its collar
+  shows up on Bluetooth as "Rex is lost 5551234567" (90 s on, 90 s off), posts "Please help get
+  Rex home. Call …" on the public Meshtastic channel every 5 minutes, and halves its GPS rate,
+  until it is back inside or you press **Silence lost alert**. Needs the new collar firmware, with
+  Bluetooth left enabled in Meshtastic.
+
 ## 0.8.1
 
 - Metres / feet toggle at the top of the page, remembered per browser (feet by default in the

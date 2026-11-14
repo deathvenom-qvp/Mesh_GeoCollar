@@ -185,6 +185,52 @@ class CorrectionPulser
 /// own configured interval alone (no fences, or pacing turned off). Inside, the interval is the
 /// time the dog needs at dogSpeedMps to cover the distance to the outermost band (alertWidthM),
 /// clamped between gpsFastSecs and gpsSlowSecs.
-uint32_t gpsIntervalSecs(const Settings &s, CollarState state, float clearanceM, uint16_t alertWidthM);
+/// GPS fix interval in seconds (0 = leave the owner's setting). With the lost beacon on, fixes
+/// come half as often as in lost mode, to make the battery last.
+uint32_t gpsIntervalSecs(const Settings &s, CollarState state, float clearanceM, uint16_t alertWidthM, bool beacon = false);
+
+/// Lost-dog beacon. Once the dog has been past a line for 90 s, the collar takes a fix half as
+/// often, advertises "<dog> is lost <phone>" over Bluetooth for 90 s, goes radio-quiet for 90 s,
+/// and repeats; and every 5 minutes it broadcasts a plain text message on the mesh asking whoever
+/// reads it to call the owner. It stops when a fix puts the dog back inside, or when the owner
+/// silences it (then it stays off until the dog has been back inside once).
+class LostBeacon
+{
+  public:
+    static constexpr uint32_t kTriggerMs = 90 * 1000;
+    static constexpr uint32_t kBleOnMs = 90 * 1000;
+    static constexpr uint32_t kBleOffMs = 90 * 1000;
+    static constexpr uint32_t kMeshEveryMs = 5 * 60 * 1000;
+
+    /// Call with every accepted fix: outside = past a line (or with no fences, false).
+    void onFix(bool outside, uint32_t nowMs);
+    /// Call often (every second or so); starts the beacon once the dog has been out long enough,
+    /// even if fixes stop coming.
+    void tick(uint32_t nowMs);
+    void silence();
+    void reset();
+
+    bool active() const { return active_; }
+    bool silenced() const { return silenced_; }
+    /// In the Bluetooth "on" half of the cycle.
+    bool bleOn(uint32_t nowMs) const;
+    /// True once when a mesh message is due (straight away, then every 5 minutes).
+    bool meshDue(uint32_t nowMs);
+
+  private:
+    bool outside_ = false;
+    bool active_ = false;
+    bool silenced_ = false;
+    bool meshSent_ = false;
+    uint32_t outsideSinceMs_ = 0;
+    uint32_t activeSinceMs_ = 0;
+    uint32_t lastMeshMs_ = 0;
+};
+
+/// Bluetooth device name for the beacon, at most cap - 1 bytes: "Rex is lost 5551234567",
+/// shortened to "Rex lost 5551234567" and then a shorter dog's name if it does not fit.
+size_t beaconName(const char *dog, const char *phone, char *out, size_t cap);
+/// The mesh message: "Please help get Rex home. Call Ken 5551234567." plus the last position.
+size_t beaconText(const char *dog, const char *owner, const char *phone, int32_t latI, int32_t lonI, char *out, size_t cap);
 
 } // namespace geocollar

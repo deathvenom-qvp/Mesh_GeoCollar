@@ -2,6 +2,9 @@
 
 #include "Fence.h"
 
+#include <cstdio>
+#include <cstring>
+
 #include <cmath>
 
 namespace geocollar
@@ -263,11 +266,13 @@ void FenceEngine::correctHard(Decision &d, uint32_t nowMs)
     }
 }
 
-uint32_t gpsIntervalSecs(const Settings &s, CollarState state, float clearanceM, uint16_t alertWidthM)
+uint32_t gpsIntervalSecs(const Settings &s, CollarState state, float clearanceM, uint16_t alertWidthM, bool beacon)
 {
     if (!s.gpsPacing || state == CollarState::NoFence)
         return 0;
     const uint32_t fast = s.gpsFastSecs ? s.gpsFastSecs : 1;
+    if (beacon)
+        return 2 * (s.gpsLostSecs ? s.gpsLostSecs : fast);
     const uint32_t slow = s.gpsSlowSecs > fast ? s.gpsSlowSecs : fast;
     switch (state) {
     case CollarState::Lost:
@@ -330,6 +335,122 @@ Correction CorrectionPulser::poll(const FenceSet &f, uint32_t nowMs, bool allowe
 uint8_t CorrectionPulser::periodFor(Correction c, const FenceSet &f)
 {
     return c == Correction::Beep ? f.beepPulseS : c == Correction::Vibrate ? f.vibratePulseS : 0;
+}
+
+// ---------------------------------------------------------------------------------------------
+
+void LostBeacon::onFix(bool outside, uint32_t nowMs)
+{
+    if (!outside) {
+        // Back inside: everything stops, and a silenced beacon is armed again for next time.
+        outside_ = active_ = silenced_ = false;
+        return;
+    }
+    if (!outside_) {
+        outside_ = true;
+        outsideSinceMs_ = nowMs;
+    }
+    tick(nowMs);
+}
+
+void LostBeacon::tick(uint32_t nowMs)
+{
+    if (outside_ && !active_ && !silenced_ && nowMs - outsideSinceMs_ >= kTriggerMs) {
+        active_ = true;
+        activeSinceMs_ = nowMs;
+        meshSent_ = false;
+    }
+}
+
+void LostBeacon::silence()
+{
+    if (outside_)
+        silenced_ = true;
+    active_ = false;
+}
+
+void LostBeacon::reset()
+{
+    outside_ = active_ = silenced_ = meshSent_ = false;
+}
+
+bool LostBeacon::bleOn(uint32_t nowMs) const
+{
+    return active_ && (nowMs - activeSinceMs_) % (kBleOnMs + kBleOffMs) < kBleOnMs;
+}
+
+bool LostBeacon::meshDue(uint32_t nowMs)
+{
+    if (!active_ || (meshSent_ && nowMs - lastMeshMs_ < kMeshEveryMs))
+        return false;
+    meshSent_ = true;
+    lastMeshMs_ = nowMs;
+    return true;
+}
+
+namespace
+{
+/// Phone number without spaces, dots or brackets, to save room in a Bluetooth name.
+void compactPhone(const char *in, char *out, size_t cap)
+{
+    size_t n = 0;
+    for (; *in && n + 1 < cap; in++)
+        if (*in != ' ' && *in != '.' && *in != '(' && *in != ')')
+            out[n++] = *in;
+    out[n] = '\0';
+}
+
+/// Cut a UTF-8 string to at most max bytes without splitting a character.
+size_t utf8Cut(const char *s, size_t max)
+{
+    size_t n = strlen(s);
+    if (n <= max)
+        return n;
+    n = max;
+    while (n > 0 && (static_cast<uint8_t>(s[n]) & 0xC0) == 0x80)
+        n--;
+    return n;
+}
+} // namespace
+
+size_t beaconName(const char *dog, const char *phone, char *out, size_t cap)
+{
+    if (!cap)
+        return 0;
+    char ph[32];
+    compactPhone(phone ? phone : "", ph, sizeof(ph));
+    const char *d = (dog && *dog) ? dog : "Dog";
+    const size_t max = cap - 1;
+    const size_t phLen = strlen(ph);
+    const char *mid = phLen ? " is lost " : " is lost";
+    // Full form, then without "is", then with the dog's name cut short.
+    size_t need = strlen(d) + strlen(mid) + phLen;
+    if (need > max && phLen)
+        mid = " lost ";
+    const size_t fixed = strlen(mid) + phLen;
+    size_t dogLen = fixed < max ? utf8Cut(d, max - fixed) : 0;
+    int n = snprintf(out, cap, "%.*s%s%s", (int)dogLen, d, mid, ph);
+    if (n < 0)
+        return 0;
+    return (size_t)n < cap ? (size_t)n : cap - 1;
+}
+
+size_t beaconText(const char *dog, const char *owner, const char *phone, int32_t latI, int32_t lonI, char *out, size_t cap)
+{
+    const char *d = (dog && *dog) ? dog : "this dog";
+    int n;
+    if (phone && *phone)
+        n = snprintf(out, cap, "Please help get %s home. Call %s%s%s.", d, owner && *owner ? owner : "", owner && *owner ? " " : "", phone);
+    else
+        n = snprintf(out, cap, "Please help get %s home.", d);
+    if (n > 0 && (size_t)n < cap && (latI || lonI)) {
+        const int32_t la = latI < 0 ? -latI : latI, lo = lonI < 0 ? -lonI : lonI;
+        n += snprintf(out + n, cap - n, " Last seen %s%d.%05d,%s%d.%05d", latI < 0 ? "-" : "", (int)(la / 10000000),
+                      (int)((la % 10000000) / 100), lonI < 0 ? "-" : "", (int)(lo / 10000000), (int)((lo % 10000000) / 100));
+    }
+    if (n < 0)
+        return 0;
+    return (size_t)n < cap ? (size_t)n : cap - 1;
 }
 
 } // namespace geocollar

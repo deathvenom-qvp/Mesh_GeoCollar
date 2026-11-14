@@ -42,6 +42,7 @@ Beeps and vibrations can repeat every 2 to 10 seconds while the dog stays in a b
 | Warning (inside, in any band) | The band's correction, above. |
 | Outside (not yet confirmed) | **Stops all corrections** at once. They stay off, even through the bands on the way back, until the dog is inside and clear of every band. |
 | Lost (3 good fixes outside) | **Stops all corrections**, sends a breach alert, reports position every 30 s. |
+| Outside for 90 s | **Lost beacon**: Bluetooth name "Rex is lost 5551234567" 90 s on / 90 s off, a plain-text "Please help get Rex home. Call …" on the public mesh channel every 5 minutes, GPS at half the lost rate. Until back inside or silenced from the base. |
 | Back inside, clear of every band, for 3 fixes | Re-arms. |
 
 Fixes with poor PDOP or few satellites are ignored entirely.
@@ -129,6 +130,8 @@ the map tiles need internet.
 ## What is not done yet
 
 - Not yet run on hardware: the data-line tap, the RMT timing and pairing need bench testing.
+- The lost beacon's Bluetooth advertising is written against Meshtastic's BLE stack and
+  untested on hardware.
 - GPS pacing is written and compiles but is untested on hardware, and its settings (5 s, 60 s,
   15 s, 6 m/s) can't be changed from the base app yet.
 - Home Assistant entities (device trackers, breach notifications) are not wired up yet; the app

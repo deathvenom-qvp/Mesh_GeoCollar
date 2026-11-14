@@ -18,6 +18,9 @@ MAX_CHUNKS = 8
 MAX_BAND_M = 255  # each band width is one byte on the wire
 MAX_PULSE_S = 10
 MIN_PULSE_S = 2
+MAX_DOG_NAME = 24  # bytes of UTF-8, as in firmware/GeoCollar/Protocol.h
+MAX_OWNER_NAME = 24
+MAX_PHONE = 20
 
 
 class MsgType(IntEnum):
@@ -25,6 +28,7 @@ class MsgType(IntEnum):
     STATUS = 2
     BREACH = 3
     COMMAND = 4
+    OWNER = 5  # base -> collar: the dog's name and the owner's contact, for the lost beacon
 
 
 class CommandAction(IntEnum):
@@ -36,6 +40,7 @@ class CommandAction(IntEnum):
     FORCE_LOST = 12
     CLEAR_LOST = 13
     REQUEST_STATUS = 14
+    SILENCE_LOST = 15  # stop the lost beacon until the dog is next back inside
 
 
 class CollarState(IntEnum):
@@ -89,6 +94,8 @@ class Status:
     clearance_m: int
     corrections_enabled: bool
     shock_enabled: bool
+    beacon_active: bool = False  # lost beacon on: Bluetooth name and mesh plea
+    beacon_silenced: bool = False
 
 
 _STATUS = struct.Struct("<BBHBBiiHBhB")
@@ -104,6 +111,37 @@ def encode_command(action: CommandAction, intensity: int = 0, duration_ms: int =
     if not 0 <= intensity <= 99:
         raise ValueError("intensity must be 0..99")
     return _COMMAND.pack(VERSION, MsgType.COMMAND, action, intensity, duration_ms)
+
+
+def fit_text(text: str, limit: int) -> str:
+    """Tidy text for the collar: no control characters, at most limit bytes of UTF-8, cut on a
+    character boundary."""
+    text = "".join(c for c in (text or "") if c.isprintable()).strip()
+    data = text.encode()[:limit]
+    return data.decode(errors="ignore").strip()
+
+
+def encode_owner(dog: str, owner: str, phone: str) -> bytes:
+    """The dog's name and owner contact, used by the collar's lost beacon."""
+    out = bytearray([VERSION, MsgType.OWNER])
+    for text, limit in ((dog, MAX_DOG_NAME), (owner, MAX_OWNER_NAME), (phone, MAX_PHONE)):
+        data = fit_text(text, limit).encode()
+        out.append(len(data))
+        out += data
+    return bytes(out)
+
+
+def decode_owner(data: bytes) -> tuple[str, str, str]:
+    if len(data) < 5 or data[0] != VERSION or data[1] != MsgType.OWNER:
+        raise ValueError("not a GeoCollar owner message")
+    fields, i = [], 2
+    for _ in range(3):
+        n = data[i]
+        fields.append(data[i + 1 : i + 1 + n].decode())
+        i += 1 + n
+    if i != len(data):
+        raise ValueError("bad owner message length")
+    return fields[0], fields[1], fields[2]
 
 
 def decode_status(data: bytes) -> Status:
@@ -124,12 +162,17 @@ def decode_status(data: bytes) -> Status:
         clearance_m=clr,
         corrections_enabled=bool(flags & 1),
         shock_enabled=bool(flags & 2),
+        beacon_active=bool(flags & 4),
+        beacon_silenced=bool(flags & 8),
     )
 
 
 def encode_status(s: Status) -> bytes:
     """Mostly for tests and simulators: the collar is what normally sends these."""
-    flags = (1 if s.corrections_enabled else 0) | (2 if s.shock_enabled else 0)
+    flags = (
+        (1 if s.corrections_enabled else 0) | (2 if s.shock_enabled else 0)
+        | (4 if s.beacon_active else 0) | (8 if s.beacon_silenced else 0)
+    )
     return _STATUS.pack(
         VERSION, s.msg_type, s.fence_version, s.state, s.battery_pct, _to_i(s.lat), _to_i(s.lon),
         int(round(s.pdop * 100)), s.sats, s.clearance_m, flags,
@@ -137,7 +180,7 @@ def encode_status(s: Status) -> bytes:
 
 
 def message_type(data: bytes) -> MsgType | None:
-    if len(data) < 2 or data[0] != VERSION or data[1] not in (1, 2, 3, 4):
+    if len(data) < 2 or data[0] != VERSION or data[1] not in (1, 2, 3, 4, 5):
         return None
     return MsgType(data[1])
 

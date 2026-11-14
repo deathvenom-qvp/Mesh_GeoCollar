@@ -227,6 +227,79 @@ def _bearing_and_distance(lat1, lon1, lat2, lon2) -> tuple[float, float]:
     return (math.degrees(math.atan2(x, y)) % 360, math.hypot(x, y))
 
 
+class LostBeacon:
+    """Port of the firmware's LostBeacon (firmware/GeoCollar/Fence.cpp): starts 90 s after the dog
+    went past a line, then Bluetooth on 90 s / off 90 s and a mesh plea every 5 minutes, until the
+    dog is back inside or the owner silences it."""
+
+    TRIGGER_S = 90
+    BLE_ON_S = 90
+    BLE_OFF_S = 90
+    MESH_EVERY_S = 300
+
+    def __init__(self):
+        self.reset()
+
+    def reset(self) -> None:
+        self.outside = self.active = self.silenced = False
+        self._outside_since = self._active_since = 0.0
+        self._last_mesh: float | None = None
+
+    def on_fix(self, outside: bool, now: float) -> None:
+        if not outside:
+            self.outside = self.active = self.silenced = False
+            return
+        if not self.outside:
+            self.outside, self._outside_since = True, now
+        self.tick(now)
+
+    def tick(self, now: float) -> None:
+        if self.outside and not self.active and not self.silenced and now - self._outside_since >= self.TRIGGER_S:
+            self.active, self._active_since, self._last_mesh = True, now, None
+
+    def silence(self) -> None:
+        if self.outside:
+            self.silenced = True
+        self.active = False
+
+    def ble_on(self, now: float) -> bool:
+        return self.active and (now - self._active_since) % (self.BLE_ON_S + self.BLE_OFF_S) < self.BLE_ON_S
+
+    def mesh_due(self, now: float) -> bool:
+        if not self.active or (self._last_mesh is not None and now - self._last_mesh < self.MESH_EVERY_S):
+            return False
+        self._last_mesh = now
+        return True
+
+
+def _utf8_cut(text: str, limit: int) -> str:
+    return text.encode()[:max(0, limit)].decode(errors="ignore")
+
+
+def beacon_name(dog: str, phone: str, cap: int = 30) -> str:
+    """The collar's Bluetooth name while lost, as firmware beaconName() builds it."""
+    ph = "".join(c for c in (phone or "") if c not in " .()")[:31]
+    d = dog or "Dog"
+    limit = cap - 1
+    mid = " is lost " if ph else " is lost"
+    if len((d + mid + ph).encode()) > limit and ph:
+        mid = " lost "
+    fixed = len((mid + ph).encode())
+    return (_utf8_cut(d, limit - fixed) if fixed < limit else "") + mid + ph
+
+
+def beacon_text(dog: str, owner: str, phone: str, lat: float | None = None, lon: float | None = None) -> str:
+    """The plain-text mesh plea, as firmware beaconText() builds it."""
+    d = dog or "this dog"
+    text = f"Please help get {d} home. Call {owner + ' ' if owner else ''}{phone}." if phone else f"Please help get {d} home."
+    if lat or lon:
+        def deg(v: float) -> str:  # truncated like the firmware's integer maths
+            i = abs(int(round(v * 1e7)))
+            return f"{'-' if v < 0 else ''}{i // 10_000_000}.{(i % 10_000_000) // 100:05d}"
+        text += f" Last seen {deg(lat)},{deg(lon)}"
+    return text
+
+
 class SimCollar:
     # Settings the page can change, with their limits.
     LIMITS = {"speed_mps": (0.1, 15.0), "report_s": (1, 600), "noise_m": (0.0, 30.0)}
@@ -255,6 +328,9 @@ class SimCollar:
         self._last_report = -1e9
         self._report_now = True
         self._fix = (self.lat, self.lon)
+        self.beacon = LostBeacon()
+        self.owner = ("", "", "")  # dog's name, owner's name, phone: as sent to a real collar
+        self._ble = False
 
     # -- settings ---------------------------------------------------------------------------
     def settings(self) -> dict:
@@ -305,6 +381,7 @@ class SimCollar:
             protocol.Zone(z.kind, z.danger_m, z.warning_m, z.attention_m, [(round(a, 7), round(o, 7)) for a, o in z.vertices]) for z in zones
         ])
         self.fence_version = version
+        self.beacon.reset()
         self._event("fences", f"loaded fence version {version}")
         self._report_now = True
 
@@ -327,7 +404,16 @@ class SimCollar:
             self.engine.force_lost()
         elif action == A.CLEAR_LOST:
             self.engine.clear_lost()
+        elif action == A.SILENCE_LOST:
+            was = self.beacon.active
+            self.beacon.silence()
+            if was:
+                self._event("info", "lost alert silenced: Bluetooth and mesh plea off until back inside")
+            self._ble = False
         self._report_now = True
+
+    def set_owner(self, dog: str, owner: str, phone: str) -> None:
+        self.owner = (dog, owner, phone)
 
     # -- time -------------------------------------------------------------------------------
     def _event(self, kind: str, text: str) -> None:
@@ -370,9 +456,31 @@ class SimCollar:
         self._pulse(d, now)
         if d.send_breach:
             self._event("lost", "confirmed outside: corrections stop, lost mode")
+        self._run_beacon(now)
         if d.send_status or d.send_breach or self._report_now or now - self._last_report >= self.report_s:
             return self.report(now, breach=d.send_breach or self.engine.state == protocol.CollarState.LOST)
         return None
+
+    def _run_beacon(self, now: float) -> None:
+        was = self.beacon.active
+        if self.engine.zones:
+            self.beacon.on_fix(self.clearance is not None and self.clearance < 0, now)
+        else:
+            self.beacon.reset()
+        if self.beacon.active != was:
+            self._report_now = True
+            if self.beacon.active:
+                self._event("lost", "out for 90 s: lost beacon on, GPS fixes at half rate")
+            elif not self.beacon.silenced:
+                self._event("info", "back inside: lost beacon off")
+        ble = self.beacon.ble_on(now)
+        if ble != self._ble:
+            self._ble = ble
+            dog, _owner, phone = self.owner
+            self._event("ble", f'Bluetooth on as "{beacon_name(dog, phone)}"' if ble else "Bluetooth off for 90 s")
+        if self.beacon.mesh_due(now):
+            dog, owner, phone = self.owner
+            self._event("mesh", "mesh plea: " + beacon_text(dog, owner, phone, *self._fix))
 
     # The simulator takes a fix every second; a real collar near the line takes one every 5 s.
     FIX_EVERY_S = 5
@@ -412,6 +520,8 @@ class SimCollar:
             "clearance_m": 0 if c is None else int(max(-32768, min(32767, round(c)))),
             "corrections_enabled": self.engine.settings.corrections_enabled,
             "shock_enabled": self.engine.settings.shock_enabled,
+            "beacon_active": self.beacon.active,
+            "beacon_silenced": self.beacon.silenced,
         }
 
     def public(self) -> dict:
@@ -456,6 +566,10 @@ class Simulator:
     def command(self, node_id: str, action, intensity: int = 0) -> None:
         with self.lock:
             self.collars[node_id].command(action, intensity)
+
+    def set_owner(self, node_id: str, dog: str, owner: str, phone: str) -> None:
+        with self.lock:
+            self.collars[node_id].set_owner(dog, owner, phone)
 
     def report_now(self, node_id: str) -> None:
         """Send a status straight away, as the collar does after a command or new fences."""

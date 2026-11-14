@@ -120,6 +120,10 @@ class MeshLink:
             self._send(node_id, chunk)
         return len(chunks)
 
+    def send_owner(self, node_id: str, dog: str, owner: str, phone: str) -> None:
+        """The dog's name and the owner's contact, for the collar's lost beacon."""
+        self._send(node_id, protocol.encode_owner(dog, owner, phone))
+
     def send_command(self, node_id: str, action: protocol.CommandAction, intensity: int = 0, duration_ms: int = 1000):
         self._send(node_id, protocol.encode_command(action, intensity, duration_ms))
 

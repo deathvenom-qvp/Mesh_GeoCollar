@@ -435,6 +435,84 @@ static void testProtocol()
     CHECK(!messageType(junk, sizeof(junk), type)); // wrong protocol version
 }
 
+static void testBeacon()
+{
+    LostBeacon b;
+    const uint32_t t0 = 1000;
+    b.onFix(true, t0);
+    CHECK(!b.active());
+    b.tick(t0 + LostBeacon::kTriggerMs - 1);
+    CHECK(!b.active());
+    b.tick(t0 + LostBeacon::kTriggerMs); // no new fix needed: 90 s out is enough
+    CHECK(b.active());
+    const uint32_t on = t0 + LostBeacon::kTriggerMs;
+    CHECK(b.bleOn(on) && b.bleOn(on + LostBeacon::kBleOnMs - 1));
+    CHECK(!b.bleOn(on + LostBeacon::kBleOnMs) && !b.bleOn(on + LostBeacon::kBleOnMs + LostBeacon::kBleOffMs - 1));
+    CHECK(b.bleOn(on + LostBeacon::kBleOnMs + LostBeacon::kBleOffMs));
+    CHECK(b.meshDue(on));
+    CHECK(!b.meshDue(on + 1000));
+    CHECK(!b.meshDue(on + LostBeacon::kMeshEveryMs - 1));
+    CHECK(b.meshDue(on + LostBeacon::kMeshEveryMs));
+    // Back inside: stops.
+    b.onFix(false, on + 400000);
+    CHECK(!b.active() && !b.bleOn(on + 400000) && !b.meshDue(on + 400000));
+    // A short trip out does not trigger it.
+    b.onFix(true, 2000000);
+    b.onFix(false, 2000000 + 60000);
+    b.tick(2000000 + 200000);
+    CHECK(!b.active());
+    // Silenced: stays off while out, re-arms after the dog has been back inside.
+    b.onFix(true, 3000000);
+    b.tick(3000000 + LostBeacon::kTriggerMs);
+    CHECK(b.active());
+    b.silence();
+    CHECK(!b.active() && b.silenced());
+    b.onFix(true, 3000000 + 10 * LostBeacon::kTriggerMs);
+    CHECK(!b.active());
+    b.onFix(false, 4000000);
+    CHECK(!b.silenced());
+    b.onFix(true, 4100000);
+    b.tick(4100000 + LostBeacon::kTriggerMs);
+    CHECK(b.active());
+
+    // GPS: half as often as lost mode.
+    Settings s;
+    CHECK(gpsIntervalSecs(s, CollarState::Lost, -50, 10, true) == 2u * s.gpsLostSecs);
+
+    char name[30];
+    CHECK(beaconName("Rex", "(555) 123-4567", name, sizeof(name)) == strlen("Rex is lost 555123-4567"));
+    CHECK(strcmp(name, "Rex is lost 555123-4567") == 0);
+    beaconName("Maximilian Barksworth", "+44 7700 900123", name, sizeof(name));
+    CHECK(strlen(name) <= 29 && strncmp(name, "Maximilian ", 11) == 0 && strstr(name, " lost +447700900123"));
+    beaconName("Rex", "", name, sizeof(name));
+    CHECK(strcmp(name, "Rex is lost") == 0);
+    char small[27];
+    beaconName("Rex", "5551234567", small, sizeof(small)); // primary advertisement: 26 bytes
+    CHECK(strcmp(small, "Rex is lost 5551234567") == 0);
+
+    char text[200];
+    beaconText("Rex", "Ken", "555-123-4567", 401234567, -751234567, text, sizeof(text));
+    CHECK(strcmp(text, "Please help get Rex home. Call Ken 555-123-4567. Last seen 40.12345,-75.12345") == 0);
+    beaconText("Rex", "", "", 0, 0, text, sizeof(text));
+    CHECK(strcmp(text, "Please help get Rex home.") == 0);
+
+    using namespace proto;
+    OwnerInfo o, back;
+    strcpy(o.dog, "Rex");
+    strcpy(o.owner, "Ken");
+    strcpy(o.phone, "555-123-4567");
+    uint8_t buf[100];
+    const size_t n = encodeOwner(buf, sizeof(buf), o);
+    CHECK(n == 2 + 1 + 3 + 1 + 3 + 1 + 12);
+    CHECK(hex(buf, n) == "0205035265780" "34b656e0c3535352d3132332d34353637");
+    MsgType t;
+    CHECK(messageType(buf, n, t) && t == MsgType::Owner);
+    CHECK(decodeOwner(buf, n, back) && strcmp(back.dog, "Rex") == 0 && strcmp(back.phone, "555-123-4567") == 0);
+    buf[3] = '\n'; // control characters are refused
+    CHECK(!decodeOwner(buf, n, back));
+    CHECK(!decodeOwner(buf, n - 1, back));
+}
+
 int main()
 {
     testCaiXianLin();
@@ -443,6 +521,7 @@ int main()
     testShockCaps();
     testBands();
     testPulser();
+    testBeacon();
     testGpsPacing();
     testProtocol();
     std::printf("%d checks, %d failures\n", checks, failures);

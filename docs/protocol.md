@@ -72,14 +72,47 @@ Same 20-byte layout; Breach is sent the moment the collar enters Lost, and every
 | 14 | 2 | PDOP × 100 |
 | 16 | 1 | satellites in view |
 | 17 | 2 | clearance to nearest fence line, metres, signed (negative = on the wrong side) |
-| 19 | 1 | flags: bit 0 corrections enabled, bit 1 shock enabled |
+| 19 | 1 | flags: bit 0 corrections enabled, bit 1 shock enabled, bit 2 lost beacon on, bit 3 lost beacon silenced |
 
 ## 4. Command (base to collar)
 
 | Offset | Size | Field |
 | --- | --- | --- |
-| 2 | 1 | action: 1 shock, 2 vibrate, 3 beep, 10 corrections off, 11 corrections on, 12 force lost, 13 clear lost, 14 request status |
+| 2 | 1 | action: 1 shock, 2 vibrate, 3 beep, 10 corrections off, 11 corrections on, 12 force lost, 13 clear lost, 14 request status, 15 silence the lost beacon (until the dog is next back inside) |
 | 3 | 1 | intensity 0..99 |
 | 4 | 2 | duration, ms (the collar caps this at 3000) |
 
 A manual shock is only sent when shock is enabled on the collar, and is capped at its maximum level.
+
+## 5. Owner (base to collar)
+
+The dog's name and the owner's contact, for the lost beacon. Three text fields, each a one-byte
+length then that many bytes of UTF-8, with no control characters. The message must be exactly
+this long.
+
+| Field | Max bytes |
+| --- | --- |
+| dog's name (the collar's name in the base app; empty = "Dog") | 24 |
+| owner's name | 24 |
+| owner's phone | 20 |
+
+Golden bytes for Rex / Ken / 555-123-4567: `02 05 03 526578 03 4b656e 0c 3535352d3132332d34353637`.
+
+### The lost beacon
+
+Once the dog has been past a line for 90 s (counted from the first good fix outside, and only
+with fences loaded), the collar:
+
+- halves its GPS rate (twice the lost-mode interval, 30 s by default) to save battery;
+- advertises on Bluetooth as `<dog> is lost <phone>` for 90 s, then stops advertising for 90 s,
+  and repeats. Spaces, dots and brackets are dropped from the phone number, and the name becomes
+  `<dog> lost <phone>` and then a shortened dog's name if it would not fit Bluetooth's 29 bytes.
+  It uses Meshtastic's own Bluetooth stack, advertising once a second, so Bluetooth must stay
+  enabled in the collar's Meshtastic settings. While a phone is connected it leaves Bluetooth alone;
+- broadcasts an ordinary Meshtastic text message straight away and then every 5 minutes:
+  `Please help get <dog> home. Call <owner> <phone>. Last seen <lat>,<lon>`. It goes on the first
+  channel with the well-known default key (or no key) so any Meshtastic user nearby can read it;
+  without one, it goes on the primary channel.
+
+It stops when a good fix is back inside every fence, when new fences arrive, or on command 15.
+Silenced, it stays off until the dog has been back inside, so the next escape starts it again.

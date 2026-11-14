@@ -48,6 +48,15 @@ class CollarIn(BaseModel):
     name: str | None = None
 
 
+class CollarPatch(BaseModel):
+    name: str
+
+
+class ContactIn(BaseModel):
+    name: str = ""
+    phone: str = ""
+
+
 class SimIn(BaseModel):
     name: str | None = None
     lat: float
@@ -83,7 +92,7 @@ class FlashedIn(BaseModel):
 
 
 class CommandIn(BaseModel):
-    action: str  # beep, vibrate, shock, corrections_off, corrections_on, force_lost, clear_lost, request_status
+    action: str  # beep, vibrate, shock, corrections_off, corrections_on, force_lost, clear_lost, request_status, silence_lost
     intensity: int = 0
     duration_ms: int = 1000
 
@@ -138,15 +147,51 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
     store = Store(settings["data_dir"])
 
     if link is None:
-        link = MeshLink(store.record_status, settings.get("mesh_serial", ""), settings.get("mesh_host", ""))
+        link = MeshLink(lambda n, s: on_status(n, s), settings.get("mesh_serial", ""), settings.get("mesh_host", ""))
         connect = bool(settings.get("mesh_serial") or settings.get("mesh_host"))
     else:
         connect = False
 
     sim = Simulator(store.record_status, store.set_sim)
+
+    # -- Lost beacon: the dog's name (the collar's name) and the owner's contact go to each collar,
+    # which uses them only when the dog has been out for 90 s.
+    def owner_for(node_id: str) -> list[str]:
+        c = store.collar(node_id) or {}
+        contact = store.setting("contact", {}) or {}
+        dog = c.get("name") or ""
+        if dog == node_id:
+            dog = ""  # never named: the collar falls back to "Dog"
+        return [protocol.fit_text(dog, protocol.MAX_DOG_NAME),
+                protocol.fit_text(contact.get("name", ""), protocol.MAX_OWNER_NAME),
+                protocol.fit_text(contact.get("phone", ""), protocol.MAX_PHONE)]
+
+    def push_owner(node_id: str) -> bool:
+        o = owner_for(node_id)
+        if node_id in sim:
+            sim.set_owner(node_id, *o)
+        elif link.connected:
+            try:
+                link.send_owner(node_id, *o)
+            except Exception as e:  # noqa: BLE001 - retried on the collar's next report
+                log.warning("could not send the owner contact to %s: %s", node_id, e)
+                return False
+        else:
+            return False
+        store.set_collar_info(node_id, "owner_sent", o)
+        return True
+
+    def on_status(node_id: str, status: dict) -> None:
+        store.record_status(node_id, status)
+        c = store.collar(node_id)
+        # A collar that has not got the current name and contact yet gets them when it next reports.
+        if c and node_id not in sim and c.get("owner_sent") != owner_for(node_id):
+            push_owner(node_id)
+
     for node_id, c in store.collars().items():
         if c.get("sim"):
             sim.add(node_id, c["sim"])
+            sim.set_owner(node_id, *owner_for(node_id))
             if c.get("fences"):
                 try:
                     sim.set_fences(node_id, protocol.zones_from_geojson(c["fences"]), c.get("fence_version", 0),
@@ -166,6 +211,7 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
     app = FastAPI(title="GeoCollar base", lifespan=lifespan)
     app.state.store = store
     app.state.sim = sim
+    app.state.on_status = on_status
     # Leaflet and Leaflet-Geoman are vendored so the page works without a CDN (e.g. on a LAN).
     app.mount("/static", StaticFiles(directory=STATIC), name="static")
 
@@ -196,7 +242,38 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
 
     @app.post("/api/collars")
     def add_collar(body: CollarIn):
-        return store.upsert_collar(body.node_id, body.name)
+        c = store.upsert_collar(body.node_id, body.name)
+        push_owner(body.node_id)
+        return c
+
+    @app.patch("/api/collars/{node_id}")
+    def rename_collar(node_id: str, body: CollarPatch):
+        """The collar's name is the dog's name: it is what the lost beacon says."""
+        require(node_id)
+        name = " ".join(body.name.split())
+        if not name:
+            raise HTTPException(400, "give the dog a name")
+        if len(name.encode()) > protocol.MAX_DOG_NAME:
+            raise HTTPException(400, f"the dog's name is at most {protocol.MAX_DOG_NAME} characters")
+        c = store.upsert_collar(node_id, name)
+        return {**c, "owner_sent": push_owner(node_id)}
+
+    @app.get("/api/contact")
+    def get_contact():
+        return store.setting("contact", {"name": "", "phone": ""})
+
+    @app.put("/api/contact")
+    def put_contact(body: ContactIn):
+        name, phone = " ".join(body.name.split()), " ".join(body.phone.split())
+        if len(name.encode()) > protocol.MAX_OWNER_NAME:
+            raise HTTPException(400, f"your name is at most {protocol.MAX_OWNER_NAME} characters")
+        if len(phone.encode()) > protocol.MAX_PHONE:
+            raise HTTPException(400, f"the phone number is at most {protocol.MAX_PHONE} characters")
+        if phone and not all(ch.isdigit() or ch in "+-.() " for ch in phone):
+            raise HTTPException(400, "the phone number can have digits, spaces and + - . ( ) only")
+        store.set_setting("contact", {"name": name, "phone": phone})
+        sent = [node_id for node_id in store.collars() if push_owner(node_id)]
+        return {"name": name, "phone": phone, "sent_to": sent}
 
     @app.delete("/api/collars/{node_id}")
     def remove_collar(node_id: str):
@@ -222,6 +299,8 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
             sent = len(protocol.fence_chunks(zones, version, pulses))
         elif link.connected:
             sent = link.send_fences(node_id, zones, version, pulses)
+            if store.collar(node_id).get("owner_sent") != owner_for(node_id):
+                push_owner(node_id)
         return {"fence_version": version, "chunks_sent": sent}
 
     @app.post("/api/collars/{node_id}/command")
@@ -428,6 +507,7 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
         n = 1 + sum(1 for c in store.collars().values() if c.get("sim"))
         store.upsert_collar(node_id, body.name or f"Simulated dog {n}")
         settings = sim.add(node_id, {"lat": body.lat, "lon": body.lon}).settings()
+        push_owner(node_id)
         store.set_sim(node_id, settings)
         sim.report_now(node_id)
         return {"node_id": node_id, **settings}

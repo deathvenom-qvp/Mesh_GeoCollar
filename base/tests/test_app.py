@@ -38,6 +38,9 @@ class FakeLink:
     def send_command(self, node_id, action, intensity=0, duration_ms=1000):
         self.sent.append((node_id, protocol.encode_command(action, intensity, duration_ms)))
 
+    def send_owner(self, node_id, dog, owner, phone):
+        self.sent.append((node_id, protocol.encode_owner(dog, owner, phone)))
+
 
 def make(tmp_path):
     link = FakeLink()
@@ -47,6 +50,7 @@ def make(tmp_path):
 def test_collar_fence_and_command_flow(tmp_path):
     client, link = make(tmp_path)
     assert client.post("/api/collars", json={"node_id": "!a1b2c3d4", "name": "Rex"}).status_code == 200
+    assert link.sent.pop() == ("!a1b2c3d4", protocol.encode_owner("Rex", "", ""))
 
     r = client.put("/api/collars/!a1b2c3d4/fences", json=FENCE)
     assert r.status_code == 200 and r.json() == {"fence_version": 1, "chunks_sent": 1}
@@ -140,3 +144,41 @@ def test_parcels_round_trip(tmp_path):
     assert "longitude/latitude" in c.put("/api/parcels", json=projected).json()["detail"]
     assert c.put("/api/parcels", json={"type": "FeatureCollection", "features": []}).json() == {"count": 0}
     assert c.get("/api/parcels").json()["features"] == []
+
+
+def test_dog_name_and_contact_reach_the_collar(tmp_path):
+    client, link = make(tmp_path)
+    client.post("/api/collars", json={"node_id": "!a1b2c3d4"})
+    assert link.sent[-1] == ("!a1b2c3d4", protocol.encode_owner("", "", ""))  # unnamed: collar says "Dog"
+
+    r = client.put("/api/contact", json={"name": "Ken", "phone": "555-123-4567"})
+    assert r.status_code == 200 and r.json()["sent_to"] == ["!a1b2c3d4"]
+    assert client.get("/api/contact").json() == {"name": "Ken", "phone": "555-123-4567"}
+
+    r = client.patch("/api/collars/!a1b2c3d4", json={"name": "  Rex  "})
+    assert r.status_code == 200 and r.json()["name"] == "Rex"
+    assert link.sent[-1] == ("!a1b2c3d4", bytes.fromhex("020503526578034b656e0c3535352d3132332d34353637"))
+
+    assert client.patch("/api/collars/!a1b2c3d4", json={"name": "x" * 25}).status_code == 400
+    assert client.patch("/api/collars/!a1b2c3d4", json={"name": " "}).status_code == 400
+    assert client.patch("/api/collars/!nope", json={"name": "Rex"}).status_code == 404
+    assert client.put("/api/contact", json={"name": "Ken", "phone": "call me"}).status_code == 400
+    assert client.put("/api/contact", json={"name": "Ken", "phone": "1" * 21}).status_code == 400
+
+    r = client.post("/api/collars/!a1b2c3d4/command", json={"action": "silence_lost"})
+    assert r.status_code == 200 and link.sent[-1][1] == protocol.encode_command(protocol.CommandAction.SILENCE_LOST)
+
+
+def test_collar_missing_owner_info_gets_it_on_next_report(tmp_path):
+    link = FakeLink()
+    link.connected = False
+    client = TestClient(create_app({"data_dir": str(tmp_path)}, link=link))
+    client.post("/api/collars", json={"node_id": "!a1b2c3d4", "name": "Rex"})
+    assert link.sent == []
+    link.connected = True
+    # The link hands reports to the app; this is what MeshLink calls.
+    status = {"state": "INSIDE", "lat": 40.0, "lon": -75.0, "beacon_active": False}
+    client.app.state.on_status("!a1b2c3d4", status)
+    assert link.sent == [("!a1b2c3d4", protocol.encode_owner("Rex", "", ""))]
+    client.app.state.on_status("!a1b2c3d4", status)
+    assert len(link.sent) == 1  # only once

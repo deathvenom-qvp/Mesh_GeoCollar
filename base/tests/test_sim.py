@@ -6,7 +6,7 @@ from fastapi.testclient import TestClient
 
 from geocollar_base import protocol
 from geocollar_base.app import create_app
-from geocollar_base.sim import SimCollar, _move
+from geocollar_base.sim import LostBeacon, SimCollar, _move, beacon_name, beacon_text
 
 # A 200 m square keep-in zone around (40.0, -75.0).
 YARD = protocol.Zone(protocol.ZoneKind.KEEP_IN, 0, 5, 5, [(39.9991, -75.00117), (39.9991, -74.99883), (40.0009, -74.99883), (40.0009, -75.00117)])
@@ -116,3 +116,45 @@ def test_sim_api_flow(tmp_path):
 
     assert client.delete(f"/api/collars/{node_id}").status_code == 200
     assert node_id not in client.app.state.sim
+
+
+def test_lost_beacon_in_the_simulator():
+    sim = walker()
+    sim.set_owner("Rex", "Ken", "555-123-4567")
+    sim.update({"lat": 40.0, "lon": -74.9975})  # about 50 m outside the east side
+    t = 1000
+    sim.step(1.0, now=t)
+    assert not sim.beacon.active
+    for t in range(1001, 1000 + LostBeacon.TRIGGER_S + 1):
+        r = sim.step(1.0, now=t)
+    assert sim.beacon.active and r["beacon_active"]
+    texts = [e["text"] for e in sim.events]
+    assert 'Bluetooth on as "Rex is lost 555-123-4567"' in texts
+    assert any(x.startswith("mesh plea: Please help get Rex home. Call Ken 555-123-4567. Last seen 40.") for x in texts)
+    n_mesh = sum(e["kind"] == "mesh" for e in sim.events)
+    for t in range(t + 1, t + 100):
+        sim.step(1.0, now=t)
+    assert any(e["text"] == "Bluetooth off for 90 s" for e in sim.events)
+    assert sum(e["kind"] == "mesh" for e in sim.events) == n_mesh  # next plea after 5 minutes
+
+    sim.command(protocol.CommandAction.SILENCE_LOST)
+    assert not sim.beacon.active and sim.report(t)["beacon_silenced"]
+    for t in range(t + 1, t + 200):
+        sim.step(1.0, now=t)
+    assert not sim.beacon.active  # stays silent while still out
+
+    sim.update({"lat": 40.0, "lon": -75.0})  # back home
+    sim.step(1.0, now=t + 1)
+    assert not sim.beacon.silenced
+
+
+def test_beacon_strings_match_firmware():
+    # Same cases as firmware/test/test_main.cpp testBeacon().
+    assert beacon_name("Rex", "(555) 123-4567") == "Rex is lost 555123-4567"
+    name = beacon_name("Maximilian Barksworth", "+44 7700 900123")
+    assert len(name) <= 29 and name.startswith("Maximilian ") and name.endswith(" lost +447700900123")
+    assert beacon_name("Rex", "") == "Rex is lost"
+    assert beacon_name("Rex", "5551234567", cap=27) == "Rex is lost 5551234567"
+    assert beacon_text("Rex", "Ken", "555-123-4567", 40.1234567, -75.1234567) == (
+        "Please help get Rex home. Call Ken 555-123-4567. Last seen 40.12345,-75.12345")
+    assert beacon_text("Rex", "", "") == "Please help get Rex home."

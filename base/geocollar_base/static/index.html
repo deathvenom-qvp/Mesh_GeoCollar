@@ -112,6 +112,14 @@
   .events time { color: var(--muted); flex: none; white-space: nowrap; font-variant-numeric: tabular-nums; }
   .events .k-shock, .events .k-lost { color: var(--bad); font-weight: 600; }
   .events .k-vibrate { color: var(--warn); font-weight: 600; }
+  .events .k-ble, .events .k-mesh { color: var(--accent); }
+  .rename { display: flex; gap: 6px; align-items: center; }
+  .rename input { width: 12em; }
+  .rename[hidden], .row[hidden] { display: none; }
+  .beacon { margin: 8px 0 0; }
+  .beacon .actions { margin-top: 6px; }
+  .contact { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-top: 6px; }
+  @media (max-width: 420px) { .contact { grid-template-columns: 1fr; } }
   .simgrid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 10px; margin-top: 10px; }
   .simgrid .wide { grid-column: 1 / -1; }
   input[type=range] { padding: 0; accent-color: var(--accent); }
@@ -199,7 +207,7 @@
       <summary>Add a collar</summary>
       <form id="addForm" style="margin-top:8px">
         <label class="field">Meshtastic node ID <input id="newId" placeholder="!a1b2c3d4" required pattern="!?[0-9a-fA-F]{8}"></label>
-        <label class="field" style="margin-top:6px">Name <input id="newName" placeholder="Rex"></label>
+        <label class="field" style="margin-top:6px">Dog's name <input id="newName" placeholder="Rex" maxlength="24"></label>
         <button class="primary" style="margin-top:8px">Add collar</button>
         <div class="muted" id="addMsg" role="status"></div>
       </form>
@@ -208,6 +216,23 @@
       <span class="muted">No hardware yet?</span>
       <button id="addSim" title="Add a pretend collar that follows the collar firmware's fence rules">+ Simulated collar</button>
     </div>
+  </section>
+
+  <section id="contactBox">
+    <h2>If a dog gets lost</h2>
+    <div class="muted">When a dog has been outside its fences for 90 s, its collar asks for help. It shows up on
+      Bluetooth as "<span id="contactPreview">Rex is lost 5551234567</span>" (90 s on, 90 s off, to save battery) and
+      every 5 minutes posts a plain text message on the public Meshtastic channel asking people to call you.
+      It stops when the dog is back inside, or when you silence it.</div>
+    <form id="contactForm">
+      <div class="contact">
+        <label class="field">Your name <input id="contactName" maxlength="24" autocomplete="name" placeholder="Ken"></label>
+        <label class="field">Phone <input id="contactPhone" maxlength="20" type="tel" autocomplete="tel" placeholder="555 123 4567"
+          pattern="[0-9+\-.() ]*" title="Digits, spaces and + - . ( ) only"></label>
+      </div>
+      <div class="row" style="margin-top:8px;gap:8px"><button class="primary" id="contactSave">Save and send to collars</button>
+        <span class="muted" id="contactMsg" role="status"></span></div>
+    </form>
   </section>
 
   <section id="parcelBox">
@@ -250,10 +275,19 @@
   <div id="selectedBox" hidden>
     <section>
       <div class="row spread">
-        <div><div class="name" id="selName" style="font-weight:600;font-size:16px"></div><div class="muted" id="selId"></div></div>
+        <div>
+          <div class="row" id="selNameRow" style="gap:6px"><div class="name" id="selName" style="font-weight:600;font-size:16px"></div>
+            <button class="link" id="renameBtn" title="The collar's name is the dog's name; the lost beacon uses it">Rename</button></div>
+          <form class="rename" id="renameForm" hidden>
+            <input id="renameInput" maxlength="24" required aria-label="Dog's name">
+            <button class="primary">Save</button><button type="button" class="link" id="renameCancel">Cancel</button>
+          </form>
+          <div class="muted" id="selId"></div>
+        </div>
         <button id="zoomDog" title="Show this collar on the map">Find on map</button>
       </div>
       <div class="stats" id="selStats"></div>
+      <div id="beaconBox"></div>
     </section>
 
     <section>
@@ -325,6 +359,7 @@
         <button data-cmd="corrections_on">Corrections on</button>
         <button data-cmd="force_lost">Lost mode</button>
         <button data-cmd="clear_lost">Clear lost</button>
+        <button data-cmd="silence_lost" title="Stop the Bluetooth name and mesh message until the dog is next back inside">Silence lost alert</button>
       </div>
       <div style="margin-top:12px"><button class="link" id="removeCollar">Remove this collar from the base</button></div>
     </section>
@@ -895,6 +930,7 @@ function renderCollars() {
       bits.push(ago(now - s.received));
       if (s.battery_pct != null && s.battery_pct !== 255) bits.push(`battery ${s.battery_pct}%`);
       if (s.clearance_m != null && c.fence_version) bits.push(`${len(Math.abs(s.clearance_m))} ${s.clearance_m < 0 ? 'past' : 'from'} the line`);
+      if (s.beacon_active) bits.unshift('asking for help');
     }
     box.append(el('div', { class: 'collar' + (id === selected ? ' selected' : ''), onclick: () => select(id), role: 'button', tabindex: 0,
         onkeydown: e => { if (e.key === 'Enter') select(id); } },
@@ -938,6 +974,7 @@ function renderSelected() {
   if (!c) return;
   $('selName').textContent = c.name;
   $('selId').textContent = selected;
+  renderBeacon(c);
   const s = c.status;
   const rows = [];
   if (s) {
@@ -945,6 +982,7 @@ function renderSelected() {
     if (s.battery_pct != null && s.battery_pct !== 255) rows.push(['Battery', `${s.battery_pct}%`]);
     if (s.sats) rows.push(['GPS', `${s.sats} sats, PDOP ${s.pdop}`]);
     rows.push(['Corrections', s.corrections_enabled ? 'On' : 'Off'], ['Shock', s.shock_enabled ? 'Enabled' : 'Disabled']);
+    rows.push(['Lost alert', s.beacon_active ? 'On: Bluetooth and mesh' : s.beacon_silenced ? 'Silenced until back inside' : 'Off']);
   } else rows.push(['State', 'No report yet']);
   if (c.update_mode) rows.push(['Firmware', 'Waiting in update mode']);
   else if (c.firmware) rows.push(['Firmware', `${shortCommit(c.firmware.commit)}, ${c.firmware.via === 'wifi' ? 'Wi-Fi' : 'USB'} ${ago(Date.now() / 1000 - c.firmware.flashed_at)}`]);
@@ -952,6 +990,88 @@ function renderSelected() {
   $('zoomDog').disabled = !(s && (s.lat || s.lon));
   renderSim();
 }
+
+// ---------------------------------------------------------------------------------------------
+// Lost-dog beacon: the dog's name and the owner's contact
+// ---------------------------------------------------------------------------------------------
+let contact = { name: '', phone: '' };
+const utf8Len = t => new TextEncoder().encode(t).length;
+const unnamed = (c, id) => !c.name || c.name === id;
+// Same as the collar's beaconName() (firmware/GeoCollar/Fence.cpp), for previews.
+function beaconName(dog, phone, cap = 30) {
+  const ph = (phone || '').replace(/[ .()]/g, '');
+  const d = dog || 'Dog', max = cap - 1;
+  let mid = ph ? ' is lost ' : ' is lost';
+  if (utf8Len(d + mid + ph) > max && ph) mid = ' lost ';
+  let cut = d;
+  while (cut && utf8Len(cut + mid + ph) > max) cut = [...cut].slice(0, -1).join('');
+  return cut + mid + ph;
+}
+
+function renderContact() {
+  const c = collars[selected];
+  const dog = c && !unnamed(c, selected) ? c.name : (Object.entries(collars).find(([id, x]) => !unnamed(x, id)) || [])[1]?.name || 'Rex';
+  $('contactPreview').textContent = beaconName(dog, $('contactPhone').value.trim() || contact.phone || '5551234567');
+}
+
+function renderBeacon(c) {
+  const s = c.status, box = $('beaconBox');
+  const parts = [];
+  if (s && s.beacon_active) {
+    const text = `${c.name} has been outside for over 90 s. The collar is on Bluetooth as "${beaconName(unnamed(c, selected) ? '' : c.name, contact.phone)}" every other 90 s and asks for help on the mesh every 5 minutes.`;
+    parts.push(el('div', { class: 'callout bad beacon' }, text,
+      el('div', { class: 'actions' }, el('button', { onclick: () => sendCmd('silence_lost', 'Silence lost alert') }, 'Silence lost alert'))));
+  } else if (s && s.beacon_silenced) {
+    parts.push(el('div', { class: 'callout beacon' }, `Lost alert silenced. It turns back on by itself if ${c.name} goes out again after coming home.`));
+  }
+  if (!contact.phone) parts.push(el('div', { class: 'callout beacon' }, 'Add your phone number under "If a dog gets lost" so people who find the dog can call you.'));
+  if (unnamed(c, selected)) parts.push(el('div', { class: 'callout beacon' }, 'Give this collar the dog\'s name (Rename, above): the lost alert uses it.'));
+  box.replaceChildren(...parts);
+}
+
+async function loadContact() {
+  try { contact = await api('contact'); } catch { return; }
+  $('contactName').value = contact.name || '';
+  $('contactPhone').value = contact.phone || '';
+  renderContact();
+  if (selected && collars[selected]) renderBeacon(collars[selected]);
+}
+
+$('contactPhone').oninput = renderContact;
+$('contactForm').onsubmit = async e => {
+  e.preventDefault();
+  try {
+    const r = await api('contact', { method: 'PUT', body: JSON.stringify({ name: $('contactName').value, phone: $('contactPhone').value }) });
+    contact = { name: r.name, phone: r.phone };
+    const n = r.sent_to.length, total = Object.keys(collars).length;
+    $('contactMsg').textContent = !total ? 'Saved. Collars you add get it.'
+      : n === total ? `Saved and sent to ${n === 1 ? 'the collar' : `all ${n} collars`}.`
+      : `Saved. Sent to ${n} of ${total}; the others get it when they next report.`;
+  } catch (err) { $('contactMsg').textContent = err.message; }
+  renderContact();
+  refresh();
+};
+
+$('renameBtn').onclick = () => {
+  const c = collars[selected];
+  $('renameInput').value = unnamed(c, selected) ? '' : c.name;
+  $('selNameRow').hidden = true; $('renameForm').hidden = false;
+  $('renameInput').focus();
+};
+const endRename = () => { $('selNameRow').hidden = false; $('renameForm').hidden = true; };
+$('renameCancel').onclick = endRename;
+$('renameForm').onsubmit = async e => {
+  e.preventDefault();
+  const name = $('renameInput').value.trim();
+  if (utf8Len(name) > 24) { say('The dog\'s name is at most 24 characters.'); return; }
+  try {
+    const r = await api(`collars/${encodeURIComponent(selected)}`, { method: 'PATCH', body: JSON.stringify({ name }) });
+    say(r.owner_sent ? `Renamed to ${r.name}.` : `Renamed to ${r.name}. The collar gets the new name when it next reports.`);
+    endRename();
+  } catch (err) { say(err.message); }
+  await refresh();
+  renderContact();
+};
 
 // ---------------------------------------------------------------------------------------------
 // Simulated collars
@@ -1041,6 +1161,7 @@ async function refresh() {
   renderCollars();
   renderDogs();
   renderSelected();
+  renderContact();
   if (selected) renderStatusArea();
   if ($('fwDetails').open) renderFw();
   if (parcelSelected.size) updateParcelMake();
@@ -1116,13 +1237,14 @@ $('removeCollar').onclick = async () => {
   refresh();
 };
 
-document.querySelectorAll('[data-cmd]').forEach(b => b.onclick = async () => {
-  const action = b.dataset.cmd;
+async function sendCmd(action, label, intensity = 0) {
   try {
-    await api(`collars/${encodeURIComponent(selected)}/command`, { method: 'POST', body: JSON.stringify({ action, intensity: +(b.dataset.intensity || 0) }) });
-    say(`Sent: ${b.textContent}.`);
+    await api(`collars/${encodeURIComponent(selected)}/command`, { method: 'POST', body: JSON.stringify({ action, intensity }) });
+    say(`Sent: ${label}.`);
   } catch (e) { say(e.message); }
-});
+  refresh();
+}
+document.querySelectorAll('[data-cmd]').forEach(b => b.onclick = () => sendCmd(b.dataset.cmd, b.textContent, +(b.dataset.intensity || 0)));
 
 // ---------------------------------------------------------------------------------------------
 // Collar firmware: builds, a background job with a log, and three ways to flash.
@@ -1750,6 +1872,8 @@ document.querySelectorAll('.unit').forEach(e => { e.textContent = unitLabel(); }
 document.querySelectorAll('.unitName').forEach(e => { e.textContent = isFt() ? 'Feet' : 'Metres'; });
 
 window.addEventListener('beforeunload', e => { if (isDirty() || Object.keys(drafts).length) { e.preventDefault(); e.returnValue = ''; } });
+
+loadContact();
 
 // Poll faster while a simulated collar is around, so it moves smoothly.
 async function loop() {

@@ -81,7 +81,7 @@ bool header(Reader &r, MsgType expect)
 
 bool messageType(const uint8_t *buf, size_t len, MsgType &type)
 {
-    if (len < 2 || buf[0] != kVersion || buf[1] < 1 || buf[1] > 4)
+    if (len < 2 || buf[0] != kVersion || buf[1] < 1 || buf[1] > 5)
         return false;
     type = static_cast<MsgType>(buf[1]);
     return true;
@@ -121,6 +121,52 @@ bool decodeStatus(const uint8_t *buf, size_t len, StatusReport &s)
     s.clearanceM = static_cast<int16_t>(r.u16());
     s.flags = r.u8();
     return r.ok;
+}
+
+namespace
+{
+void putText(Writer &w, const char *s, size_t max)
+{
+    const size_t n = strnlen(s, max);
+    w.u8(static_cast<uint8_t>(n));
+    w.bytes(reinterpret_cast<const uint8_t *>(s), n);
+}
+
+bool getText(Reader &r, char *out, size_t max)
+{
+    const size_t n = r.u8();
+    if (!r.ok || n > max || r.pos + n > r.len)
+        return false;
+    memcpy(out, r.buf + r.pos, n);
+    out[n] = '\0';
+    r.pos += n;
+    for (size_t i = 0; i < n; i++)
+        if (static_cast<uint8_t>(out[i]) < 0x20)
+            return false; // no control characters in a name or a phone number
+    return true;
+}
+} // namespace
+
+size_t encodeOwner(uint8_t *out, size_t cap, const OwnerInfo &o)
+{
+    Writer w{out, cap};
+    w.u8(kVersion);
+    w.u8(static_cast<uint8_t>(MsgType::Owner));
+    putText(w, o.dog, kMaxDogName);
+    putText(w, o.owner, kMaxOwnerName);
+    putText(w, o.phone, kMaxPhone);
+    return w.done();
+}
+
+bool decodeOwner(const uint8_t *buf, size_t len, OwnerInfo &o)
+{
+    Reader r{buf, len};
+    OwnerInfo tmp;
+    if (!header(r, MsgType::Owner) || !getText(r, tmp.dog, kMaxDogName) || !getText(r, tmp.owner, kMaxOwnerName) ||
+        !getText(r, tmp.phone, kMaxPhone) || r.pos != len)
+        return false;
+    o = tmp;
+    return true;
 }
 
 size_t encodeCommand(uint8_t *out, size_t cap, const Command &c)

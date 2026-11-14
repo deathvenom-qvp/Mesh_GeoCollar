@@ -92,3 +92,19 @@ def test_pulses():
 def test_message_type():
     assert p.message_type(bytes.fromhex("02040228dc05")) == p.MsgType.COMMAND
     assert p.message_type(b"\x01\x04") is None  # version 1 is no longer understood
+
+
+def test_owner_golden_and_limits():
+    data = p.encode_owner("Rex", "Ken", "555-123-4567")
+    assert data.hex() == "020503526578034b656e0c3535352d3132332d34353637"  # firmware test uses the same bytes
+    assert p.message_type(data) == p.MsgType.OWNER
+    assert p.decode_owner(data) == ("Rex", "Ken", "555-123-4567")
+    long = p.encode_owner("Ä" * 20, "Ken\n", "1" * 30)
+    dog, owner, phone = p.decode_owner(long)
+    assert dog == "Ä" * 12 and owner == "Ken" and phone == "1" * 20
+
+
+def test_status_beacon_flags():
+    s = p.Status(p.MsgType.BREACH, 3, p.CollarState.LOST, 80, 40.0, -75.0, 1.0, 9, -40, True, False, True, False)
+    back = p.decode_status(p.encode_status(s))
+    assert back.beacon_active and not back.beacon_silenced

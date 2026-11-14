@@ -37,6 +37,29 @@ Collars only obey messages from base nodes they trust:
 3. In GeoCollar, open **Add a collar** and enter the collar's node ID (for example `!a1b2c3d4`,
    shown in the Meshtastic app's node list).
 
+## If a dog gets lost
+
+Give each collar the dog's name (**Rename** next to the collar's name) and fill in **If a dog
+gets lost** with your name and phone number. The base sends both to every collar.
+
+When a dog has been outside its fences for 90 seconds, its collar starts asking for help:
+
+- It shows up on Bluetooth as "Rex is lost 5551234567" for 90 seconds, then goes quiet for 90
+  seconds, and repeats. Anyone scanning with a phone (a Bluetooth scanner app, or the Meshtastic
+  app's device list) sees the name.
+- Every 5 minutes it posts a plain text message on the public Meshtastic channel: "Please help get
+  Rex home. Call Ken 555-123-4567. Last seen 40.12345,-75.12345".
+- It takes GPS fixes half as often as normal lost mode, so the battery lasts longer.
+
+It stops when the dog is back inside, or when you press **Silence lost alert**. Silenced, it
+stays quiet until the dog has been home and gets out again.
+
+For this to work, keep **Bluetooth enabled** in the collar's Meshtastic settings (the collar
+borrows Meshtastic's Bluetooth; with it disabled, nothing is advertised), and keep the default
+public channel (LongFast with the default key) on the collar, at least as a secondary channel.
+Without a public channel, the message goes on your primary channel and only your own nodes can
+read it. Your phone number goes out in the clear to anyone nearby, which is the point.
+
 ## Drawing fences
 
 1. Select the collar. Switch the map to **Satellite** (top right) if it isn't already.

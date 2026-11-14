@@ -32,6 +32,7 @@ enum class MsgType : uint8_t {
     Status = 2,     // collar -> base
     Breach = 3,     // collar -> base
     Command = 4,    // base -> collar
+    Owner = 5,      // base -> collar: the dog's name and the owner's contact, for the lost beacon
 };
 
 enum class CommandAction : uint8_t {
@@ -43,6 +44,7 @@ enum class CommandAction : uint8_t {
     ForceLost = 12,
     ClearLost = 13,
     RequestStatus = 14,
+    SilenceLost = 15, // stop the lost beacon until the dog is next back inside
 };
 
 struct Command {
@@ -68,7 +70,18 @@ struct StatusReport {
     uint16_t pdopX100;
     uint8_t sats;
     int16_t clearanceM; // positive = allowed side
-    uint8_t flags;      // bit0 corrections enabled, bit1 shock enabled
+    uint8_t flags;      // bit0 corrections enabled, bit1 shock enabled, bit2 lost beacon on, bit3 beacon silenced
+};
+
+constexpr size_t kMaxDogName = 24;
+constexpr size_t kMaxOwnerName = 24;
+constexpr size_t kMaxPhone = 20;
+
+/// Who the dog is and whom to call, for the lost beacon. NUL-terminated UTF-8.
+struct OwnerInfo {
+    char dog[kMaxDogName + 1] = {};
+    char owner[kMaxOwnerName + 1] = {};
+    char phone[kMaxPhone + 1] = {};
 };
 
 constexpr size_t kStatusLength = 2 + 2 + 1 + 1 + 4 + 4 + 2 + 1 + 2 + 1;
@@ -79,6 +92,9 @@ bool messageType(const uint8_t *buf, size_t len, MsgType &type);
 
 size_t encodeStatus(uint8_t *out, size_t cap, MsgType type, const StatusReport &s);
 bool decodeStatus(const uint8_t *buf, size_t len, StatusReport &s);
+
+size_t encodeOwner(uint8_t *out, size_t cap, const OwnerInfo &o);
+bool decodeOwner(const uint8_t *buf, size_t len, OwnerInfo &o);
 
 size_t encodeCommand(uint8_t *out, size_t cap, const Command &c);
 bool decodeCommand(const uint8_t *buf, size_t len, Command &c);
