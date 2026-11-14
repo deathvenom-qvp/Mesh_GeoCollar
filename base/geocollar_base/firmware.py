@@ -1,9 +1,10 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Collar firmware: get a build, then flash it over USB or Wi-Fi.
+"""Collar firmware: get a build, then flash it over USB.
 
 Builds come from the "firmware-latest" release that CI publishes from main, or are compiled on
 this machine from the repository's source (slow, and needs a few GB of disk). Each build is a
-folder with manifest.json, written by firmware/package.py.
+folder with manifest.json, written by firmware/package.py. Flashing downloads the newest build by
+itself; checking for updates only reads the release's manifest, to tell the owner about it.
 
 Flashing is over USB only:
 - USB on this machine: esptool, through the app's serial access.
@@ -43,6 +44,8 @@ RELEASE_TAG = "firmware-latest"
 KEEP_BUILDS = 3
 USER_AGENT = "geocollar-base"
 FIXED_PIN = 1  # meshtastic Config.BluetoothConfig.PairingMode.FIXED_PIN (checked in tests)
+# How often the base may check for newer collar firmware by itself, in seconds.
+CHECK_EVERY = {"never": None, "daily": 86400, "weekly": 7 * 86400, "monthly": 30 * 86400}
 
 
 class FirmwareError(Exception):
@@ -217,6 +220,88 @@ class BuildStore:
             shutil.rmtree(self.root / m["id"], ignore_errors=True)
 
 
+def identity(m: dict | None) -> dict | None:
+    """What tells one collar firmware from another, from a build's manifest: the commit it was
+    built from, git's ID of the firmware/GeoCollar folder at that commit (builds made before 0.18
+    lack it), and the Meshtastic version."""
+    if not m:
+        return None
+    return {"commit": m.get("geocollar_commit"), "source": m.get("geocollar_source"),
+            "meshtastic": m.get("meshtastic_version")}
+
+
+def identity_of_latest(latest: dict | None) -> dict | None:
+    """The identity kept from the last update check, or None before the first one."""
+    return latest if latest and (latest.get("commit") or latest.get("source")) else None
+
+
+def same_firmware(a: dict | None, b: dict | None) -> bool | None:
+    """Whether two identities are the same collar firmware; None when that cannot be told.
+    Every change to this repository makes a new build, also one that only touches the base app.
+    So the source ID and the Meshtastic version decide; the commit only when a source ID is missing."""
+    if not a or not b:
+        return None
+    if a.get("commit") and a.get("commit") == b.get("commit"):
+        return True
+    if a.get("source") and b.get("source"):
+        return a["source"] == b["source"] and a.get("meshtastic") == b.get("meshtastic")
+    if a.get("commit") and b.get("commit"):
+        return False
+    return None
+
+
+def _get_json(url: str, timeout: float = 30):
+    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, "Accept": "application/json"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:  # noqa: S310 - https URL built here
+        return json.loads(r.read(1 << 20))
+
+
+def latest_manifest(repo: str = DEFAULT_REPO) -> dict:
+    """The manifest of the newest CI build of main, without its images: enough to say whether
+    there is newer firmware."""
+    try:
+        m = _get_json(f"https://github.com/{repo}/releases/download/{RELEASE_TAG}/manifest.json")
+    except (OSError, ValueError) as e:
+        raise FirmwareError(f"could not reach github.com/{repo} ({e})") from e
+    if not isinstance(m, dict):
+        raise FirmwareError("the latest build's manifest is not valid")
+    check_manifest(m)
+    return m
+
+
+def source_of_commit(repo: str, commit: str) -> str | None:
+    """git's ID of the firmware/GeoCollar folder at a commit, asked from GitHub: for a collar
+    flashed with a build that did not carry it yet. None if GitHub can't be asked."""
+    if not re.fullmatch(r"[0-9a-f]{7,40}", commit or "") or not re.fullmatch(r"[A-Za-z0-9._-]+/[A-Za-z0-9._-]+", repo):
+        return None
+    try:
+        entries = _get_json(f"https://api.github.com/repos/{repo}/contents/firmware?ref={commit}", timeout=15)
+    except (OSError, ValueError):
+        return None
+    for e in entries if isinstance(entries, list) else []:
+        if isinstance(e, dict) and e.get("name") == "GeoCollar" and e.get("type") == "dir":
+            sha = e.get("sha")
+            return sha if isinstance(sha, str) and re.fullmatch(r"[0-9a-f]{40}", sha) else None
+    return None
+
+
+def notify_home_assistant(title: str, message: str, notification_id: str) -> bool:
+    """A persistent notification in Home Assistant (needs homeassistant_api in config.yaml).
+    False outside Home Assistant or when it can't be reached."""
+    token = os.environ.get("SUPERVISOR_TOKEN")
+    if not token:
+        return False
+    body = json.dumps({"title": title, "message": message, "notification_id": notification_id}).encode()
+    req = urllib.request.Request("http://supervisor/core/api/services/persistent_notification/create", data=body,
+                                 headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=10):  # noqa: S310 - fixed internal URL
+            return True
+    except OSError as e:
+        log.warning("could not notify Home Assistant: %s", e)
+        return False
+
+
 def _download(url: str, dest: Path, job: Job | None = None, label: str = "") -> None:
     req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
     with urllib.request.urlopen(req, timeout=60) as r, open(dest, "wb") as f:  # noqa: S310 - https URL built here
@@ -266,6 +351,25 @@ def fetch_release(job: Job, builds: BuildStore, repo: str = DEFAULT_REPO) -> dic
         return builds.add(tmp, "release")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+def latest_build(job: Job, builds: BuildStore, repo: str = DEFAULT_REPO) -> tuple[dict, bool]:
+    """The build to flash when none was picked: the newest one, downloaded now unless it is here
+    already. If GitHub can't be reached, the newest build already on this machine, and the log
+    says so. Returns the build and whether it is known to be the latest."""
+    try:
+        return fetch_release(job, builds, repo), True
+    except (FirmwareError, OSError) as e:
+        job.check_cancel()
+        have = builds.list()
+        if not have:
+            raise FirmwareError(f"{e}. There is no firmware on this machine to use instead") from e
+        m = have[0]
+        age = max(0, time.time() - m.get("added_at", 0)) / 86400
+        job.log(f"Could not get the latest firmware: {e}")
+        job.log(f"Using the newest build already here instead: {(m.get('geocollar_commit') or 'unknown')[:7]}, "
+                f"{'built here' if m.get('source') == 'local' else 'downloaded'} {age:.0f} days ago")
+        return m, False
 
 
 def _run(job: Job, cmd: list[str], cwd: Path | None = None, env: dict | None = None,

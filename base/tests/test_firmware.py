@@ -198,6 +198,209 @@ def test_firmware_api(client, tmp_path):
     assert "base station" in wait_job(c, j["id"])["error"]
 
 
+def test_same_firmware_goes_by_source_not_by_commit():
+    a = {"commit": "a" * 40, "source": "s1", "meshtastic": "v2.8.2"}
+    assert fw.same_firmware(a, dict(a)) is True
+    # A base-only commit: another commit, the same collar source and Meshtastic version.
+    assert fw.same_firmware(a, {"commit": "b" * 40, "source": "s1", "meshtastic": "v2.8.2"}) is True
+    assert fw.same_firmware(a, {"commit": "b" * 40, "source": "s2", "meshtastic": "v2.8.2"}) is False
+    assert fw.same_firmware(a, {"commit": "b" * 40, "source": "s1", "meshtastic": "v2.8.3"}) is False
+    # A collar flashed before builds carried a source ID: the commit is all there is.
+    assert fw.same_firmware(a, {"commit": "b" * 40, "meshtastic": "v2.8.2"}) is False
+    assert fw.same_firmware(a, {"commit": "a" * 40}) is True
+    assert fw.same_firmware(a, None) is None and fw.same_firmware(None, a) is None
+    assert fw.same_firmware(a, {"flashed_at": 1}) is None
+    m = make_build_manifest()
+    assert fw.identity(m) == {"commit": "a" * 40, "source": "tree1", "meshtastic": "v2.8.2.d5f1619"}
+
+
+def make_build_manifest(commit="a" * 40, source="tree1"):
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as d:
+        m = make_build(Path(d), commit)
+    m["geocollar_source"] = source
+    m["built_at"] = "2026-11-14T16:37:00+00:00"
+    return m
+
+
+def test_latest_manifest_and_source_lookup(monkeypatch):
+    urls = []
+
+    def get(url, timeout=30):
+        urls.append(url)
+        if "contents/firmware" in url:
+            return [{"name": "GeoCollar", "type": "dir", "sha": "0fbfcfe8a35c27cc5fa2f9190e7179f88df9a34a"},
+                    {"name": "build.sh", "type": "file", "sha": "4" * 40}]
+        return make_build_manifest()
+
+    monkeypatch.setattr(fw, "_get_json", get)
+    assert fw.latest_manifest("owner/repo")["geocollar_commit"] == "a" * 40
+    assert urls == ["https://github.com/owner/repo/releases/download/firmware-latest/manifest.json"]
+    assert fw.source_of_commit("owner/repo", "7546315") == "0fbfcfe8a35c27cc5fa2f9190e7179f88df9a34a"
+    assert urls[-1] == "https://api.github.com/repos/owner/repo/contents/firmware?ref=7546315"
+    # Nothing is asked for a commit ID or repository name that could change the URL.
+    n = len(urls)
+    assert fw.source_of_commit("owner/repo", "main&x=1") is None and fw.source_of_commit("owner/repo/x", "7546315") is None
+    assert len(urls) == n
+
+    def down(url, timeout=30):
+        raise OSError("no route to host")
+
+    monkeypatch.setattr(fw, "_get_json", down)
+    with pytest.raises(fw.FirmwareError, match="could not reach github.com/owner/repo"):
+        fw.latest_manifest("owner/repo")
+    assert fw.source_of_commit("owner/repo", "7546315") is None
+    monkeypatch.setattr(fw, "_get_json", lambda url, timeout=30: {"format": 1})
+    with pytest.raises(fw.FirmwareError, match="incomplete manifest"):
+        fw.latest_manifest("owner/repo")
+
+
+def test_update_check_only_reports(client, tmp_path, monkeypatch):
+    c, app = client
+    store = app.state.store
+    latest = [make_build_manifest("c" * 40, "tree2")]
+    sources = {"1" * 40: "tree2", "2" * 40: "tree1"}
+    asked, notes = [], []
+    monkeypatch.setattr(fw, "latest_manifest", lambda repo: latest[0])
+    monkeypatch.setattr(fw, "source_of_commit", lambda repo, commit: asked.append(commit) or sources.get(commit))
+    monkeypatch.setattr(fw, "notify_home_assistant", lambda title, message, nid: notes.append(message) or True)
+    for node_id, name in (("!00000001", "Rex"), ("!00000002", "Biscuit"), ("!00000003", "Pip"), ("!00000004", "Dot")):
+        c.post("/api/collars", json={"node_id": node_id, "name": name})
+    # Rex: an old build without a source ID whose collar source is the latest one (only the base
+    # changed since). Biscuit: older collar firmware. Pip: never flashed from here. Dot: up to date.
+    store.set_collar_info("!00000001", "firmware", {"build": "x", "commit": "1" * 40, "meshtastic": "v2.8.2.d5f1619"})
+    store.set_collar_info("!00000002", "firmware", {"build": "y", "commit": "2" * 40, "meshtastic": "v2.8.2.d5f1619"})
+    store.set_collar_info("!00000004", "firmware", {"build": "z", "commit": "c" * 40, "source": "tree2",
+                                                    "meshtastic": "v2.8.2.d5f1619"})
+    sim_id = c.post("/api/sim", json={"lat": 40, "lon": -75}).json()["node_id"]
+
+    u = c.get("/api/firmware").json()["update"]
+    assert u == {"every": "weekly", "latest": None, "error": None, "outdated": [], "unknown": []}
+    assert app.state.check_due()  # never checked
+    assert not any(x["update_available"] for x in c.get("/api/collars").json().values())
+
+    u = c.post("/api/firmware/check").json()
+    assert u["latest"]["commit"] == "c" * 40 and u["latest"]["subject"] == "Test build" and u["error"] is None
+    assert u["latest"]["built_at"] == "2026-11-14T16:37:00+00:00" and u["latest"]["checked_at"] > 0
+    assert [x["name"] for x in u["outdated"]] == ["Biscuit"] and [x["name"] for x in u["unknown"]] == ["Pip"]
+    assert sorted(asked) == ["1" * 40, "2" * 40]
+    assert store.collar("!00000001")["firmware"]["source"] == "tree2"  # learned, not asked again
+    collars = c.get("/api/collars").json()
+    assert [k for k, x in collars.items() if x["update_available"]] == ["!00000002"]
+    assert not collars[sim_id]["update_available"]
+    assert app.state.builds.list() == [] and notes == []  # nothing downloaded; a check by hand does not notify
+    assert not app.state.check_due()  # next one in a week
+
+    # The automatic check tells Home Assistant once per new firmware.
+    store.set_setting("fw_check_next", 1)
+    assert app.state.check_due()
+    app.state.check_updates(auto=True)
+    assert len(notes) == 1 and "Biscuit" in notes[0] and "Rex" not in notes[0]
+    latest[0] = make_build_manifest("d" * 40, "tree2")  # a base-only commit: a new build of the same firmware
+    app.state.check_updates(auto=True)
+    assert len(notes) == 1 and c.get("/api/firmware").json()["update"]["latest"]["commit"] == "d" * 40
+    assert [x["name"] for x in c.get("/api/firmware").json()["update"]["outdated"]] == ["Biscuit"]
+    latest[0] = make_build_manifest("e" * 40, "tree3")  # new collar firmware
+    u = app.state.check_updates(auto=True)
+    assert len(notes) == 2 and [x["name"] for x in u["outdated"]] == ["Rex", "Biscuit", "Dot"]
+    assert sorted(set(asked)) == ["1" * 40, "2" * 40] and len(asked) == 2
+
+    # How often: daily, weekly, monthly or never.
+    assert c.put("/api/firmware/check-every", json={"every": "hourly"}).status_code == 400
+    assert c.put("/api/firmware/check-every", json={"every": "monthly"}).json()["every"] == "monthly"
+    checked = store.setting("fw_latest")["checked_at"]
+    assert abs(store.setting("fw_check_next") - (checked + 30 * 86400)) < 1 and not app.state.check_due()
+    store.set_setting("fw_latest", {**store.setting("fw_latest"), "checked_at": checked - 2 * 86400})
+    assert c.put("/api/firmware/check-every", json={"every": "daily"}).json()["every"] == "daily"
+    assert app.state.check_due()  # the last check is two days old
+    assert c.put("/api/firmware/check-every", json={"every": "never"}).json()["every"] == "never"
+    assert not app.state.check_due()
+    c.put("/api/firmware/check-every", json={"every": "daily"})
+
+    # GitHub can't be reached: the page is told, what was known is kept, and the next automatic
+    # try waits some hours.
+    def down(repo):
+        raise fw.FirmwareError("could not reach github.com/x (timed out)")
+
+    monkeypatch.setattr(fw, "latest_manifest", down)
+    u = c.post("/api/firmware/check").json()
+    assert "could not reach" in u["error"] and u["latest"]["commit"] == "e" * 40 and len(u["outdated"]) == 3
+    assert not app.state.check_due() and store.setting("fw_check_next") > time.time() + 5 * 3600
+
+
+def test_flash_gets_the_latest_build_by_itself(client, tmp_path, monkeypatch):
+    c, app = client
+    builds = app.state.builds
+    fetched, flashed = [], []
+
+    def fetch(job, store, repo):
+        fetched.append(repo)
+        have = store.find_commit("f" * 40, "release")
+        if have:
+            return have
+        d = tmp_path / f"dl{len(fetched)}"
+        m = make_build(d, "f" * 40)
+        m["geocollar_source"] = "tree9"
+        (d / "manifest.json").write_text(json.dumps(m))
+        return store.add(d, "release")
+
+    monkeypatch.setattr(fw, "fetch_release", fetch)
+    monkeypatch.setattr(fw, "flash_usb", lambda job, store, b, port, mode, base_radio="":
+                        flashed.append(b) or {"node_id": "!22222222", "mode": mode})
+    c.post("/api/collars", json={"node_id": "!22222222", "name": "Biscuit"})
+
+    # No build named: the newest is downloaded, flashed and recorded, and the page's "latest" follows.
+    job = wait_job(c, c.post("/api/firmware/flash-usb", json={"port": "/dev/ttyACM0"}).json()["id"])
+    assert job["state"] == "done", job
+    m = builds.list()[0]
+    assert flashed == [m["id"]] and m["geocollar_commit"] == "f" * 40
+    rec = c.get("/api/collars").json()["!22222222"]
+    assert rec["firmware"]["build"] == m["id"] and rec["firmware"]["source"] == "tree9" and not rec["update_available"]
+    assert c.get("/api/firmware").json()["update"]["latest"]["commit"] == "f" * 40
+    # Again: the build is here already, so it is not kept twice.
+    wait_job(c, c.post("/api/firmware/flash-usb", json={"port": "/dev/ttyACM0"}).json()["id"])
+    assert len(builds.list()) == 1 and len(fetched) == 2
+
+    # The browser asks for the same thing before it flashes; the job's result is the manifest.
+    job = wait_job(c, c.post("/api/firmware/download").json()["id"])
+    assert job["state"] == "done" and job["result"]["id"] == m["id"] and job["title"] == "Get the latest firmware"
+
+    # A build picked by hand is flashed as it is, without asking GitHub.
+    older = make_build(tmp_path / "older", "9" * 40)
+    old = builds.add(tmp_path / "older", "local")
+    assert older["geocollar_commit"] == "9" * 40
+    wait_job(c, c.post("/api/firmware/flash-usb", json={"port": "/dev/ttyACM0", "build": old["id"]}).json()["id"])
+    assert flashed[-1] == old["id"] and len(fetched) == 3
+    assert c.post("/api/firmware/flash-usb", json={"port": "/dev/ttyACM0", "build": "nope"}).status_code == 404
+
+    # GitHub can't be reached: the newest build already here is used, and the log says so.
+    def down(job, store, repo):
+        raise fw.FirmwareError("could not download the latest build (timed out)")
+
+    monkeypatch.setattr(fw, "fetch_release", down)
+    job = wait_job(c, c.post("/api/firmware/flash-usb", json={"port": "/dev/ttyACM0"}).json()["id"])
+    full = c.get(f"/api/firmware/jobs/{job['id']}").json()
+    assert job["state"] == "done" and flashed[-1] == old["id"]
+    assert any("Using the newest build already here instead: 9999999, built here" in line for line in full["log"])
+    # With nothing here either, the flash fails and says why.
+    for b in builds.list():
+        builds.delete(b["id"])
+    job = wait_job(c, c.post("/api/firmware/flash-usb", json={"port": "/dev/ttyACM0"}).json()["id"])
+    assert job["state"] == "failed" and "no firmware on this machine" in job["error"]
+
+    # Cancelled while downloading: not turned into "use an older build".
+    j = fw.Job("usb", "t")
+    j.cancel.set()
+    with pytest.raises(fw.FirmwareError, match="cancelled"):
+        fw.latest_build(j, builds, "owner/repo")
+
+
+def test_package_adds_the_source_id():
+    text = (REPO / "firmware" / "package.py").read_text()
+    assert '"geocollar_source": git("rev-parse", "HEAD:firmware/GeoCollar", cwd=repo)' in text
+
+
 def test_node_id_from_mac_while_flashing(tmp_path, monkeypatch):
     assert fw.node_id_from_mac("34:85:18:AB:cd:01") == "!18abcd01"
     assert fw.node_id_from_mac("nonsense") is None

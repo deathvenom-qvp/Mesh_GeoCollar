@@ -90,7 +90,7 @@ connected, and hovering it shows the last error.
 ## Pairing a collar
 
 The easy way: plug the new collar into the base machine, open the **Settings** tab and, under
-**Collar firmware**, pick **USB on base**, type the dog's name, leave **Then set it up for this base** ticked and press **Flash** (or
+**Collar firmware**, pick **USB on base**, type the dog's name, leave **Then set it up for this base** ticked and press **Flash firmware** (or
 **Set up only** if it already runs GeoCollar). The base learns the collar's node ID from it,
 adds it, puts the base's public key in the collar's admin keys, and copies the base's LoRa
 settings and channels to it.
@@ -295,20 +295,37 @@ Commands such as Lost mode work on it too. Remove it like any other collar.
 
 Open the **Settings** tab; **Collar firmware** is its last section.
 
-1. **Get a build.** *Download latest build* fetches the newest build of the main branch, which
-   GitHub Actions publishes as the `firmware-latest` release. *Build from source here* compiles
-   it on this machine instead: the first build downloads about 1.5 GB of tools and can take
-   30 minutes or more on a Raspberry Pi. The last three builds are kept.
-2. **Flash it** over USB, one of two ways:
-   - **USB on base**: plug the collar into the Home Assistant machine and pick its port. The
-     base station's own radio port is greyed out. If the collar's port is missing, restart the app
-     after plugging it in.
-   - **USB on this computer**: plug the collar into the computer you are browsing from. Needs
-     Chrome or Edge, and Home Assistant opened over `https://`. See
-     [Pairing a collar](#pairing-a-collar) for what happens when the collar has to be reset by hand.
+There is nothing to download first. **Pressing the flash button gets the latest firmware by
+itself** (the newest build of the main branch, which GitHub Actions publishes as the
+`firmware-latest` release) and then flashes it. If the base can't reach GitHub, it uses the
+newest build it already has and says so in the job's log.
+
+**Check for firmware updates** only tells you whether there is newer firmware; it downloads and
+flashes nothing. It shows the latest build and names the collars that run something older. A
+collar that can be updated also says so in its panel, and the Settings tab gets a dot. The base
+compares the collar firmware's source, not the commit, so a change to the base app alone does not
+count as a collar update. It knows what a collar runs only if the collar was flashed from this
+app.
+
+**Check automatically** repeats the check daily, weekly (the default) or monthly, or never. When
+an automatic check finds newer firmware for one of your collars, Home Assistant shows a
+notification, once per new firmware.
+
+**Flash a collar** over USB, one of two ways:
+
+- **USB on base**: plug the collar into the Home Assistant machine, pick its port and press
+  **Flash firmware**. The base station's own radio port is greyed out. If the collar's port is
+  missing, restart the app after plugging it in.
+- **USB on this computer**: plug the collar into the computer you are browsing from and press
+  **Connect and flash**. Needs Chrome or Edge, and Home Assistant opened over `https://`. See
+  [Pairing a collar](#pairing-a-collar) for what happens when the collar has to be reset by hand.
 
 The first install on a new collar is a **Full install**. *Update, keep settings* keeps the
 collar's keys and fences; a full install erases them, so pair the collar again afterwards.
+
+**Advanced: flash another build** lists the last three builds kept on this machine. Pick one to
+flash it instead of the latest. *Build from source here* compiles the firmware on this machine:
+the first build downloads about 1.5 GB of tools and can take 30 minutes or more on a Raspberry Pi.
 
 **There are no updates over Wi-Fi.** Versions before 0.17.0 had them, and kept your Wi-Fi
 password on every collar updated that way.

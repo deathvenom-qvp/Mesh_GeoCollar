@@ -58,6 +58,8 @@
   .tabs button { flex: 1; border: 0; border-bottom: 3px solid transparent; border-radius: 0; background: none; padding: 7px 6px;
                  font-weight: 600; color: var(--muted); }
   .tabs button:hover:not(:disabled) { color: var(--fg); border-color: transparent transparent var(--line); }
+  .tabs button.dot::after { content: ''; display: inline-block; width: 7px; height: 7px; margin-left: 6px; border-radius: 50%;
+    background: var(--warn); vertical-align: middle; } /* newer collar firmware is available */
   .tabs button[aria-selected="true"], .tabs button[aria-selected="true"]:hover { color: var(--accent); border-color: transparent transparent var(--accent); }
   .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; padding: 16px; max-width: 1180px; align-items: start; }
   .cards > section { border: 1px solid var(--line); border-radius: 10px; background: var(--bg); min-width: 0; }
@@ -474,15 +476,30 @@
     <h2>Collar firmware</h2>
     <div class="fwcols">
     <div>
-      <div class="muted">Get a firmware build, then flash it to a collar over USB: from the machine running this app, or
-        from the computer you are using now.</div>
-      <ul class="builds" id="fwBuilds"></ul>
-      <div class="actions">
-        <button id="fwDownload" title="The newest build of the main branch, made by GitHub Actions">Download latest build</button>
-        <button id="fwBuild" title="Compile on this machine. Slow, and needs about 3 GB of disk">Build from source here</button>
+      <div class="muted">Collars are flashed over USB: on the machine running this app, or on the computer you are using now.
+        Flashing downloads the latest firmware by itself. Checking for updates only tells you when there is newer firmware.</div>
+      <div id="fwUpdate" style="margin:8px 0"></div>
+      <div class="actions" style="align-items:center">
+        <button id="fwCheck">Check for firmware updates</button>
+        <label class="row muted" style="gap:6px;font-size:13px">Check automatically
+          <select id="fwEvery" style="width:auto">
+            <option value="daily">Daily</option>
+            <option value="weekly">Weekly</option>
+            <option value="monthly">Monthly</option>
+            <option value="never">Never</option>
+          </select></label>
       </div>
       <div id="fwJob"></div>
       <div id="fwLeftover"></div>
+      <details id="fwAdvanced" style="margin-top:10px">
+        <summary>Advanced: flash another build</summary>
+        <div class="muted" style="margin-top:6px">The builds kept on this machine. Pick one to flash it instead of the latest, or compile the
+          firmware here.</div>
+        <ul class="builds" id="fwBuilds"></ul>
+        <div class="actions">
+          <button id="fwBuild" title="Compile on this machine. Slow, and needs about 3 GB of disk">Build from source here</button>
+        </div>
+      </details>
     </div>
     <div>
       <h2>Flash a collar</h2>
@@ -494,7 +511,7 @@
       <div id="fwUsb" class="fwgrid">
         <div class="wide muted">For a collar plugged into the machine running this app (the Home Assistant machine).</div>
         <label class="field wide">Port <select id="fwPort"></select></label>
-        <div class="wide actions"><button class="primary" id="fwUsbGo">Flash</button>
+        <div class="wide actions"><button class="primary" id="fwUsbGo">Flash firmware</button>
           <button id="fwSetupOnly" title="For a collar that already runs GeoCollar firmware">Set up only</button>
           <button id="fwRescan">Rescan ports</button></div>
       </div>
@@ -1158,7 +1175,8 @@ function renderSelected() {
   if (c.ble_pin) rows.push(['Bluetooth PIN', String(c.ble_pin)]);
   // update_mode: left by a Wi-Fi update that an older version of this app started and never finished
   if (c.update_mode) rows.push(['Firmware', 'Stuck in update mode: flash it over USB']);
-  else if (c.firmware) rows.push(['Firmware', `${shortCommit(c.firmware.commit)}, ${c.firmware.via === 'wifi' ? 'Wi-Fi' : 'USB'} ${ago(Date.now() / 1000 - c.firmware.flashed_at)}`]);
+  else if (c.firmware) rows.push(['Firmware', `${shortCommit(c.firmware.commit)}, ${c.firmware.via === 'wifi' ? 'Wi-Fi' : 'USB'} ${ago(Date.now() / 1000 - c.firmware.flashed_at)}`
+    + (c.update_available ? '. Update available: see Settings' : '')]);
   $('selStats').replaceChildren(...rows.flatMap(([k, v]) => [el('span', {}, k), el('span', {}, v)]));
   $('zoomDog').disabled = !(s && (s.lat || s.lon));
   renderCopyFrom();
@@ -1615,6 +1633,9 @@ async function refresh() {
   try { collars = await api('collars'); } catch { return; }
   loadDiscovery();
   if (selected && !collars[selected]) { selected = null; loadZones(null); }
+  const newer = Object.values(collars).some(c => c.update_available);
+  $('tabSettings').classList.toggle('dot', newer);
+  $('tabSettings').title = newer ? 'Newer collar firmware is available' : '';
   renderCollars();
   renderDogs();
   renderSelected();
@@ -1705,19 +1726,22 @@ async function sendCmd(action, label, intensity = 0) {
 document.querySelectorAll('[data-cmd]').forEach(b => b.onclick = () => sendCmd(b.dataset.cmd, b.textContent, +(b.dataset.intensity || 0)));
 
 // ---------------------------------------------------------------------------------------------
-// Collar firmware: builds, a background job with a log, and two ways to flash, both over USB.
+// Collar firmware: a check for newer firmware (which only reports), a background job with a log,
+// and two ways to flash, both over USB. Flashing uses the latest build, which the base downloads
+// first, unless another build was picked under Advanced (fwSel).
 // ---------------------------------------------------------------------------------------------
-let fw = null, fwSel = null, fwMethod = 'usb', fwJobId = null, fwJobLog = [], fwJobTimer = null, fwWebBusy = false;
+let fw = null, fwSel = null, fwMethod = 'usb', fwJobId = null, fwJobLog = [], fwJobTimer = null, fwWebBusy = false, fwChecking = false;
 const shortCommit = c => c ? c.slice(0, 7) : 'unknown';
 const fwSay = t => { $('fwMsg').textContent = t; };
 const webSerialOk = () => 'serial' in navigator && window.isSecureContext;
 
 async function fwRefresh() {
   try { fw = await api('firmware'); } catch (e) { fwSay(e.message); return; }
-  if (!fw.builds.some(b => b.id === fwSel)) fwSel = fw.builds[0] ? fw.builds[0].id : null;
+  if (!fw.builds.some(b => b.id === fwSel)) fwSel = null; // null: the latest, which flashing downloads by itself
   const fj = fw.job && fw.job.kind !== 'radio' ? fw.job : null;
   if (fw.job && fw.job.kind === 'radio' && fw.job.state === 'running' && radioJobId !== fw.job.id) watchRadioJob(fw.job.id);
-  if (fj && fj.state === 'running' && fwJobId !== fj.id) watchJob(fj.id);
+  if (fwWebBusy) { /* a flash from this browser is showing its own progress, also of the download it started */ }
+  else if (fj && fj.state === 'running' && fwJobId !== fj.id) watchJob(fj.id);
   else if (!fwJobId && fj) { fwJobId = fj.id; fwJobLog = fj.log; renderJob(fj); }
   renderFw();
 }
@@ -1725,16 +1749,39 @@ async function fwRefresh() {
 function renderFw() {
   if (!fw) return;
   const busy = (fw.job && fw.job.state === 'running') || fwWebBusy;
-  $('fwBuilds').replaceChildren(...(fw.builds.length ? fw.builds.map(b => el('li', {},
+  // What the last check found. The check only reports; Flash gets the latest firmware by itself.
+  const u = fw.update, now = Date.now() / 1000;
+  const names = list => list.map(x => x.name).join(', ').replace(/, ([^,]*)$/, ' and $1');
+  const info = [];
+  if (u.latest) {
+    info.push(el('div', {}, el('b', {}, 'Latest firmware: '), `${shortCommit(u.latest.commit)} ${u.latest.subject || ''}`),
+      el('div', { class: 'muted' }, `Meshtastic ${u.latest.meshtastic || '?'}`,
+        u.latest.built_at ? ` · built ${new Date(u.latest.built_at).toLocaleDateString()}` : '', ` · checked ${ago(now - u.latest.checked_at)}`));
+    if (u.outdated.length) info.push(el('div', { class: 'callout' }, el('b', {}, `Update available for ${names(u.outdated)}. `),
+      'Plug the collar into USB and press the flash button: the new firmware is downloaded by itself.'));
+    else if (!u.unknown.length && Object.values(collars).some(x => !x.sim)) info.push(el('div', { class: 'muted' }, 'Your collars are up to date.'));
+    if (u.unknown.length) info.push(el('div', { class: 'muted' },
+      `Not known for ${names(u.unknown)}: ${u.unknown.length > 1 ? 'they have' : 'it has'} not been flashed from this app.`));
+  } else info.push(el('div', { class: 'muted' }, 'Not checked for newer firmware yet.'));
+  if (u.error) info.push(el('div', { class: 'callout bad' }, `The last check failed: ${u.error}`));
+  $('fwUpdate').replaceChildren(...info);
+  if (document.activeElement !== $('fwEvery')) $('fwEvery').value = u.every;
+
+  // Advanced: another build than the latest.
+  $('fwBuilds').replaceChildren(el('li', {},
+    el('input', { type: 'radio', name: 'fwBuild', checked: !fwSel, 'aria-label': 'Use the latest firmware', onchange: () => { fwSel = null; renderFw(); } }),
+    el('span', {}, el('b', {}, 'Latest'), ' (downloaded when you flash)')),
+  ...fw.builds.map(b => el('li', {},
     el('input', { type: 'radio', name: 'fwBuild', checked: b.id === fwSel, 'aria-label': `Use build ${shortCommit(b.geocollar_commit)}`,
       onchange: () => { fwSel = b.id; renderFw(); } }),
     el('span', {}, el('b', {}, shortCommit(b.geocollar_commit)), ' ', b.geocollar_subject || ''),
     el('button', { class: 'link', disabled: busy, onclick: async () => {
       try { await api(`firmware/builds/${b.id}`, { method: 'DELETE' }); fwRefresh(); } catch (e) { fwSay(e.message); } } }, 'Delete'),
-    el('span', { class: 'muted sub' }, `${b.source === 'local' ? 'Built here' : 'Downloaded'} ${ago(Date.now() / 1000 - b.added_at)}`,
-      ` · Meshtastic ${b.meshtastic_version || '?'} · ${Math.round(b.files.app.size / 1024)} KB`)))
-    : [el('li', { class: 'muted', style: 'display:block' }, 'No firmware yet. Download the latest build to start.')]));
-  $('fwDownload').disabled = busy;
+    el('span', { class: 'muted sub' }, `${b.source === 'local' ? 'Built here' : 'Downloaded'} ${ago(now - b.added_at)}`,
+      ` · Meshtastic ${b.meshtastic_version || '?'} · ${Math.round(b.files.app.size / 1024)} KB`))));
+  if (fwSel) $('fwAdvanced').open = true; // never hide that something other than the latest is picked
+  $('fwCheck').disabled = fwChecking;
+  $('fwCheck').textContent = fwChecking ? 'Checking…' : 'Check for firmware updates';
   $('fwBuild').disabled = busy || !fw.can_build;
   $('fwBuild').title = fw.can_build ? 'Compile on this machine. Slow, and needs about 3 GB of disk' : 'git is not installed in this image';
 
@@ -1756,13 +1803,13 @@ function renderFw() {
   $('fwPort').replaceChildren(...(ports.length ? ports : [el('option', { value: '' }, 'No USB serial devices found')]));
   if (keep && fw.ports.some(p => p.device === keep)) $('fwPort').value = keep;
   else { const free = fw.ports.find(p => !p.in_use); if (free) $('fwPort').value = free.device; }
-  $('fwUsbGo').disabled = busy || !fwSel || !fw.ports.some(p => p.device === $('fwPort').value && !p.in_use);
+  $('fwUsbGo').disabled = busy || !fw.ports.some(p => p.device === $('fwPort').value && !p.in_use);
 
   // USB on this computer
   $('fwWebState').replaceChildren(webSerialOk() ? '' : el('div', { class: 'callout' }, !('serial' in navigator)
     ? 'This browser cannot talk to USB devices. Use Chrome or Edge on a computer.'
     : 'USB access needs this page over HTTPS. Open Home Assistant through its https:// address, or use "USB on base".'));
-  $('fwWebGo').disabled = busy || !fwSel || !webSerialOk();
+  $('fwWebGo').disabled = busy || !webSerialOk();
   $('fwWebSetup').disabled = busy || !webSerialOk();
 
   // Shared options
@@ -1772,9 +1819,11 @@ function renderFw() {
   $('fwCollar').value = collars[keepCollar] ? keepCollar : '';
   $('fwNewNameRow').hidden = !!$('fwCollar').value;
   $('fwSetupOnly').disabled = busy || !fw.ports.some(p => p.device === $('fwPort').value && !p.in_use);
-  $('fwModeNote').textContent = $('fwMode').value === 'full'
-    ? 'Erases the collar, including its settings, keys and fences. Use this for a new collar; set it up again afterwards.'
-    : 'Keeps the collar\'s Meshtastic settings, keys and fences.';
+  const picked = fwSel && fw.builds.find(b => b.id === fwSel);
+  $('fwModeNote').textContent = (picked ? `Flashes build ${shortCommit(picked.geocollar_commit)}, picked under Advanced, not the latest. ` : '')
+    + ($('fwMode').value === 'full'
+      ? 'Erases the collar, including its settings, keys and fences. Use this for a new collar; set it up again afterwards.'
+      : 'Keeps the collar\'s Meshtastic settings, keys and fences.');
 }
 
 function renderJob(j, box = $('fwJob'), lines = fwJobLog) {
@@ -1818,7 +1867,17 @@ $('fwMode').onchange = renderFw;
 $('fwCollar').onchange = renderFw;
 $('fwPort').onchange = renderFw;
 $('fwRescan').onclick = fwRefresh;
-$('fwDownload').onclick = () => startJob('firmware/download');
+$('fwCheck').onclick = async () => {
+  if (!fw || fwChecking) return;
+  fwChecking = true; fwSay(''); renderFw();
+  try { fw.update = await api('firmware/check', { method: 'POST' }); } catch (e) { fwSay(e.message); }
+  fwChecking = false; renderFw(); refresh(); // refresh: each collar's "update available"
+};
+$('fwEvery').onchange = async () => {
+  try { fw.update = await api('firmware/check-every', { method: 'PUT', body: JSON.stringify({ every: $('fwEvery').value }) }); }
+  catch (e) { fwSay(e.message); }
+  $('fwEvery').blur(); renderFw();
+};
 $('fwBuild').onclick = () => {
   if (confirm('Build the collar firmware on this machine?\n\nThe first build downloads about 1.5 GB of tools and can take 30 minutes or more on a Raspberry Pi. Later builds are quicker.'))
     startJob('firmware/build', { ref: 'main' });
@@ -1836,8 +1895,9 @@ $('fwSetupOnly').onclick = () => {
 
 // Flash from this browser with esptool-js over Web Serial. The files come from the base.
 $('fwWebGo').onclick = async () => {
-  const m = fw.builds.find(b => b.id === fwSel), mode = $('fwMode').value, nodeId = $('fwCollar').value;
-  if (!m) return;
+  let m = fwSel ? fw.builds.find(b => b.id === fwSel) : null; // null: the latest, fetched below
+  const mode = $('fwMode').value, nodeId = $('fwCollar').value;
+  if (fwSel && !m) return;
   if (mode === 'full' && !confirm('Full install erases everything on the collar, including its keys and fences. Continue?')) return;
   let port;
   try { port = await navigator.serial.requestPort(); } catch { return; } // the user closed the chooser
@@ -1850,6 +1910,20 @@ $('fwWebGo').onclick = async () => {
   renderFw(); renderJob(job);
   let transport;
   try {
+    if (!m) { // the base gets the latest build first, unless it has it already; its job's result is the build
+      job.step = 'Getting the latest firmware'; renderJob(job);
+      let j = await api('firmware/download', { method: 'POST' }), seen = 0;
+      for (;;) {
+        j = await api(`firmware/jobs/${j.id}?since=${seen}`);
+        seen += j.log.length;
+        for (const line of j.log) logLine(line);
+        if (j.state !== 'running') break;
+        job.step = j.step || job.step; job.progress = j.progress; renderJob(job);
+        await sleep(700);
+      }
+      if (j.state !== 'done' || !j.result) throw new Error(j.error || 'could not get the latest firmware');
+      m = j.result; job.progress = null;
+    }
     const { ESPLoader, Transport } = await import('./static/vendor/esptool-js/esptool-js.js');
     const files = [];
     for (const kind of mode === 'full' ? ['factory'] : ['app']) { // never Meshtastic's update loader: no over-the-air updates
@@ -1897,7 +1971,7 @@ $('fwWebGo').onclick = async () => {
     job.state = 'failed'; job.error = e.message || String(e); logLine('Error: ' + job.error);
   } finally {
     try { if (transport) await transport.disconnect(); } catch { /* already closed */ }
-    fwWebBusy = false; renderJob(job); renderFw(); refresh();
+    fwWebBusy = false; renderJob(job); fwRefresh(); refresh();
   }
   if (job.state !== 'done') return;
   if ($('fwSetup').checked) {

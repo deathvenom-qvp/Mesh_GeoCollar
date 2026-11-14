@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.18.0
+
+Flashing no longer starts with getting a build. Tested with the app's own tests and in a browser
+against a simulated collar, not on a real one. The collar firmware itself is unchanged.
+
+- **Flash gets the latest firmware by itself.** *Download latest build* is gone: pressing
+  **Flash firmware** (on the base) or **Connect and flash** (from the browser) downloads the newest
+  build first, unless the base already has it. Without a connection to GitHub it uses the newest
+  build already on the base and says so in the log.
+- **Check for firmware updates** replaces the build list. It only reports: the latest build, and
+  which collars run older firmware. Such a collar also says so in its panel, and the Settings tab
+  gets a dot.
+- **Check automatically**: daily, weekly (the default), monthly or never. When an automatic check
+  finds newer firmware for one of your collars, Home Assistant shows a notification, once per new
+  firmware.
+- Only a change to the collar firmware counts as an update. Every commit to the repository makes
+  a new build, also one that only touches the base app, so builds now carry an ID of the collar
+  firmware's source and the base compares that. For a collar flashed with an older build, the
+  base asks GitHub for that ID once.
+- **Advanced: flash another build** keeps the list of builds on this machine and *Build from
+  source here*, for flashing something other than the latest.
+
 ## 0.17.0
 
 Updates over Wi-Fi are gone, and flashing from the browser now copes with a collar that has to be

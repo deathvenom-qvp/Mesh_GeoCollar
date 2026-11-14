@@ -108,6 +108,9 @@ def main() -> None:
         "mcu": mcu,
         "geocollar_commit": git("rev-parse", "HEAD", cwd=repo),
         "geocollar_subject": git("log", "-1", "--format=%s", cwd=repo),
+        # git's ID of the module's source folder: the same for two builds unless the collar firmware
+        # itself changed. The base uses it to tell a real firmware update from a base-only commit.
+        "geocollar_source": git("rev-parse", "HEAD:firmware/GeoCollar", cwd=repo),
         "meshtastic_version": git("describe", "--tags", "--exact-match", cwd=mt) or git("rev-parse", "--short", "HEAD", cwd=mt),
         "loader_version": LOADER_VERSION,
         "built_at": dt.datetime.now(dt.timezone.utc).replace(microsecond=0).isoformat(),

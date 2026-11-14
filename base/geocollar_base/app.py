@@ -9,6 +9,7 @@ import os
 import re
 import secrets
 import shutil
+import threading
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -86,8 +87,12 @@ class BuildIn(BaseModel):
     ref: str = "main"
 
 
+class CheckEveryIn(BaseModel):
+    every: str  # never, daily, weekly or monthly
+
+
 class UsbFlashIn(BaseModel):
-    build: str
+    build: str | None = None  # left out: the latest, downloaded first if it is not here yet
     port: str
     mode: str = "update"
     node_id: str | None = None  # which collar is plugged in; found from its MAC address when left out
@@ -432,12 +437,29 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
                 except (KeyError, ValueError):
                     log.warning("stored fences for %s are invalid", node_id)
 
+    stop_checks = threading.Event()
+
+    def update_check_loop() -> None:
+        """Looks for newer collar firmware as often as the owner chose (see check_updates)."""
+        if stop_checks.wait(90):  # let the app start first
+            return
+        while True:
+            try:
+                if check_due():
+                    check_updates(auto=True)
+            except Exception:  # noqa: BLE001 - a failed check must not end the loop
+                log.exception("the firmware update check failed")
+            if stop_checks.wait(600):
+                return
+
     @asynccontextmanager
     async def lifespan(_app):
         if connect:
             link.start()
         sim.start()
+        threading.Thread(target=update_check_loop, name="firmware update check", daemon=True).start()
         yield
+        stop_checks.set()
         sim.close()
         link.close()
 
@@ -480,8 +502,11 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
     @app.get("/api/collars")
     def list_collars():
         collars = store.collars()
+        latest = fw.identity_of_latest(store.setting("fw_latest"))
         for node_id, c in collars.items():
             c["sim"] = sim.public(node_id)
+            # Newer collar firmware is known (see the update check) and this collar runs another one.
+            c["update_available"] = not c["sim"] and fw.same_firmware(latest, c.get("firmware")) is False
         return collars
 
     @app.post("/api/collars")
@@ -677,10 +702,82 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
     def record_flash(node_id: str | None, m: dict, via: str) -> None:
         if node_id and store.collar(node_id) is not None:
             store.set_collar_info(node_id, "firmware", {
-                "build": m["id"], "commit": m.get("geocollar_commit"), "meshtastic": m.get("meshtastic_version"),
-                "flashed_at": time.time(), "via": via,
+                "build": m["id"], **fw.identity(m), "flashed_at": time.time(), "via": via,
             })
             store.set_collar_info(node_id, "update_mode", None)
+
+    # -- Checking for newer collar firmware -------------------------------------------------------
+    # The check only tells the owner: it reads the manifest of the newest build and compares it
+    # with what each collar was last flashed with. Nothing is downloaded or flashed by it; pressing
+    # Flash gets the newest build by itself.
+    def check_every() -> str:
+        every = store.setting("fw_check_every", "weekly")
+        return every if every in fw.CHECK_EVERY else "weekly"
+
+    def note_latest(m: dict) -> None:
+        store.set_setting("fw_latest", {**fw.identity(m), "subject": m.get("geocollar_subject") or "",
+                                        "built_at": m.get("built_at"), "checked_at": time.time()})
+        store.set_setting("fw_check_error", None)
+        period = fw.CHECK_EVERY[check_every()]
+        store.set_setting("fw_check_next", time.time() + period if period else None)
+
+    def update_status() -> dict:
+        latest = store.setting("fw_latest")
+        ident = fw.identity_of_latest(latest)
+        outdated, unknown = [], []
+        for node_id, c in store.collars().items():
+            if c.get("sim"):
+                continue
+            same = fw.same_firmware(ident, c.get("firmware"))
+            if same is False:
+                outdated.append({"node_id": node_id, "name": c["name"]})
+            elif same is None:
+                unknown.append({"node_id": node_id, "name": c["name"]})
+        return {"every": check_every(), "latest": latest, "error": store.setting("fw_check_error"),
+                "outdated": outdated if latest else [], "unknown": unknown if latest else []}
+
+    def check_updates(auto: bool = False) -> dict:
+        try:
+            m = fw.latest_manifest(repo)
+        except fw.FirmwareError as e:
+            store.set_setting("fw_check_error", str(e))
+            # By itself, the next try is in six hours at the earliest, not at the next look.
+            store.set_setting("fw_check_next", time.time() + 6 * 3600 if fw.CHECK_EVERY[check_every()] else None)
+            return update_status()
+        note_latest(m)
+        # A collar flashed with a build from before 0.18 has no source ID, only a commit. Ask
+        # GitHub for it once, so that a base-only commit does not count as new collar firmware.
+        asked: dict[str, str | None] = {}
+        for node_id, c in store.collars().items():
+            f = c.get("firmware")
+            if c.get("sim") or not f or f.get("source") or not f.get("commit") or len(asked) >= 8:
+                continue
+            if f["commit"] not in asked:
+                asked[f["commit"]] = fw.source_of_commit(repo, f["commit"])
+            if asked[f["commit"]]:
+                store.set_collar_info(node_id, "firmware", {**f, "source": asked[f["commit"]]})
+        status = update_status()
+        # Once per new firmware, not once per commit: a base-only commit makes a new build too.
+        key = f"{m.get('geocollar_source') or m.get('geocollar_commit')}/{m.get('meshtastic_version')}"
+        if auto and status["outdated"] and store.setting("fw_notified") != key:
+            names = ", ".join(c["name"] for c in status["outdated"])
+            fw.notify_home_assistant(
+                "GeoCollar: collar firmware update",
+                f"Newer collar firmware is available for {names}. Plug the collar into USB, open GeoCollar's "
+                "Settings tab and press Flash: the firmware is downloaded by itself.", "geocollar_firmware")
+            store.set_setting("fw_notified", key)
+        return status
+
+    def check_due() -> bool:
+        return bool(fw.CHECK_EVERY[check_every()]) and time.time() >= (store.setting("fw_check_next") or 0)
+
+    app.state.check_updates, app.state.check_due = check_updates, check_due
+
+    def get_latest(job) -> dict:
+        m, is_latest = fw.latest_build(job, builds, repo)
+        if is_latest:
+            note_latest(m)
+        return m
 
     @app.get("/api/firmware")
     def firmware_overview():
@@ -695,13 +792,31 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
             "job": jobs.current.view() if jobs.current else None,
             "ports": ports,
             "can_build": bool(shutil.which("git")),
+            "update": update_status(),
             # The network that collars may still hold from Wi-Fi updates (see forget-wifi), or None.
             "wifi_leftover": wifi_leftover(),
         }
 
+    @app.post("/api/firmware/check")
+    def firmware_check():
+        """Look for newer collar firmware now. Only reports; see check_updates."""
+        return check_updates()
+
+    @app.put("/api/firmware/check-every")
+    def firmware_check_every(body: CheckEveryIn):
+        if body.every not in fw.CHECK_EVERY:
+            raise HTTPException(400, "every must be never, daily, weekly or monthly")
+        store.set_setting("fw_check_every", body.every)
+        period = fw.CHECK_EVERY[body.every]
+        last = (store.setting("fw_latest") or {}).get("checked_at") or 0
+        store.set_setting("fw_check_next", last + period if period else None)
+        return update_status()
+
     @app.post("/api/firmware/download")
     def firmware_download():
-        return start("download", "Download latest build", lambda job: fw.fetch_release(job, builds, repo))
+        """Get the latest build onto this machine. Flashing from the browser starts with this; the
+        job's result is the build's manifest."""
+        return start("download", "Get the latest firmware", get_latest)
 
     @app.post("/api/firmware/build")
     def firmware_build(body: BuildIn):
@@ -762,10 +877,11 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
 
     @app.post("/api/firmware/flash-usb")
     def firmware_flash_usb(body: UsbFlashIn):
-        m = build_or_404(body.build)
+        picked = build_or_404(body.build) if body.build else None
 
         def run(job):
-            result = fw.flash_usb(job, builds, body.build, body.port, body.mode, settings.get("mesh_serial", ""))
+            m = picked or get_latest(job)
+            result = fw.flash_usb(job, builds, m["id"], body.port, body.mode, settings.get("mesh_serial", ""))
             # The ID read from the chip is the collar's node ID only until it has a key: right after a
             # full install, or for a collar already listed under it. A set-up 2.8 collar's ID is a
             # hash of its key, so an update can't be matched by chip ID; the setup below finds it.
