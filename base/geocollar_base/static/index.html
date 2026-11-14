@@ -277,7 +277,8 @@
       <div class="row spread">
         <div>
           <div class="row" id="selNameRow" style="gap:6px"><div class="name" id="selName" style="font-weight:600;font-size:16px"></div>
-            <button class="link" id="renameBtn" title="The collar's name is the dog's name; the lost beacon uses it">Rename</button></div>
+            <button class="link" id="renameBtn" title="The collar's name is the dog's name; the lost beacon uses it">Rename</button>
+            <button class="link" id="removeCollar" title="Remove this collar from the base">Remove</button></div>
           <form class="rename" id="renameForm" hidden>
             <input id="renameInput" maxlength="24" required aria-label="Dog's name">
             <button class="primary">Save</button><button type="button" class="link" id="renameCancel">Cancel</button>
@@ -361,7 +362,6 @@
         <button data-cmd="clear_lost">Clear lost</button>
         <button data-cmd="silence_lost" title="Stop the Bluetooth name and mesh message until the dog is next back inside">Silence lost alert</button>
       </div>
-      <div style="margin-top:12px"><button class="link" id="removeCollar">Remove this collar from the base</button></div>
     </section>
   </div>
 
