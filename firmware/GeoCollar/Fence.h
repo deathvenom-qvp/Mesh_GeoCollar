@@ -13,6 +13,8 @@ namespace geocollar
 
 constexpr size_t kMaxZones = 4;
 constexpr size_t kMaxVertices = 32;
+/// How many recent shocks the hourly limit remembers; Settings::maxShocksPerHour cannot exceed it.
+constexpr size_t kShockHistory = 16;
 
 enum class ZoneKind : uint8_t {
     KeepIn = 0,  // the dog should stay inside this polygon
@@ -47,6 +49,10 @@ struct FenceSet {
     uint8_t vibratePulseS = 0;
     Zone zones[kMaxZones];
 };
+
+/// True when two fence sets describe the same zones, bands and pulse intervals (the version
+/// number is not compared).
+bool sameFences(const FenceSet &a, const FenceSet &b);
 
 /// Signed distance in metres from a point to the zone boundary, positive on the allowed side
 /// (inside a keep-in zone, outside a keep-out zone). Uses a local flat-earth projection, which is
@@ -101,6 +107,10 @@ struct Settings {
     uint8_t dogSpeedMps = 6;        // assumed top speed: next fix before the dog can reach the margin
 };
 
+/// Bring settings read back from flash into the ranges the firmware relies on (levels at most 99,
+/// counts and intervals at least 1), so a damaged or foreign file cannot make it misbehave.
+void sanitizeSettings(Settings &s);
+
 struct Fix {
     int32_t latI;
     int32_t lonI;
@@ -153,7 +163,6 @@ class FenceEngine
     uint8_t shocksThisBreach_ = 0;
     bool quiet_ = false; // went past the line: no corrections until clear of every band
     // Timestamps of recent shocks, for the per-hour cap.
-    static constexpr size_t kShockHistory = 16;
     uint32_t shockTimes_[kShockHistory] = {};
     size_t shockHead_ = 0;
     size_t shockCount_ = 0;
@@ -188,6 +197,36 @@ class CorrectionPulser
 /// GPS fix interval in seconds (0 = leave the owner's setting). With the lost beacon on, fixes
 /// come half as often as in lost mode, to make the battery last.
 uint32_t gpsIntervalSecs(const Settings &s, CollarState state, float clearanceM, uint16_t alertWidthM, bool beacon = false);
+
+/// How long without a fix before the last one counts as old: the GPS interval (0 = Meshtastic's
+/// default, 2 minutes) plus a minute for the GPS to wake and search. At 10 s or less the GPS
+/// stays on and reports all the time, and 45 s without a fix means the lock is gone.
+uint32_t fixOverdueMs(uint32_t gpsIntervalSecs);
+
+/// Says whether the collar has a current GPS fix. There is none at boot, and none again once a
+/// fix is overdue; only the next fix brings it back. A change of GPS interval gives the GPS a
+/// full allowance from that moment, so going from a slow interval to a fast one does not make
+/// the last fix look old before the GPS has had time to answer.
+class FixWatch
+{
+  public:
+    void onFix(uint32_t nowMs)
+    {
+        fixMs_ = nowMs;
+        noFix_ = false;
+    }
+    /// Call about once a second with the GPS interval in force. Returns noFix().
+    bool tick(uint32_t nowMs, uint32_t gpsIntervalSecs);
+    bool noFix() const { return noFix_; }
+
+  private:
+    bool noFix_ = true;
+    bool started_ = false;
+    bool paceFresh_ = false; // the interval changed less than one allowance ago
+    uint32_t intervalSecs_ = 0;
+    uint32_t fixMs_ = 0;
+    uint32_t paceMs_ = 0;
+};
 
 /// Lost-dog beacon. Once the dog has been past a line for 90 s, the collar takes a fix half as
 /// often, advertises "<dog> is lost <phone>" over Bluetooth for 90 s, goes radio-quiet for 90 s,

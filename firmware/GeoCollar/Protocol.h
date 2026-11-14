@@ -68,6 +68,24 @@ inline bool fenceVersionAcceptable(uint16_t incoming, uint16_t current)
     return current == 0 || static_cast<int16_t>(incoming - current) >= 0;
 }
 
+/// What to do with a complete fence set from the base.
+enum class FenceUpdate : uint8_t {
+    Refuse, // older than the fences in force: a replay
+    Keep,   // the very fences already in force: loading them again would restart the fence engine
+            // (and with it the per-breach shock count and the lost beacon), so only report back
+    Load,
+};
+FenceUpdate fenceUpdate(uint16_t incomingVersion, const FenceSet &incoming, const FenceSet &current);
+
+/// Replay guard for the Owner and Config messages. `seq` is the message's sequence number (0 = it
+/// has none: a base older than 0.16 sent it) and `last` the newest number of that kind accepted so
+/// far. A numbered message must be newer than the last one; one without a number is accepted only
+/// until the first numbered one has arrived, because it cannot be told from a recording.
+inline bool settingSeqAcceptable(uint32_t seq, uint32_t last)
+{
+    return seq ? seq > last : last == 0;
+}
+
 struct FenceChunk {
     uint16_t fenceVersion;
     uint8_t index;
@@ -85,8 +103,15 @@ struct StatusReport {
     uint16_t pdopX100;
     uint8_t sats;
     int16_t clearanceM; // positive = allowed side
-    uint8_t flags;      // bit0 corrections enabled, bit1 shock enabled, bit2 lost beacon on, bit3 beacon silenced
+    uint8_t flags;      // kFlag* below
 };
+
+constexpr uint8_t kFlagCorrections = 0x01;    // corrections enabled
+constexpr uint8_t kFlagShock = 0x02;          // shock enabled
+constexpr uint8_t kFlagBeacon = 0x04;         // lost beacon on
+constexpr uint8_t kFlagBeaconSilenced = 0x08; // lost beacon silenced by the owner
+constexpr uint8_t kFlagNoFix = 0x10;          // no current GPS fix: the position is the last one known
+constexpr uint8_t kFlagNumbered = 0x20;       // this firmware reads sequence numbers on Owner and Config
 
 constexpr size_t kMaxDogName = 24;
 constexpr size_t kMaxOwnerName = 24;
@@ -111,21 +136,24 @@ bool decodeStatus(const uint8_t *buf, size_t len, StatusReport &s);
 /// Hello: [version][6][flags: bit0 has an admin key, bit1 has fences][battery %, 255 unknown]
 constexpr size_t kHelloSize = 4;
 size_t encodeHello(uint8_t *out, size_t cap, bool hasAdminKey, bool hasFences, uint8_t batteryPct);
-size_t encodeOwner(uint8_t *out, size_t cap, const OwnerInfo &o);
-bool decodeOwner(const uint8_t *buf, size_t len, OwnerInfo &o);
+/// Owner: [version][5][len][dog][len][owner][len][phone], then an optional sequence number (u32,
+/// never 0). `seq` = 0 leaves it out when encoding and reports it absent when decoding.
+size_t encodeOwner(uint8_t *out, size_t cap, const OwnerInfo &o, uint32_t seq = 0);
+bool decodeOwner(const uint8_t *buf, size_t len, OwnerInfo &o, uint32_t &seq);
 
 /// Report interval limits, seconds. 0 means the firmware default (GEOCOLLAR_STATUS_INTERVAL_MS).
 constexpr uint16_t kMinReportS = 30;
 constexpr uint16_t kMaxReportS = 3600;
 
-/// Collar settings from the base: [version][7][report interval s, u16]. Later fields may follow, so
-/// a longer message is accepted.
+/// Collar settings from the base: [version][7][report interval s, u16], then an optional sequence
+/// number (u32, never 0; `seq` = 0 means none). Later fields may follow, so a longer message is
+/// accepted.
 struct CollarConfig {
     uint16_t reportS = 0;
 };
 constexpr size_t kConfigLength = 2 + 2;
-size_t encodeConfig(uint8_t *out, size_t cap, const CollarConfig &c);
-bool decodeConfig(const uint8_t *buf, size_t len, CollarConfig &c);
+size_t encodeConfig(uint8_t *out, size_t cap, const CollarConfig &c, uint32_t seq = 0);
+bool decodeConfig(const uint8_t *buf, size_t len, CollarConfig &c, uint32_t &seq);
 
 /// The collar's Meshtastic names for a dog's name: the long name is the dog's name (cut to fit on a
 /// character boundary), the short name its initials (several words) or first letters (one word),

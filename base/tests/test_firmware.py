@@ -675,3 +675,45 @@ def test_setup_from_the_browser_over_a_websocket(tmp_path, monkeypatch):
         with c.websocket_connect("/api/firmware/setup-web", headers={"origin": "https://evil.example"}) as ws:
             ws.receive_json()
 
+
+
+def test_build_fetches_only_branches_and_tags(tmp_path, monkeypatch):
+    """A name such as refs/pull/7/head or a commit ID must not be fetched: the build runs the
+    fetched tree's own build script."""
+    class Stop(Exception):
+        pass
+
+    calls = []
+
+    def run(job, cmd, **kw):
+        calls.append(cmd)
+        if cmd[-1] == "refs/heads/v0.16.0":
+            raise fw.FirmwareError("git fetch failed (exit code 128)")  # not a branch
+        if "reset" in cmd:
+            raise Stop
+
+    monkeypatch.setattr(fw, "_run", run)
+    monkeypatch.setattr(fw.shutil, "which", lambda name: "/usr/bin/git")
+    (tmp_path / "src" / ".git").mkdir(parents=True)
+    (tmp_path / "platformio").mkdir()
+    store = fw.BuildStore(tmp_path / "builds")
+
+    with pytest.raises(Stop):
+        fw.build_from_source(fw.Job("build", "t"), store, tmp_path, "owner/repo", ref="main")
+    # The copy on disk is pointed at the repository asked for before anything is fetched.
+    assert calls[0][-3:] == ["set-url", "origin", "https://github.com/owner/repo.git"]
+    assert calls[1][-3:] == ["1", "origin", "refs/heads/main"] and "reset" in calls[2]
+
+    calls.clear()
+    with pytest.raises(Stop):
+        fw.build_from_source(fw.Job("build", "t"), store, tmp_path, ref="v0.16.0")
+    assert [c[-1] for c in calls[1:3]] == ["refs/heads/v0.16.0", "refs/tags/v0.16.0"]
+
+    # A pull request's head is asked for as a branch of that name, which does not exist.
+    calls.clear()
+    with pytest.raises(Stop):
+        fw.build_from_source(fw.Job("build", "t"), store, tmp_path, ref="refs/pull/7/head")
+    assert calls[1][-1] == "refs/heads/refs/pull/7/head"
+    for bad in ("--upload-pack=x", "a..b", "main;rm -rf /", ""):
+        with pytest.raises(fw.FirmwareError):
+            fw.build_from_source(fw.Job("build", "t"), store, tmp_path, ref=bad)

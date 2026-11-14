@@ -61,11 +61,15 @@ class FakeLink:
         self.seqs = getattr(self, "seqs", []) + [seq]
         self.sent.append((node_id, protocol.encode_command(action, intensity, duration_ms)))
 
-    def send_config(self, node_id, report_s):
+    # The sequence numbers on Config and Owner messages are kept apart from `sent` (they come
+    # from the clock), in config_seqs and owner_seqs.
+    def send_config(self, node_id, report_s, seq=0):
         self.sent.append((node_id, protocol.encode_config(report_s)))
+        self.config_seqs = getattr(self, "config_seqs", []) + [seq]
 
-    def send_owner(self, node_id, dog, owner, phone):
+    def send_owner(self, node_id, dog, owner, phone, seq=0):
         self.sent.append((node_id, protocol.encode_owner(dog, owner, phone)))
+        self.owner_seqs = getattr(self, "owner_seqs", []) + [seq]
         self.key_at_send = getattr(self, "key_at_send", []) + [node_id in self.radio_keys]
 
 
@@ -378,3 +382,154 @@ def test_a_collar_that_does_not_trust_the_base_is_not_sent_anything(tmp_path):
     client.app.state.on_hello("!a1b2c3d4", {"has_admin_key": False})
     assert link.sent == []
     assert client.get("/api/collars").json()["!a1b2c3d4"]["hello"]["has_admin_key"] is False
+
+
+GOOD = {"state": "INSIDE", "lat": 40.0, "lon": -75.0, "pki": True, "sender_key": "a2V5"}
+
+
+def test_owner_and_config_are_numbered_for_firmware_that_reads_numbers(tmp_path):
+    client, link = make(tmp_path)
+    client.post("/api/collars", json={"node_id": "!a1b2c3d4", "name": "Rex"})
+    assert link.owner_seqs == [0]  # nothing heard from the collar yet: the form every firmware reads
+
+    # Firmware before 0.16 (no "numbered" flag in its reports) keeps getting the plain form.
+    client.app.state.on_status("!a1b2c3d4", GOOD)
+    client.patch("/api/collars/!a1b2c3d4", json={"name": "Biscuit"})
+    assert link.owner_seqs == [0, 0]
+    # The report interval is always numbered: older firmware skips the number.
+    client.patch("/api/collars/!a1b2c3d4", json={"report_s": 300})
+    assert len(link.config_seqs) == 1 and link.config_seqs[0] > 1_700_000_000
+
+    # The collar is updated and says it reads numbers: the name goes again, numbered this time, so
+    # the collar stops accepting an unnumbered (replayable) one. The interval already had a number.
+    link.sent.clear()
+    client.app.state.on_status("!a1b2c3d4", {**GOOD, "numbered": True})
+    assert link.sent == [("!a1b2c3d4", protocol.encode_owner("Biscuit", "", ""))]
+    assert link.owner_seqs[-1] > link.config_seqs[0]
+    # Nothing more on later reports, and every later message carries a larger number.
+    link.sent.clear()
+    client.app.state.on_status("!a1b2c3d4", {**GOOD, "numbered": True})
+    assert link.sent == []
+    client.patch("/api/collars/!a1b2c3d4", json={"name": "Rex", "report_s": 60})
+    assert link.owner_seqs[-1] > link.owner_seqs[-2] and link.config_seqs[-1] > link.owner_seqs[-1]
+    c = client.get("/api/collars").json()["!a1b2c3d4"]
+    assert c["numbered"] is True and c["owner_seq"] == link.owner_seqs[-1] and c["config_seq"] == link.config_seqs[-1]
+
+    # Back on old firmware: plain again.
+    client.app.state.on_status("!a1b2c3d4", GOOD)
+    client.patch("/api/collars/!a1b2c3d4", json={"name": "Max"})
+    assert link.owner_seqs[-1] == 0
+
+
+def test_a_page_on_another_site_cannot_change_anything(tmp_path):
+    client, link = make(tmp_path)
+    client.post("/api/collars", json={"node_id": "!a1b2c3d4", "name": "Rex"})
+    link.sent.clear()
+    url, beep = "/api/collars/!a1b2c3d4/command", {"action": "beep"}
+
+    # A browser names the page a request comes from. Another site: refused, whatever the method.
+    for origin in ("https://evil.example", "http://evil.example:8099", "null"):
+        r = client.post(url, json=beep, headers={"Origin": origin})
+        assert r.status_code == 403 and "another website" in r.json()["detail"]
+    # Also in the form a page can send without the browser asking first (no JSON content type).
+    r = client.post(url, content=b'{"action":"beep"}', headers={"Origin": "https://evil.example", "Content-Type": "text/plain"})
+    assert r.status_code == 403
+    assert client.delete("/api/collars/!a1b2c3d4", headers={"Origin": "https://evil.example"}).status_code == 403
+    assert client.put("/api/contact", json={"name": "x", "phone": ""}, headers={"Origin": "https://evil.example"}).status_code == 403
+    assert link.sent == [] and "!a1b2c3d4" in client.get("/api/collars").json()
+
+    # The app's own page (the Origin is the address it was reached on), a proxy in front of it that
+    # says which address that was, Home Assistant's ingress, and anything that is not a browser.
+    assert client.post(url, json=beep, headers={"Origin": "http://testserver"}).status_code == 200
+    assert client.post(url, json=beep, headers={"Origin": "https://dogs.example", "X-Forwarded-Host": "dogs.example"}).status_code == 200
+    assert client.post(url, json=beep, headers={"Origin": "https://ha.example:8123", "X-Ingress-Path": "/api/hassio_ingress/abc"}).status_code == 200
+    assert client.post(url, json=beep).status_code == 200
+    assert len(link.sent) == 4
+    # Reading is not restricted: the browser already keeps another site from seeing the answer.
+    assert client.get("/api/collars", headers={"Origin": "https://evil.example"}).status_code == 200
+
+
+def test_bad_input_is_refused_not_stored(tmp_path):
+    client, link = make(tmp_path)
+    for bad in ("<img src=x onerror=alert(1)>", "a1b2c3d4", "!a1b2c3d", "!a1b2c3d4e", "!g1b2c3d4", ""):
+        assert client.post("/api/collars", json={"node_id": bad, "name": "Rex"}).status_code == 400
+    assert client.post("/api/collars", json={"node_id": "!a1b2c3d4", "name": "x" * 25}).status_code == 400
+    assert client.get("/api/collars").json() == {}
+    # Upper case and stray spaces are tidied, as is the name.
+    r = client.post("/api/collars", json={"node_id": " !A1B2C3D4 ", "name": "  Rex \n the  dog "})
+    assert r.status_code == 200 and list(client.get("/api/collars").json()) == ["!a1b2c3d4"]
+    assert client.get("/api/collars").json()["!a1b2c3d4"]["name"] == "Rex the dog"
+    assert client.post("/api/sim", json={"name": "x" * 25, "lat": 40, "lon": -75}).status_code == 400
+
+    link.sent.clear()
+    url = "/api/collars/!a1b2c3d4/command"
+    for body in ({"action": "vibrate", "intensity": 100}, {"action": "vibrate", "intensity": -1},
+                 {"action": "beep", "duration_ms": 0}, {"action": "beep", "duration_ms": 3001},
+                 {"action": "beep", "duration_ms": 70000}, {"action": "nope"}):
+        assert client.post(url, json=body).status_code == 400, body
+    assert link.sent == []
+    assert client.post(url, json={"action": "vibrate", "intensity": 99, "duration_ms": 3000}).status_code == 200
+
+    # Fences that are not the GeoJSON the page sends: a 400 that says so, never a crash.
+    ring = [[-75.0, 40.0], [-74.998, 40.0], [-74.998, 40.002], [-75.0, 40.002], [-75.0, 40.0]]
+    poly = {"type": "Feature", "properties": {}, "geometry": {"type": "Polygon", "coordinates": [ring]}}
+    for bad in ({"type": "FeatureCollection", "features": None},
+                {"type": "FeatureCollection", "features": [None]},
+                {"type": "FeatureCollection", "features": ["x"]},
+                {"type": "FeatureCollection", "features": [{**poly, "geometry": {"type": "Polygon", "coordinates": []}}]},
+                {"type": "FeatureCollection", "features": [{**poly, "geometry": {"type": "Polygon", "coordinates": [[1, 2, 3]]}}]},
+                {"type": "FeatureCollection", "features": [{**poly, "geometry": {"type": "Polygon", "coordinates": [[["a", "b"]] * 4]}}]},
+                {"type": "Feature"}):
+        r = client.put("/api/collars/!a1b2c3d4/fences", json=bad)
+        assert r.status_code == 400 and "invalid fences" in r.json()["detail"], bad
+    assert client.get("/api/collars").json()["!a1b2c3d4"]["fences"] is None
+    assert client.put("/api/collars/!a1b2c3d4/fences", json={"type": "FeatureCollection", "features": [poly]}).status_code == 200
+
+
+def test_a_report_without_a_gps_fix_does_not_extend_the_trail(tmp_path):
+    client, _ = make(tmp_path)
+    client.post("/api/collars", json={"node_id": "!a1b2c3d4", "name": "Rex"})
+    client.app.state.on_status("!a1b2c3d4", GOOD)
+    client.app.state.on_status("!a1b2c3d4", {**GOOD, "no_fix": True})  # the same position, repeated
+    c = client.get("/api/collars").json()["!a1b2c3d4"]
+    assert len(c["track"]) == 1 and c["status"]["no_fix"] is True and c["status"]["lat"] == 40.0
+
+    # The collar restarts indoors: no fix since boot, so it has no position to report. The base
+    # keeps the last one it knew instead of taking the dog off the map.
+    client.app.state.on_status("!a1b2c3d4", {**GOOD, "no_fix": True, "lat": 0.0, "lon": 0.0})
+    c = client.get("/api/collars").json()["!a1b2c3d4"]
+    assert c["status"]["lat"] == 40.0 and c["status"]["lon"] == GOOD["lon"] and len(c["track"]) == 1
+    # A collar this base has never had a position from stays without one.
+    client.post("/api/collars", json={"node_id": "!0000beef", "name": "Biscuit"})
+    client.app.state.on_status("!0000beef", {**GOOD, "no_fix": True, "lat": 0.0, "lon": 0.0})
+    b = client.get("/api/collars").json()["!0000beef"]
+    assert b["status"]["lat"] == 0.0 and b["status"]["lon"] == 0.0 and not b.get("track")
+
+
+def test_a_damaged_data_file_falls_back_to_the_backup(tmp_path, monkeypatch):
+    from geocollar_base import store as store_mod
+
+    s = store_mod.Store(tmp_path)
+    s.upsert_collar("!a1b2c3d4", "Rex")
+    monkeypatch.setattr(store_mod, "BACKUP_EVERY_S", 0)  # back up on the next save
+    s.set_collar_info("!a1b2c3d4", "firmware", "0.16.0")  # the backup holds the file before this save
+    assert (tmp_path / "geocollar.json.bak").exists()
+
+    # A power cut left half a file: the backup is used and the damaged file kept for a look.
+    (tmp_path / "geocollar.json").write_text('{"collars": {"!a1b2')
+    again = store_mod.Store(tmp_path)
+    assert again.collar("!a1b2c3d4")["name"] == "Rex"
+    assert len(list(tmp_path.glob("geocollar.json.damaged-*"))) == 1
+    again.upsert_collar("!0000beef", "Biscuit")  # and saving works again
+    assert set(store_mod.Store(tmp_path).collars()) == {"!a1b2c3d4", "!0000beef"}
+
+    # Valid JSON of the wrong shape, and no backup: a fresh start, not a crash.
+    other = tmp_path / "other"
+    other.mkdir()
+    (other / "geocollar.json").write_text("[1, 2, 3]")
+    assert store_mod.Store(other).collars() == {}
+    # A collar saved by an old version without a trail still takes reports.
+    (other / "geocollar.json").write_text('{"collars": {"!a1b2c3d4": {"name": "Rex"}}}')
+    old = store_mod.Store(other)
+    old.record_status("!a1b2c3d4", {"lat": 40.0, "lon": -75.0})
+    assert len(old.collar("!a1b2c3d4")["track"]) == 1

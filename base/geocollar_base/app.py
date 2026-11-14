@@ -17,8 +17,8 @@ from pathlib import Path
 import asyncio
 from urllib.parse import urlsplit
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -136,6 +136,34 @@ class CommandIn(BaseModel):
     confirm: bool = False  # shock_on must be confirmed by the owner
 
 
+NODE_ID = re.compile(r"![0-9a-f]{8}")  # a Meshtastic node ID as the page and the radio write it
+MAX_CORRECTION_MS = 3000  # the collar firmware's cap on one beep, vibration or shock
+
+
+def clean_name(name: str | None) -> str:
+    """A dog's name as typed: single spaces, nothing unprintable. Raises ValueError if too long."""
+    name = " ".join("".join(ch for ch in (name or "") if ch.isprintable()).split())
+    if len(name.encode()) > protocol.MAX_DOG_NAME:
+        raise ValueError(f"the dog's name is at most {protocol.MAX_DOG_NAME} characters")
+    return name
+
+
+def same_site(headers) -> bool:
+    """Whether a request that changes something comes from this app's own page.
+
+    The page has no login, so a page on another website open in the owner's browser could
+    otherwise post commands to the base behind their back. Browsers name the page a request comes
+    from in the Origin header and do not let a page forge it, so: no Origin (not a browser: curl,
+    an automation) passes; through Home Assistant's ingress (X-Ingress-Path, which a page cannot
+    add) Home Assistant has checked the login; otherwise the Origin must be the address this app
+    was reached on."""
+    origin = headers.get("origin")
+    if origin is None or headers.get("x-ingress-path"):
+        return True
+    host = urlsplit(origin).netloc
+    return bool(host) and host in (headers.get("host"), headers.get("x-forwarded-host"))
+
+
 MAX_PARCELS = 500
 MAX_PARCEL_POINTS = 100_000
 
@@ -211,17 +239,24 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
 
     def push_owner(node_id: str) -> bool:
         o = owner_for(node_id)
+        seq = 0
         if node_id in sim:
             sim.set_owner(node_id, *o)
         elif link.connected:
+            # Numbered, so a recording of it cannot be played back to the collar later; but only
+            # for a collar whose reports say its firmware reads the number (0.16 on). Older
+            # firmware refuses the longer message.
+            if (store.collar(node_id) or {}).get("numbered"):
+                seq = store.next_command_seq()
             try:
-                link.send_owner(node_id, *o)
+                link.send_owner(node_id, *o, seq)
             except Exception as e:  # noqa: BLE001 - retried on the collar's next report
                 log.warning("could not send the owner contact to %s: %s", node_id, e)
                 return False
         else:
             return False
         store.set_collar_info(node_id, "owner_sent", o)
+        store.set_collar_info(node_id, "owner_seq", seq or None)
         return True
 
     def push_config(node_id: str) -> bool:
@@ -230,17 +265,20 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
         report_s = c.get("report_s")
         if not report_s:
             return False
+        seq = 0
         if node_id in sim:
             sim.update(node_id, {"report_s": min(report_s, 600)})
         elif link.connected:
+            seq = store.next_command_seq()  # always numbered: firmware 0.15 skips the number
             try:
-                link.send_config(node_id, report_s)
+                link.send_config(node_id, report_s, seq)
             except Exception as e:  # noqa: BLE001 - retried on the collar's next report
                 log.warning("could not send the report interval to %s: %s", node_id, e)
                 return False
         else:
             return False
         store.set_collar_info(node_id, "config_sent", report_s)
+        store.set_collar_info(node_id, "config_seq", seq or None)
         return True
 
     def on_status(node_id: str, status: dict) -> None:
@@ -261,10 +299,17 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
         if not c.get("public_key"):
             store.set_collar_info(node_id, "public_key", key)
         store.record_status(node_id, status)
+        if node_id in sim:
+            return
+        numbered = bool(status.get("numbered"))
+        if bool(c.get("numbered")) != numbered:
+            store.set_collar_info(node_id, "numbered", numbered or None)
         # A collar that has not got the current name and contact yet gets them when it next reports.
-        if c and node_id not in sim and c.get("owner_sent") != owner_for(node_id):
+        # So does one that reads sequence numbers but last got these without one: until a numbered
+        # message arrives, it would still accept a recording of an old one.
+        if c.get("owner_sent") != owner_for(node_id) or (numbered and not c.get("owner_seq")):
             push_owner(node_id)
-        if c and node_id not in sim and c.get("report_s") and c.get("config_sent") != c["report_s"]:
+        if c.get("report_s") and (c.get("config_sent") != c["report_s"] or (numbered and not c.get("config_seq"))):
             push_config(node_id)
 
     def ask_node_info(node_id: str) -> None:
@@ -393,6 +438,15 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
         link.close()
 
     app = FastAPI(title="GeoCollar base", lifespan=lifespan)
+
+    @app.middleware("http")
+    async def refuse_other_sites(request: Request, call_next):
+        if request.method not in ("GET", "HEAD", "OPTIONS") and not same_site(request.headers):
+            log.warning("refused a %s to %s from another site (%s)", request.method, request.url.path,
+                        request.headers.get("origin"))
+            return JSONResponse({"detail": "This request came from another website and was refused."}, status_code=403)
+        return await call_next(request)
+
     app.state.store = store
     app.state.sim = sim
     app.state.on_status = on_status
@@ -428,10 +482,17 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
 
     @app.post("/api/collars")
     def add_collar(body: CollarIn):
-        c = store.upsert_collar(body.node_id, body.name)
-        push_owner(body.node_id)
+        node_id = body.node_id.strip().lower()
+        if not NODE_ID.fullmatch(node_id):
+            raise HTTPException(400, "a node ID is ! and 8 hex digits, like !a1b2c3d4")
+        try:
+            name = clean_name(body.name)
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from e
+        c = store.upsert_collar(node_id, name or None)
+        push_owner(node_id)
         found = store.setting("discovered", {}) or {}
-        if found.pop(body.node_id, None) is not None:
+        if found.pop(node_id, None) is not None:
             store.set_setting("discovered", found)
         return c
 
@@ -484,11 +545,12 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
                 raise HTTPException(400, f"the report interval is {protocol.MIN_REPORT_S} to "
                                          f"{protocol.MAX_REPORT_S} seconds")
         if body.name is not None:
-            name = " ".join(body.name.split())
+            try:
+                name = clean_name(body.name)
+            except ValueError as e:
+                raise HTTPException(400, str(e)) from e
             if not name:
                 raise HTTPException(400, "give the dog a name")
-            if len(name.encode()) > protocol.MAX_DOG_NAME:
-                raise HTTPException(400, f"the dog's name is at most {protocol.MAX_DOG_NAME} characters")
             store.upsert_collar(node_id, name)
             out["owner_sent"] = push_owner(node_id)
         if body.report_s is not None:
@@ -529,7 +591,8 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
             zones = protocol.zones_from_geojson(geojson)
             pulses = protocol.pulses_from_geojson(geojson)
             protocol.fence_chunks(zones, 1, pulses)  # validate size before storing
-        except (KeyError, ValueError) as e:
+        except (KeyError, ValueError, TypeError, IndexError, AttributeError) as e:
+            # Anything that is not the GeoJSON the page sends: a wrong type or a missing level.
             raise HTTPException(400, f"invalid fences: {e}") from e
         version = store.set_fences(node_id, geojson)
         sent = 0
@@ -555,6 +618,10 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
                 raise HTTPException(400, "turning shock on needs confirmation")
             if not 1 <= body.intensity <= protocol.MAX_SHOCK_LEVEL:
                 raise HTTPException(400, f"shock level must be 1 to {protocol.MAX_SHOCK_LEVEL}")
+        if not 0 <= body.intensity <= 99:
+            raise HTTPException(400, "the level is 0 to 99")
+        if not 1 <= body.duration_ms <= MAX_CORRECTION_MS:
+            raise HTTPException(400, f"the duration is 1 to {MAX_CORRECTION_MS} ms")
         if node_id in sim:
             sim.command(node_id, action, body.intensity)
             if node_id in sim and action in (protocol.CommandAction.SHOCK_ON, protocol.CommandAction.SHOCK_OFF):
@@ -988,9 +1055,13 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
     def add_sim(body: SimIn):
         if not (-90 <= body.lat <= 90 and -180 <= body.lon <= 180):
             raise HTTPException(400, "position out of range")
+        try:
+            name = clean_name(body.name)
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from e
         node_id = "!5a" + secrets.token_hex(3)  # looks like a node ID; 5a = "sim"
         n = 1 + sum(1 for c in store.collars().values() if c.get("sim"))
-        store.upsert_collar(node_id, body.name or f"Simulated dog {n}")
+        store.upsert_collar(node_id, name or f"Simulated dog {n}")
         settings = sim.add(node_id, {"lat": body.lat, "lon": body.lon}).settings()
         push_owner(node_id)
         store.set_sim(node_id, settings)

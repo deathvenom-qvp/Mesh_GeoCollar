@@ -3,6 +3,11 @@
 Draw geofences for your Meshtastic dog collars, send them over the mesh, and watch where each
 dog is. The page opens from the **GeoCollar** entry in the Home Assistant sidebar.
 
+The page has two tabs. **Collars** is the everyday view: the map, the list of collars, the
+selected collar with its commands, its fences, and property lines. **Settings** holds what you
+set up once and seldom touch: the base radio, adding a collar, your contact details for a lost
+dog, and collar firmware.
+
 ## What you need
 
 - A Meshtastic node for the base station (any board running stock Meshtastic), either plugged
@@ -31,13 +36,14 @@ a rack): put the radio by a window or in the attic on Wi-Fi or Ethernet (port 44
 network API, which is on whenever Wi-Fi or Ethernet is enabled). On ESP32 boards, turning on Wi-Fi
 turns off Bluetooth, so you configure the node over the network from then on.
 
-Once connected, click the radio badge at the top of the page (or **Base radio** under it) to see
-the radio's node, firmware, region, preset and channel, and any problem that would stop collars
-working, such as no region set or firmware too old.
+Once connected, click the radio badge at the top of the page (or open the **Settings** tab) to
+see, under **Base radio**, the radio's node, firmware, region, preset and channel, and any problem
+that would stop collars working, such as no region set or firmware too old. A problem with the
+radio also shows at the top of the Collars tab.
 
 ### Changing the base radio's settings
 
-Open **Base radio** and choose **Change settings…** to change the radio's name, region, preset,
+On the **Settings** tab, under **Base radio**, choose **Change settings…** to change the radio's name, region, preset,
 hop limit or primary channel. The base and every collar must share the region, preset and
 channels, or they stop hearing each other, and a collar locked to this base can only be changed by
 the base over the mesh. So when one of those changes, the app:
@@ -83,8 +89,8 @@ connected, and hovering it shows the last error.
 
 ## Pairing a collar
 
-The easy way: plug the new collar into the base machine, open **Collar firmware**, pick **USB on
-base**, type the dog's name, leave **Then set it up for this base** ticked and press **Flash** (or
+The easy way: plug the new collar into the base machine, open the **Settings** tab and, under
+**Collar firmware**, pick **USB on base**, type the dog's name, leave **Then set it up for this base** ticked and press **Flash** (or
 **Set up only** if it already runs GeoCollar). The base learns the collar's node ID from it,
 adds it, puts the base's public key in the collar's admin keys, and copies the base's LoRa
 settings and channels to it.
@@ -98,7 +104,7 @@ up only** and pick the collar.
 
 A collar running GeoCollar that no base has adopted says hello on the mesh every minute for 15
 minutes after it starts, then every 15 minutes. If the base hears it (same LoRa settings and
-primary channel), it shows under Collars as **New**, with an **Add** button. A collar on the base
+primary channel), it shows on the Collars tab as **New**, with an **Add** button. A collar on the base
 that says hello hasn't heard from the base yet; the base answers it, and it starts reporting.
 
 **How to tell it runs GeoCollar.** A freshly installed collar names itself **GeoCollar** and the
@@ -124,8 +130,8 @@ By hand, collars only obey messages from base nodes they trust:
 
 1. In the Meshtastic app, open the base node and copy its **public key** (Settings > Security).
 2. On each collar, paste that key into **Admin key** (Settings > Security) and save.
-3. In GeoCollar, open **Add a collar** and enter the collar's node ID (for example `!a1b2c3d4`,
-   shown in the Meshtastic app's node list).
+3. In GeoCollar, on the **Settings** tab under **Add a collar**, enter the collar's node ID (for
+   example `!a1b2c3d4`, shown in the Meshtastic app's node list).
 
 ## Name and report rate
 
@@ -137,10 +143,50 @@ it shows as the dog in the Meshtastic app and on other nodes. If the collar is o
 gets the change when it next reports. Both need collar firmware from 0.15.0 on; older collars keep
 reporting every 10 minutes and keep their Meshtastic name.
 
+## When a collar has no GPS fix
+
+Indoors, under a metal roof or in a car a collar can lose its GPS fix. It then cannot tell where
+the dog is, so it cannot correct. From collar firmware 0.16.0 on it says so: the collar shows
+**no GPS fix** in the list, its marker turns grey and stays at the last position it had, and its
+panel says "No fix now". The trail on the map only gets points from real fixes. The collar tells
+the base when the fix goes and when it comes back (at most one such report in 5 minutes), and
+reports within about 15 seconds of being switched on.
+
+While a collar with fences has no fix it keeps its GPS searching all the time, so the fence works
+again within about a minute of the dog coming back under open sky. Stock Meshtastic would give up
+after 15 minutes and then look again only every 15 minutes to an hour. On the Heltec Wireless
+Tracker this costs no extra battery, because that board's GPS is powered whenever the collar is on
+(see Battery below).
+
+The collar only ever uses fixes from its own GPS. A position shared with it by a phone running
+the Meshtastic app, or a fixed position set in its Meshtastic settings, is ignored.
+
+## Battery
+
+What uses the collar's battery: the processor and Bluetooth, the GPS, the radio listening for the
+mesh, and the screen's backlight while it is lit.
+
+- **Screen.** The collar's screen turns off 30 seconds after it starts or its button is pressed.
+  Meshtastic's own default is 10 minutes, and every text message on the mesh lights it again, so
+  on a busy public channel the backlight could be on most of the time. A timeout you set yourself
+  in the Meshtastic app is kept.
+- **Reports.** Each report is a radio transmission. Every 10 minutes is a good default; every 30
+  seconds costs noticeably more.
+- **Lost alert.** While a dog is lost the collar reports every 30 seconds and advertises on
+  Bluetooth, which drains it faster. Silence the alert once you have the dog.
+- **GPS.** Deep inside its fences a collar takes a fix about once a minute; near a line it checks
+  every second. On the Heltec Wireless Tracker that saves little: the board has one power switch
+  for the GPS and the screen together, Meshtastic leaves it on, and so the GPS chip runs whenever
+  the collar is on. Meshtastic can be told to switch it (the Position setting **GPS EN GPIO**, 3 on the
+  Tracker V1.1), which turns the GPS off between fixes while the dog is deep inside, and the
+  screen with it. That is untested with GeoCollar: the GPS may need most of a minute to find
+  itself again each time, so try it with the dog on a lead and watch how often fixes arrive
+  before relying on it.
+
 ## If a dog gets lost
 
-Give each collar the dog's name (**Rename** next to the collar's name) and fill in **If a dog
-gets lost** with your name and phone number. The base sends both to every collar.
+Give each collar the dog's name (**Rename** next to the collar's name) and, on the **Settings**
+tab, fill in **If a dog gets lost** with your name and phone number. The base sends both to every collar.
 
 When a dog has been outside its fences for 90 seconds, its collar starts asking for help:
 
@@ -221,8 +267,8 @@ the map if it has no position yet, so centre the map on your property before imp
 
 ## Trying it without a collar
 
-Press **+ Simulated collar** under the collar list to add a pretend collar in the middle of the
-map. Draw and send fences to it as usual, then use the **Simulation** panel: **Place on map**
+Press **+ Simulated collar** (on the **Settings** tab, under Add a collar) to add a pretend
+collar in the middle of the map; the page switches to the Collars tab and selects it. Draw and send fences to it as usual, then use the **Simulation** panel: **Place on map**
 moves it, **Wander** lets it roam, **Walk to point** sends it to a spot you click, and the speed,
 report rate and GPS error are adjustable. It applies the same fence rules as the collar
 firmware, and **What the collar did** lists each beep, vibration, shock and switch to lost mode.
@@ -230,7 +276,7 @@ Commands such as Lost mode work on it too. Remove it like any other collar.
 
 ## Updating collar firmware
 
-Open **Collar firmware** at the bottom of the side panel.
+Open the **Settings** tab; **Collar firmware** is its last section.
 
 1. **Get a build.** *Download latest build* fetches the newest build of the main branch, which
    GitHub Actions publishes as the `firmware-latest` release. *Build from source here* compiles
@@ -242,7 +288,8 @@ Open **Collar firmware** at the bottom of the side panel.
      after plugging it in.
    - **USB on this computer**: plug the collar into the computer you are browsing from. Needs
      Chrome or Edge, and Home Assistant opened over `https://`.
-   - **Wi-Fi**: select the collar, save your Wi-Fi network once, and press *Update over Wi-Fi*.
+   - **Wi-Fi**: pick the collar under **Collar to update** (it starts on the collar selected on
+     the Collars tab), save your Wi-Fi network once, and press *Update over Wi-Fi*.
      The base sends the Wi-Fi details to the collar over the mesh (they stay saved, with the
      collar's own Wi-Fi left off to save battery), restarts it into Meshtastic's update loader,
      finds it on your network and sends the firmware. Put the collar on its charger in Wi-Fi
@@ -271,7 +318,14 @@ set **Network to search for collars being updated** on the Configuration tab, su
   collar keeps the ones it was given until it is reinstalled. Locking also gives the collar a
   random Bluetooth PIN, shown in its panel.
 - Every command carries a sequence number and every fence set a version, and the collar refuses
-  old ones, so recorded radio packets cannot be played back to it.
+  old ones, so recorded radio packets cannot be played back to it. From collar firmware 0.16.0
+  the dog's name, your contact details and the report rate are numbered the same way, and sending
+  the fences a collar already has no longer restarts its shock limits or its lost alert.
+- The collar's hardware switch (if you fitted one) turns off every correction, including a beep,
+  vibration or shock you send from the page.
+- The page has no login of its own. So that another website open in your browser cannot send
+  commands to the base behind your back, the base refuses any change that comes from a page other
+  than its own.
 - The base accepts reports only from collars you added, only PKI-encrypted, and only from the
   public key it first saw from that collar. A report signed with another key is ignored and
   flagged in the collar's panel. After a full install of a collar, set it up again (or remove and
@@ -281,7 +335,9 @@ set **Network to search for collars being updated** on the Configuration tab, su
 
 ## Data and access
 
-Collars, fences and recent positions are kept in the app's `/data` folder and included in Home
-Assistant backups. Through the sidebar the page is behind your Home Assistant login. The
+Collars, fences and recent positions are kept in the app's `/data` folder (`geocollar.json`) and
+included in Home Assistant backups. The app keeps an hourly copy beside it, `geocollar.json.bak`.
+If a power cut damages the data file, the app starts from that copy, keeps the damaged file under
+a `.damaged-` name, and says so in its log. Through the sidebar the page is behind your Home Assistant login. The
 optional port on the **Network** tab opens the page without any login, so leave it empty unless
 you need it and trust your network.

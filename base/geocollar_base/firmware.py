@@ -323,7 +323,15 @@ def build_from_source(job: Job, builds: BuildStore, work: Path, repo: str = DEFA
     job.set_step("Getting the source")
     url = f"https://github.com/{repo}.git"
     if (src / ".git").exists():
-        _run(job, ["git", "-C", str(src), "fetch", "--depth", "1", "origin", ref])
+        # From the repository asked for, also when the copy on disk was cloned from another one.
+        _run(job, ["git", "-C", str(src), "remote", "set-url", "origin", url])
+        # A branch or a tag only: a bare name could also be another ref, such as an unmerged pull
+        # request (refs/pull/N/head), whose build script would then run here.
+        try:
+            _run(job, ["git", "-C", str(src), "fetch", "--depth", "1", "origin", f"refs/heads/{ref}"])
+        except FirmwareError:
+            job.check_cancel()
+            _run(job, ["git", "-C", str(src), "fetch", "--depth", "1", "origin", f"refs/tags/{ref}"])
         _run(job, ["git", "-C", str(src), "reset", "--hard", "FETCH_HEAD"])
     else:
         _run(job, ["git", "clone", "--depth", "1", "--branch", ref, url, str(src)])

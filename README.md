@@ -138,7 +138,11 @@ the map tiles need internet.
 - The lost beacon's Bluetooth advertising is written against Meshtastic's BLE stack and
   untested on hardware.
 - GPS pacing is written and compiles but is untested on hardware, and its settings (5 s, 60 s,
-  15 s, 6 m/s) can't be changed from the base app yet.
+  15 s, 6 m/s) can't be changed from the base app yet. On the Wireless Tracker it changes how
+  often the collar takes a fix, not whether the GPS chip is powered (see `docs/hardware.md`).
+- The firmware changes in 0.16.0 (fixes taken straight from the GPS, the "no GPS fix" report,
+  numbered settings messages, the correction timing) pass the PC tests and compile, and are
+  untested on hardware.
 - Home Assistant entities (device trackers, breach notifications) are not wired up yet; the app
   has its own map for now. The official Meshtastic Home Assistant integration can show nodes
   meanwhile.

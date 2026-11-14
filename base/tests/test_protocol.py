@@ -129,3 +129,34 @@ def test_mesh_names_match_the_firmware():
     assert p.mesh_names("Old Yeller the Dog Star") == ("Old Yeller the Dog Star", "OYTD")
     assert p.mesh_names("Zoë") == ("Zoë", "ZOë")
     assert p.mesh_names("Chloé") == ("Chloé", "CHLO")
+
+
+def test_numbered_owner_and_config_match_the_firmware():
+    # Golden vectors shared with firmware/test/test_main.cpp.
+    plain = p.encode_owner("Rex", "Ken", "5551234567")
+    assert plain.hex() == "0205" "03526578" "034b656e" "0a35353531323334353637"
+    assert p.decode_owner_seq(plain) == 0
+    numbered = p.encode_owner("Rex", "Ken", "5551234567", 1763085600)
+    assert numbered.hex() == plain.hex() + "208d1669"
+    assert p.decode_owner(numbered) == ("Rex", "Ken", "5551234567") and p.decode_owner_seq(numbered) == 1763085600
+    for bad in (numbered[:-1], numbered + b"\0", plain[:-1]):
+        with pytest.raises(ValueError):
+            p.decode_owner(bad)
+
+    assert p.encode_config(300).hex() == "02072c01"
+    assert p.encode_config(300, 1763085600).hex() == "02072c01208d1669"
+    assert p.decode_config(p.encode_config(300, 1763085600)) == 300
+    assert p.decode_config_seq(p.encode_config(300, 1763085600)) == 1763085600
+    assert p.decode_config_seq(p.encode_config(300)) == 0
+
+
+def test_status_fix_and_firmware_flags():
+    s = p.Status(p.MsgType.STATUS, 3, p.CollarState.INSIDE, 80, 40.0, -75.0, 1.0, 9, 40, True, False,
+                 no_fix=True, numbered=True)
+    raw = p.encode_status(s)
+    assert raw[-1] == 0x01 | 0x10 | 0x20
+    back = p.decode_status(raw)
+    assert back.no_fix and back.numbered and not back.beacon_active
+    # Firmware before 0.16 sets neither bit.
+    old = p.decode_status(raw[:-1] + bytes([0x03]))
+    assert not old.no_fix and not old.numbered and old.shock_enabled

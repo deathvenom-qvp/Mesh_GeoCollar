@@ -40,11 +40,32 @@
   }
   * { box-sizing: border-box; }
   html, body { height: 100%; }
+  /* Two pages share one header: "Collars" is the sidebar with the map beside it, "Settings"
+     (body.settings) takes the whole width and has no map. */
   body { margin: 0; font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; background: var(--bg); color: var(--fg);
-         display: grid; grid-template-columns: 360px 1fr; }
-  aside { border-right: 1px solid var(--line); overflow-y: auto; height: 100vh; }
-  main { position: relative; height: 100vh; }
+         display: grid; grid-template-columns: 360px minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr);
+         grid-template-areas: "top map" "side map"; }
+  body.settings { grid-template-columns: minmax(0, 1fr); grid-template-areas: "top" "settings"; }
+  #top { grid-area: top; padding: 12px 16px 0; border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+  #top > * { max-width: 328px; } /* the sidebar's width, so the header does not move between the two pages */
+  aside { grid-area: side; border-right: 1px solid var(--line); overflow-y: auto; min-height: 0; }
+  main { grid-area: map; position: relative; min-height: 0; }
   #map { position: absolute; inset: 0; }
+  #viewSettings { grid-area: settings; overflow-y: auto; min-height: 0; background: var(--panel); }
+  body.settings #top { border-right: 0; }
+  body.settings aside, body.settings main, body:not(.settings) #viewSettings { display: none; }
+  .tabs { display: flex; gap: 4px; margin-top: 10px; }
+  .tabs button { flex: 1; border: 0; border-bottom: 3px solid transparent; border-radius: 0; background: none; padding: 7px 6px;
+                 font-weight: 600; color: var(--muted); }
+  .tabs button:hover:not(:disabled) { color: var(--fg); border-color: transparent transparent var(--line); }
+  .tabs button[aria-selected="true"], .tabs button[aria-selected="true"]:hover { color: var(--accent); border-color: transparent transparent var(--accent); }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; padding: 16px; max-width: 1180px; align-items: start; }
+  .cards > section { border: 1px solid var(--line); border-radius: 10px; background: var(--bg); min-width: 0; }
+  .cards > .wide { grid-column: 1 / -1; }
+  .cards > .credits { border: 0; background: none; padding: 0 2px; }
+  .fwcols { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px 28px; align-items: start; }
+  .fwcols > div { min-width: 0; }
+  #radioAlert .callout { margin-top: 0; }
   section { padding: 14px 16px; border-bottom: 1px solid var(--line); }
   h1 { font-size: 18px; margin: 0; }
   h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 0 0 8px; font-weight: 600; }
@@ -118,7 +139,6 @@
   .rename label.field { flex-basis: 100%; }
   .rename label.field input { width: 100%; }
   .rename[hidden], .row[hidden] { display: none; }
-  #radioBox summary { cursor: pointer; font-size: 12px; margin-top: 6px; }
   button.pill { cursor: pointer; font-family: inherit; background: none; }
   #radioInfo .stats { margin-top: 4px; }
   #radioInfo ol { margin: 6px 0 0 18px; padding: 0; font-size: 13px; }
@@ -202,108 +222,45 @@
   .leaflet-container { background: var(--panel); font: inherit; }
 
   @media (max-width: 760px) {
-    body { grid-template-columns: 1fr; grid-template-rows: 58vh auto; }
-    main { height: 58vh; order: -1; }
-    aside { height: auto; border-right: 0; }
+    html, body { height: auto; min-height: 100%; }
+    body { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto 58vh auto; grid-template-areas: "top" "map" "side"; }
+    body.settings { grid-template-rows: auto auto; }
+    #top { border-right: 0; }
+    #top > * { max-width: none; }
+    main { height: 58vh; }
+    aside { overflow: visible; border-right: 0; }
+    #viewSettings { overflow: visible; }
+    .cards { padding: 12px; gap: 12px; }
     .banner { max-width: calc(100% - 24px); top: auto; bottom: 12px; flex-wrap: wrap; justify-content: center; }
   }
 </style>
 </head>
 <body>
-<aside>
-  <section>
-    <div class="row spread">
-      <h1>GeoCollar</h1>
-      <div class="row" style="gap:8px">
+<header id="top">
+  <div class="row spread">
+    <h1>GeoCollar</h1>
+    <div class="row" style="gap:8px">
         <div class="segmented" id="unitPick" role="group" aria-label="Units">
           <button type="button" data-u="m">m</button>
           <button type="button" data-u="ft">ft</button>
         </div>
-        <button type="button" class="pill" id="health" title="Base radio details">Checking radio…</button>
-      </div>
+      <button type="button" class="pill" id="health" title="Base radio details, in Settings">Checking radio…</button>
     </div>
-    <details id="radioBox">
-      <summary class="muted">Base radio</summary>
-      <div id="radioInfo" style="margin-top:6px"></div>
-      <form id="radioEdit" class="radioedit" hidden></form>
-      <div id="radioJob"></div>
-    </details>
-  </section>
+  </div>
+  <div class="tabs" role="tablist" aria-label="Pages">
+    <button type="button" role="tab" id="tabCollars" data-tab="collars" aria-controls="viewCollars" aria-selected="true">Collars</button>
+    <button type="button" role="tab" id="tabSettings" data-tab="settings" aria-controls="viewSettings" aria-selected="false" tabindex="-1">Settings</button>
+  </div>
+</header>
 
+<!-- Collars tab: the collars, the selected collar's fences and commands, and (in <main>) the map. -->
+<aside id="viewCollars" role="tabpanel" aria-labelledby="tabCollars">
+  <div id="radioAlert"></div>
   <section>
     <h2>Collars</h2>
     <div id="collars"></div>
     <div id="newCollars"></div>
-    <details id="addBox">
-      <summary>Add a collar</summary>
-      <form id="addForm" style="margin-top:8px">
-        <label class="field">Meshtastic node ID <input id="newId" placeholder="!a1b2c3d4" required pattern="!?[0-9a-fA-F]{8}"></label>
-        <label class="field" style="margin-top:6px">Dog's name <input id="newName" placeholder="Rex" maxlength="24"></label>
-        <button class="primary" style="margin-top:8px">Add collar</button>
-        <div class="muted" id="addMsg" role="status"></div>
-      </form>
-      <div class="muted" style="margin-top:8px">Easier: flash or set up the collar under <b>Collar firmware</b> and it is added
-        by itself, or turn it on near the base and it shows up above as a new collar.</div>
-      <div id="baseKey" style="margin-top:6px"></div>
-    </details>
-    <div class="row spread" style="margin-top:8px">
-      <span class="muted">No hardware yet?</span>
-      <button id="addSim" title="Add a pretend collar that follows the collar firmware's fence rules">+ Simulated collar</button>
-    </div>
-  </section>
-
-  <section id="contactBox">
-    <h2>If a dog gets lost</h2>
-    <div class="muted">When a dog has been outside its fences for 90 s, its collar asks for help. It shows up on
-      Bluetooth as "<span id="contactPreview">Rex is lost 5551234567</span>" (90 s on, 90 s off, to save battery) and
-      every 5 minutes posts a plain text message on the public Meshtastic channel asking people to call you.
-      It stops when the dog is back inside, or when you silence it.</div>
-    <form id="contactForm">
-      <div class="contact">
-        <label class="field">Your name <input id="contactName" maxlength="24" autocomplete="name" placeholder="Sam"></label>
-        <label class="field">Phone <input id="contactPhone" maxlength="20" type="tel" autocomplete="tel" placeholder="555 123 4567"
-          pattern="[0-9+\-.() ]*" title="Digits, spaces and + - . ( ) only"></label>
-      </div>
-      <div class="row" style="margin-top:8px;gap:8px"><button class="primary" id="contactSave">Save and send to collars</button>
-        <span class="muted" id="contactMsg" role="status"></span></div>
-    </form>
-  </section>
-
-  <section id="parcelBox">
-    <div class="row spread"><h2 style="margin:0">Property lines</h2>
-      <label class="row muted" style="gap:5px"><input type="checkbox" id="parcelShow" checked> Show</label></div>
-    <div class="muted" style="margin-top:6px">Import your parcel from your county's GIS or tax map site as GeoJSON, KML, or a
-      shapefile (the .zip, or the .shp, .dbf and .prj files together). Click parcels on the map to select them, then make
-      a keep-in zone from their outline, set back from the property line by as much as you like.
-      Tax-map lines are often 1 to 5 m (3 to 16 ft) off, so check them against the satellite view.</div>
-    <div class="psel" id="parcelSel" hidden>
-      <div class="row spread"><b id="parcelSelTitle"></b><button class="link" id="parcelSelClear">Clear selection</button></div>
-      <ul id="parcelSelList"></ul>
-      <div class="muted">Set the perimeter back from the property line</div>
-      <div style="margin:4px 0 8px">
-        <div class="segmented" id="parcelMode" role="group" aria-label="Set-back">
-          <button type="button" data-mode="same" aria-pressed="true">Same all round</button>
-          <button type="button" data-mode="sides" aria-pressed="false">Each side</button>
-        </div>
-      </div>
-      <div class="offset" id="parcelSame">
-        <label class="field">Set-back
-          <input type="range" id="parcelOffsetRange" min="-10" max="30" step="0.5" value="3" aria-label="Set-back"></label>
-        <label class="field"><span class="unitName">Metres</span> <input type="number" id="parcelOffset" min="-10" max="30" step="0.5" value="3"></label>
-      </div>
-      <div class="sides" id="parcelSides" hidden></div>
-      <div class="muted" id="parcelOffsetNote" style="margin-top:4px"></div>
-      <div class="actions" style="margin-top:8px">
-        <button class="primary" id="parcelMake">Make keep-in zone</button>
-        <button class="link" id="parcelRemoveSel">Remove selected parcels</button>
-      </div>
-    </div>
-    <div class="actions" style="margin-top:8px">
-      <button id="parcelImport">Import file…</button>
-      <button class="link" id="parcelClear" hidden>Remove all</button>
-    </div>
-    <input type="file" id="parcelFile" multiple hidden accept=".geojson,.json,.kml,.zip,.shp,.dbf,.prj,.cpg">
-    <div class="muted" id="parcelMsg" role="status" style="margin-top:6px"></div>
+    <div class="muted" id="collarMsg" role="status"></div>
   </section>
 
   <div id="selectedBox" hidden>
@@ -416,10 +373,108 @@
     </section>
   </div>
 
-  <section id="fwBox">
-    <details id="fwDetails">
-      <summary><h2 style="display:inline">Collar firmware</h2></summary>
-      <div class="muted" style="margin-top:6px">Get a firmware build, then flash it to a collar. The first install has to be over USB;
+  <section id="parcelBox">
+    <details id="parcelDetails">
+    <summary><h2 style="display:inline">Property lines</h2></summary>
+    <div class="muted" style="margin-top:6px">Import your parcel from your county's GIS or tax map site as GeoJSON, KML, or a
+      shapefile (the .zip, or the .shp, .dbf and .prj files together). Click parcels on the map to select them, then make
+      a keep-in zone from their outline, set back from the property line by as much as you like.
+      Tax-map lines are often 1 to 5 m (3 to 16 ft) off, so check them against the satellite view.</div>
+    <div class="psel" id="parcelSel" hidden>
+      <div class="row spread"><b id="parcelSelTitle"></b><button class="link" id="parcelSelClear">Clear selection</button></div>
+      <ul id="parcelSelList"></ul>
+      <div class="muted">Set the perimeter back from the property line</div>
+      <div style="margin:4px 0 8px">
+        <div class="segmented" id="parcelMode" role="group" aria-label="Set-back">
+          <button type="button" data-mode="same" aria-pressed="true">Same all round</button>
+          <button type="button" data-mode="sides" aria-pressed="false">Each side</button>
+        </div>
+      </div>
+      <div class="offset" id="parcelSame">
+        <label class="field">Set-back
+          <input type="range" id="parcelOffsetRange" min="-10" max="30" step="0.5" value="3" aria-label="Set-back"></label>
+        <label class="field"><span class="unitName">Metres</span> <input type="number" id="parcelOffset" min="-10" max="30" step="0.5" value="3"></label>
+      </div>
+      <div class="sides" id="parcelSides" hidden></div>
+      <div class="muted" id="parcelOffsetNote" style="margin-top:4px"></div>
+      <div class="actions" style="margin-top:8px">
+        <button class="primary" id="parcelMake">Make keep-in zone</button>
+        <button class="link" id="parcelRemoveSel">Remove selected parcels</button>
+      </div>
+    </div>
+    <div class="row spread" style="margin-top:8px">
+      <div class="actions">
+        <button id="parcelImport">Import file…</button>
+        <button class="link" id="parcelClear" hidden>Remove all</button>
+      </div>
+      <label class="row muted" style="gap:5px"><input type="checkbox" id="parcelShow" checked> Show on the map</label>
+    </div>
+    <input type="file" id="parcelFile" multiple hidden accept=".geojson,.json,.kml,.zip,.shp,.dbf,.prj,.cpg">
+    <div class="muted" id="parcelMsg" role="status" style="margin-top:6px"></div>
+    </details>
+  </section>
+</aside>
+
+<main>
+  <div id="map"></div>
+  <div class="banner" id="banner" hidden>
+    <span id="bannerText"></span>
+    <button class="primary" id="finishDraw">Finish</button>
+    <button id="cancelDraw">Cancel</button>
+  </div>
+</main>
+
+<!-- Settings tab: the base radio, adding collars, the owner's contact and collar firmware. -->
+<div id="viewSettings" role="tabpanel" aria-labelledby="tabSettings" hidden>
+  <div class="cards">
+  <section id="radioBox">
+    <h2>Base radio</h2>
+    <div id="radioInfo"><span class="muted">Checking the radio…</span></div>
+    <form id="radioEdit" class="radioedit" hidden></form>
+    <div id="radioJob"></div>
+    <div class="muted" id="radioMsg" role="status"></div>
+  </section>
+
+  <section id="addBox">
+    <h2>Add a collar</h2>
+    <div class="muted">Easiest: flash or set up the collar under <b>Collar firmware</b> below and it is added by itself,
+      or turn it on near the base and it shows up on the Collars tab as a new collar. You can also add one by its
+      Meshtastic node ID:</div>
+    <form id="addForm" style="margin-top:8px">
+        <label class="field">Meshtastic node ID <input id="newId" placeholder="!a1b2c3d4" required pattern="!?[0-9a-fA-F]{8}"></label>
+        <label class="field" style="margin-top:6px">Dog's name <input id="newName" placeholder="Rex" maxlength="24"></label>
+        <button class="primary" style="margin-top:8px">Add collar</button>
+        <div class="muted" id="addMsg" role="status"></div>
+    </form>
+    <div id="baseKey" style="margin-top:10px"></div>
+    <div class="row spread" style="margin-top:12px">
+      <span class="muted">No hardware yet?</span>
+      <button id="addSim" title="Add a pretend collar that follows the collar firmware's fence rules">+ Simulated collar</button>
+    </div>
+  </section>
+
+  <section id="contactBox">
+    <h2>If a dog gets lost</h2>
+    <div class="muted">When a dog has been outside its fences for 90 s, its collar asks for help. It shows up on
+      Bluetooth as "<span id="contactPreview">Rex is lost 5551234567</span>" (90 s on, 90 s off, to save battery) and
+      every 5 minutes posts a plain text message on the public Meshtastic channel asking people to call you.
+      It stops when the dog is back inside, or when you silence it.</div>
+    <form id="contactForm">
+      <div class="contact">
+        <label class="field">Your name <input id="contactName" maxlength="24" autocomplete="name" placeholder="Sam"></label>
+        <label class="field">Phone <input id="contactPhone" maxlength="20" type="tel" autocomplete="tel" placeholder="555 123 4567"
+          pattern="[0-9+\-.\(\) ]*" title="Digits, spaces and + - . ( ) only"></label>
+      </div>
+      <div class="row" style="margin-top:8px;gap:8px"><button class="primary" id="contactSave">Save and send to collars</button>
+        <span class="muted" id="contactMsg" role="status"></span></div>
+    </form>
+  </section>
+
+  <section id="fwBox" class="wide">
+    <h2>Collar firmware</h2>
+    <div class="fwcols">
+    <div>
+      <div class="muted">Get a firmware build, then flash it to a collar. The first install has to be over USB;
         after that a collar can be updated over Wi-Fi while it sits on its charger.</div>
       <ul class="builds" id="fwBuilds"></ul>
       <div class="actions">
@@ -427,8 +482,9 @@
         <button id="fwBuild" title="Compile on this machine. Slow, and needs about 3 GB of disk">Build from source here</button>
       </div>
       <div id="fwJob"></div>
-
-      <h2 style="margin-top:14px">Flash</h2>
+    </div>
+    <div>
+      <h2>Flash a collar</h2>
       <div class="segmented" id="fwMethod" role="group" aria-label="How to flash">
         <button type="button" data-m="wifi">Wi-Fi</button>
         <button type="button" data-m="usb">USB on base</button>
@@ -436,7 +492,8 @@
       </div>
 
       <div id="fwWifi" class="fwgrid">
-        <div class="wide muted">Updates the selected collar over your home Wi-Fi. The base asks the collar over the mesh to restart into
+        <label class="field wide">Collar to update <select id="fwOtaCollar"></select></label>
+        <div class="wide muted">Updates the collar over your home Wi-Fi. The base asks the collar over the mesh to restart into
           Meshtastic's update loader, which joins the Wi-Fi network below and takes the new firmware. Put the collar on its charger
           within Wi-Fi range first: it does not enforce fences while it updates (usually 2 to 5 minutes).</div>
         <label class="field">Wi-Fi network <input id="fwSsid" autocomplete="off" maxlength="32"></label>
@@ -478,22 +535,15 @@
           And lock it to this base: no other base, phone or computer can change its settings. Undoing this needs a full install, which erases it.</label>
       </div>
       <div class="muted" id="fwMsg" role="status" style="margin-top:6px"></div>
-    </details>
+    </div>
+    </div>
   </section>
 
-  <section class="muted">Built on <a href="https://meshtastic.org">Meshtastic</a>. Collar protocol by <a href="https://openshock.org">OpenShock</a>.
+  <section class="muted wide credits">Built on <a href="https://meshtastic.org">Meshtastic</a>. Collar protocol by <a href="https://openshock.org">OpenShock</a>.
     Maps by <a href="https://leafletjs.com">Leaflet</a> and <a href="https://geoman.io">Geoman</a>.
     Flashing by <a href="https://github.com/espressif/esptool">esptool</a> and Meshtastic's <a href="https://github.com/meshtastic/esp32-unified-ota">OTA loader</a>.</section>
-</aside>
-
-<main>
-  <div id="map"></div>
-  <div class="banner" id="banner" hidden>
-    <span id="bannerText"></span>
-    <button class="primary" id="finishDraw">Finish</button>
-    <button id="cancelDraw">Cancel</button>
   </div>
-</main>
+</div>
 
 <script src="static/vendor/leaflet/leaflet.js"></script>
 <script src="static/vendor/geoman/leaflet-geoman.min.js"></script>
@@ -531,6 +581,10 @@ const el = (tag, attrs = {}, ...kids) => {
 const api = (path, opts = {}) => fetch('api/' + path, { headers: { 'Content-Type': 'application/json' }, ...opts })
   .then(async r => { const b = await r.json().catch(() => ({})); if (!r.ok) throw new Error(b.detail || r.statusText); return b; });
 const say = t => { $('msg').textContent = t; };
+// Messages on the Settings page, and under the collar list (the line above sits in the selected
+// collar's panel, which is not always showing).
+const radioSay = t => { $('radioMsg').textContent = t; };
+const collarSay = t => { $('collarMsg').textContent = t; };
 // How often a collar reports. 10 min is the firmware's default.
 const REPORT_CHOICES = [30, 60, 120, 300, 600, 900, 1800, 3600];
 const reportLabel = s => s < 60 ? `${s} s` : s < 3600 ? `${s / 60} min` : `${s / 3600} h`;
@@ -1038,7 +1092,8 @@ function renderCollars() {
   const box = $('collars');
   box.replaceChildren();
   const ids = Object.keys(collars);
-  if (!ids.length) box.append(el('div', { class: 'empty' }, 'No collars yet. Flash or set one up under Collar firmware, turn one on near the base, or add it by its Meshtastic node ID below.'));
+  if (!ids.length) box.append(el('div', { class: 'empty' }, 'No collars yet. Turn one on near the base and it shows up here, or flash, set up or add one in Settings.',
+    el('div', { style: 'margin-top:8px' }, el('button', { type: 'button', onclick: () => showTab('settings', 'addBox') }, 'Open Settings'))));
   const now = Date.now() / 1000;
   for (const id of ids) {
     const c = collars[id], s = c.status;
@@ -1048,7 +1103,8 @@ function renderCollars() {
     if (s) {
       bits.push(ago(now - s.received));
       if (s.battery_pct != null && s.battery_pct !== 255) bits.push(`battery ${s.battery_pct}%`);
-      if (s.clearance_m != null && c.fence_version) bits.push(`${len(Math.abs(s.clearance_m))} ${s.clearance_m < 0 ? 'past' : 'from'} the line`);
+      if (s.clearance_m != null && c.fence_version && !s.no_fix) bits.push(`${len(Math.abs(s.clearance_m))} ${s.clearance_m < 0 ? 'past' : 'from'} the line`);
+      if (s.no_fix) bits.push('no GPS fix');
       if (s.beacon_active) bits.unshift('asking for help');
     }
     box.append(el('div', { class: 'collar' + (id === selected ? ' selected' : ''), onclick: () => select(id), role: 'button', tabindex: 0,
@@ -1067,12 +1123,12 @@ function renderDogs() {
   for (const [id, c] of Object.entries(collars)) {
     const s = c.status;
     if (!s || !(s.lat || s.lon)) continue;
-    const stale = now - s.received > STALE_S;
+    const stale = now - s.received > STALE_S || s.no_fix; // greyed: not where the dog is known to be now
     const icon = L.divIcon({ className: '', iconSize: [22, 22], iconAnchor: [11, 11],
       html: `<div class="dog st-${s.state}${stale ? ' stale' : ''}" style="--c:${css({ INSIDE: '--ok', WARNING: '--warn', OUTSIDE: '--bad', LOST: '--bad' }[s.state] || '--idle')}"><div class="pin"></div><div class="label"></div></div>` });
     const m = L.marker([s.lat, s.lon], { icon, pmIgnore: true, snapIgnore: true, zIndexOffset: id === selected ? 1000 : 500, title: c.name, keyboard: false });
     m.on('add', () => { const lab = m.getElement() && m.getElement().querySelector('.label'); if (lab) lab.textContent = c.name; });
-    m.bindTooltip(`${stateLabel(s.state)} · ${ago(now - s.received)}${s.sats ? ` · ${s.sats} sats` : ''}`, { direction: 'bottom', offset: [0, 12] });
+    m.bindTooltip(`${stateLabel(s.state)} · ${ago(now - s.received)}${s.no_fix ? ' · no GPS fix, last known position' : s.sats ? ` · ${s.sats} sats` : ''}`, { direction: 'bottom', offset: [0, 12] });
     m.on('click', e => { L.DomEvent.stopPropagation(e); select(id); });
     m.addTo(dogLayer);
     if (id === selected && c.sim && c.sim.mode === 'goto' && c.sim.target) {
@@ -1100,7 +1156,9 @@ function renderSelected() {
   if (s) {
     rows.push(['State', stateLabel(s.state)], ['Last report', ago(Date.now() / 1000 - s.received)]);
     if (s.battery_pct != null && s.battery_pct !== 255) rows.push(['Battery', `${s.battery_pct}%`]);
-    if (s.sats) rows.push(['GPS', `${s.sats} sats, PDOP ${s.pdop}`]);
+    // Collar firmware 0.16 on says when it has no current fix; its position is then the last one it knew.
+    if (s.no_fix) rows.push(['GPS', s.lat || s.lon ? 'No fix now: the map shows where it last had one' : 'No fix yet']);
+    else if (s.sats) rows.push(['GPS', `${s.sats} sats, PDOP ${s.pdop}`]);
     rows.push(['Corrections', s.corrections_enabled ? 'On' : 'Off']);
     rows.push(['Lost alert', s.beacon_active ? 'On: Bluetooth and mesh' : s.beacon_silenced ? 'Silenced until back inside' : 'Off']);
   } else if (c.hello) {
@@ -1147,8 +1205,9 @@ function renderNewCollars() {
     const add = async () => {
       try {
         await api('collars', { method: 'POST', body: JSON.stringify({ node_id: id, name: input.value.trim() || null }) });
+        collarSay('');
         delete discovered[id]; await refresh(); select(id);
-      } catch (e) { say(e.message); }
+      } catch (e) { collarSay('Could not add the collar: ' + e.message); }
     };
     const dismiss = async () => { await api(`discovered/${encodeURIComponent(id)}`, { method: 'DELETE' }).catch(() => {}); delete discovered[id]; renderNewCollars(); };
     const bits = [d.long_name || id, ago(now - d.seen)];
@@ -1159,7 +1218,7 @@ function renderNewCollars() {
         el('button', { class: 'link', onclick: dismiss }, 'Not mine')),
       el('div', { class: 'muted' }, bits.join(' · ')),
       el('div', { class: 'row', style: 'gap:6px;margin-top:6px' }, input, el('button', { class: 'primary', onclick: add }, 'Add')),
-      d.has_admin_key ? null : el('div', { class: 'callout' }, 'This collar does not trust any base yet. After adding it, plug it into the base or this computer and use "Set up only" under Collar firmware, or paste the base key (under "Add a collar") into its Admin key in the Meshtastic app.'));
+      d.has_admin_key ? null : el('div', { class: 'callout' }, 'This collar does not trust any base yet. After adding it, plug it into the base or this computer and use "Set up only" in Settings, under Collar firmware; or paste the base key (in Settings, under Add a collar) into its Admin key in the Meshtastic app.'));
   });
   $('newCollars').replaceChildren(...items);
 }
@@ -1167,7 +1226,7 @@ function renderBaseKey() {
   $('baseKey').replaceChildren(...(baseInfo.public_key ? [
     el('div', { class: 'muted' }, "This base's public key, for each collar's Admin key in the Meshtastic app (Settings > Security):"),
     el('div', { class: 'row', style: 'gap:6px' }, el('code', { style: 'word-break:break-all;font-size:11px' }, baseInfo.public_key),
-      el('button', { class: 'link', onclick: () => navigator.clipboard?.writeText(baseInfo.public_key).then(() => say('Copied the base key.')) }, 'Copy')),
+      el('button', { class: 'link', onclick: () => navigator.clipboard?.writeText(baseInfo.public_key).then(() => { $('addMsg').textContent = 'Copied the base key.'; }) }, 'Copy')),
   ] : []));
 }
 async function loadDiscovery() {
@@ -1191,14 +1250,14 @@ function renderRadio() {
       el('ol', {},
         el('li', {}, 'Plug it into this machine by USB (best), or put it on your network with Wi-Fi or Ethernet.'),
         el('li', {}, 'In Home Assistant open this app\'s Configuration tab and pick the USB device, or type the node\'s IP address.'),
-        el('li', {}, 'Save and restart the app. This badge turns green when it connects.')));
-    $('radioBox').open = true;
+        el('li', {}, 'Save and restart the app. The badge at the top turns green when it connects.')));
+    radioAlert('No base radio is set up, so the base cannot reach any collar.');
     return;
   }
   if (!h.mesh_connected) {
     box.replaceChildren(el('div', { class: 'callout bad' }, `Not connected. Retrying every 30 s. ${h.mesh_error || ''}`),
       el('div', { class: 'muted', style: 'margin-top:6px' }, 'Check the cable or IP address. Only one program can use the radio at a time, so close the Meshtastic app or other integrations connected to it.'));
-    $('radioBox').open = true;
+    radioAlert('The base radio is not connected, so the base cannot reach any collar.');
     return;
   }
   const rows = [['Node', `${b.long_name || ''} ${b.node_id || ''}`.trim()], ['Connected by', b.connection], ['Board', b.hw_model],
@@ -1214,7 +1273,14 @@ function renderRadio() {
     el('div', { class: 'muted', style: 'margin-top:6px' }, 'Collars must use the same region, preset and primary channel. "Set up only" under Collar firmware copies them to a collar over USB.'),
     ...($('radioEdit').hidden && !b.radio_pending ? [el('div', { class: 'actions', style: 'margin-top:6px' },
       el('button', { type: 'button', onclick: openRadioEdit }, 'Change settings…'))] : []));
-  if ((b.issues || []).length) $('radioBox').open = true;
+  radioAlert(b.radio_pending ? 'The collars moved to new radio settings, but the base radio did not take them, so it cannot hear them.'
+    : (b.issues || []).length ? b.issues[0] : '');
+}
+// The base radio's details are on the Settings tab. Anything that stops collars working is also
+// said in one line at the top of the Collars tab.
+function radioAlert(text) {
+  $('radioAlert').replaceChildren(...(text ? [el('section', {}, el('div', { class: 'callout bad' }, text, ' ',
+    el('button', { type: 'button', class: 'link', onclick: () => showTab('settings', 'radioBox') }, 'Open the base radio settings')))] : []));
 }
 
 // Changing the base radio's settings. Region, preset and channels must match on every collar, and
@@ -1223,7 +1289,8 @@ function renderRadio() {
 let radioCur = null, radioJobId = null, radioJobLog = [], radioJobTimer = null;
 async function openRadioEdit() {
   let r;
-  try { r = await api('base/settings'); } catch (e) { say(e.message); return; }
+  radioSay('');
+  try { r = await api('base/settings'); } catch (e) { radioSay(e.message); return; }
   radioCur = r;
   const s = r.settings, f = $('radioEdit');
   const sel = (id, opts, val) => el('select', { id }, ...opts.map(o => el('option', { value: o, selected: o === val }, o.replace(/_/g, ' '))));
@@ -1256,7 +1323,8 @@ async function openRadioEdit() {
   renderRadio();
 }
 async function finishRadio() {
-  try { const j = await api('base/settings/finish', { method: 'POST' }); watchRadioJob(j.id); } catch (e) { say(e.message); }
+  radioSay('');
+  try { const j = await api('base/settings/finish', { method: 'POST' }); watchRadioJob(j.id); } catch (e) { radioSay(e.message); }
 }
 function closeRadioEdit() { $('radioEdit').hidden = true; radioCur = null; renderRadio(); }
 
@@ -1310,7 +1378,6 @@ $('radioEdit').onsubmit = async e => {
 function watchRadioJob(id) {
   radioJobId = id; radioJobLog = [];
   clearTimeout(radioJobTimer);
-  $('radioBox').open = true;
   const tick = async () => {
     let j;
     try { j = await api(`firmware/jobs/${id}?since=${radioJobLog.length}`); } catch { radioJobTimer = setTimeout(tick, 3000); return; }
@@ -1321,7 +1388,7 @@ function watchRadioJob(id) {
   };
   tick();
 }
-$('health').onclick = () => { $('radioBox').open = !$('radioBox').open; };
+$('health').onclick = () => showTab('settings', 'radioBox');
 
 // Shock: off by default on every collar; the owner turns it on here, after confirming.
 function renderShock(c) {
@@ -1383,9 +1450,9 @@ function renderBeacon(c) {
     const h = c.hello;
     parts.push(el('div', { class: 'callout beacon' }, !h
       ? (c.locked ? `Not heard from ${c.name} since it was set up. Check that it is on and near the base: after it starts it says hello every minute for 15 minutes, and the base answers.`
-        : `Not heard from ${c.name} yet. A collar can only talk to the base once it is set up for it (region, channels and the base's key); a freshly installed one can't transmit at all. Plug it into the base or this computer and use "Set up only" under Collar firmware.`)
-      : !h.has_admin_key ? `${c.name} is on the air but does not trust this base yet, so it ignores it. Plug it into the base or this computer and use "Set up only" under Collar firmware.`
-      : `${c.name} is on the air and the base has answered. It reports once it gets the answer. If it keeps saying hello, plug it into the base or this computer and use "Set up only" under Collar firmware: that gives the base's radio its key (or sets it up for this base, if it trusts another).`));
+        : `Not heard from ${c.name} yet. A collar can only talk to the base once it is set up for it (region, channels and the base's key); a freshly installed one can't transmit at all. Plug it into the base or this computer and use "Set up only" in Settings, under Collar firmware.`)
+      : !h.has_admin_key ? `${c.name} is on the air but does not trust this base yet, so it ignores it. Plug it into the base or this computer and use "Set up only" in Settings, under Collar firmware.`
+      : `${c.name} is on the air and the base has answered. It reports once it gets the answer. If it keeps saying hello, plug it into the base or this computer and use "Set up only" in Settings, under Collar firmware: that gives the base's radio its key (or sets it up for this base, if it trusts another).`));
   }
   const se = c.send_error;
   if (se && !c.sim && (!s || se.at > (s.received || 0))) {
@@ -1402,7 +1469,7 @@ function renderBeacon(c) {
   if (rc && rc.moved) parts.push(el('div', { class: 'callout beacon' },
     `Moved to the base radio's new settings ${ago(Date.now() / 1000 - rc.at)}. Waiting for its first report on them.`));
   else if (rc) parts.push(el('div', { class: 'callout bad beacon' },
-    `${c.name} missed the base radio's change ${ago(Date.now() / 1000 - rc.at)}, so it can't hear the base. Plug it into the base or this computer and use "Set up only" under Collar firmware (a full install first if it is locked to this base).`));
+    `${c.name} missed the base radio's change ${ago(Date.now() / 1000 - rc.at)}, so it can't hear the base. Plug it into the base or this computer and use "Set up only" in Settings, under Collar firmware (a full install first if it is locked to this base).`));
   if (c.key_mismatch) parts.push(el('div', { class: 'callout bad beacon' },
     `Ignored a report ${ago(Date.now() / 1000 - c.key_mismatch)} that claimed to be ${c.name} but was signed with a different key. `
     + 'Another node may be pretending to be this collar. If you fully re-installed this collar yourself, set it up again over USB (or remove and re-add it) so the base accepts its new key.'));
@@ -1525,6 +1592,8 @@ $('addSim').onclick = async () => {
   const c = map.getCenter();
   try {
     const r = await api('sim', { method: 'POST', body: JSON.stringify({ lat: c.lat, lon: c.lng }) });
+    $('addMsg').textContent = '';
+    showTab('collars');
     await refresh();
     select(r.node_id);
     say('Simulated collar added in the middle of the map. Use Place on map to move it.');
@@ -1563,7 +1632,7 @@ async function refresh() {
   renderSelected();
   renderContact();
   if (selected) renderStatusArea();
-  if ($('fwDetails').open) renderFw();
+  if (tab === 'settings') renderFw();
   if (parcelSelected.size) updateParcelMake();
   // The danger row's label follows the collar's shock switch; redraw it only when that changes.
   if (shockOffOnCollar() !== shownShockOff && !drawKind && document.activeElement?.type !== 'number') { shownShockOff = shockOffOnCollar(); renderZones(); }
@@ -1622,7 +1691,7 @@ $('addForm').onsubmit = async e => {
   try {
     await api('collars', { method: 'POST', body: JSON.stringify({ node_id, name: $('newName').value.trim() || null }) });
     $('newId').value = $('newName').value = $('addMsg').textContent = '';
-    $('addBox').open = false;
+    showTab('collars');
     await refresh();
     select(node_id);
   } catch (err) { $('addMsg').textContent = 'Could not add the collar: ' + err.message; }
@@ -1651,6 +1720,7 @@ document.querySelectorAll('[data-cmd]').forEach(b => b.onclick = () => sendCmd(b
 // Collar firmware: builds, a background job with a log, and three ways to flash.
 // ---------------------------------------------------------------------------------------------
 let fw = null, fwSel = null, fwMethod = 'wifi', fwJobId = null, fwJobLog = [], fwJobTimer = null, fwWebBusy = false;
+let fwOtaId = null; // the collar to update over Wi-Fi: the one selected on the Collars tab, unless another is picked here
 const shortCommit = c => c ? c.slice(0, 7) : 'unknown';
 const fwSay = t => { $('fwMsg').textContent = t; };
 const webSerialOk = () => 'serial' in navigator && window.isSecureContext;
@@ -1693,7 +1763,13 @@ function renderFw() {
   $('fwWifiState').textContent = fw.wifi.ssid ? `Saved: ${fw.wifi.ssid}` : 'No network saved yet';
   $('fwSubnets').textContent = fw.subnets.length ? `Searches ${fw.subnets.join(', ')} for the collar.`
     : 'Could not tell which network to search. Enter the collar\'s address, or set "ota_subnet" in the app settings.';
-  const c = collars[selected];
+  if (!collars[fwOtaId]) fwOtaId = collars[selected] ? selected : Object.keys(collars)[0] || null;
+  if (document.activeElement !== $('fwOtaCollar')) { // not while its list is open
+    $('fwOtaCollar').replaceChildren(...(fwOtaId ? Object.entries(collars).map(([id, x]) => el('option', { value: id }, x.name))
+      : [el('option', { value: '' }, 'No collars yet')]));
+    $('fwOtaCollar').value = fwOtaId || '';
+  }
+  const c = collars[fwOtaId];
   const pending = c && c.update_mode;
   $('fwPending').replaceChildren(...(pending ? [el('div', { class: 'callout bad' },
     `${c.name} is waiting in update mode for build ${shortCommit((fw.builds.find(b => b.id === pending.build) || {}).geocollar_commit)} and is not enforcing fences. `,
@@ -1701,7 +1777,7 @@ function renderFw() {
     el('div', { class: 'actions', style: 'margin-top:6px' }, el('button', { disabled: busy || !fw.builds.some(b => b.id === pending.build),
       onclick: () => startOta(true) }, 'Retry upload')))] : []));
   $('fwOta').disabled = busy || !fwSel || !c || !!pending;
-  $('fwOta').textContent = c ? `Update ${c.name} over Wi-Fi` : 'Select a collar first';
+  $('fwOta').textContent = c ? `Update ${c.name} over Wi-Fi` : 'Add a collar first';
 
   // USB on base
   const ports = fw.ports.map(p => el('option', { value: p.device, disabled: p.in_use },
@@ -1768,14 +1844,14 @@ async function startJob(path, body) {
 }
 
 function startOta(resume) {
-  const c = collars[selected];
+  const id = fwOtaId, c = collars[id];
   if (!c) return;
   const build = resume ? c.update_mode.build : fwSel;
   if (!resume && !confirm(`Update ${c.name} over Wi-Fi?\n\nThe collar restarts into update mode and does not enforce fences until the update finishes, usually 2 to 5 minutes. Make sure it is on its charger and in Wi-Fi range.`)) return;
-  startJob(`collars/${encodeURIComponent(selected)}/firmware/ota`, { build, ip: $('fwIp').value.trim() || null, send_wifi: !resume && !c.sim, resume });
+  startJob(`collars/${encodeURIComponent(id)}/firmware/ota`, { build, ip: $('fwIp').value.trim() || null, send_wifi: !resume && !c.sim, resume });
 }
 
-$('fwDetails').addEventListener('toggle', () => { if ($('fwDetails').open) fwRefresh(); });
+$('fwOtaCollar').onchange = () => { fwOtaId = $('fwOtaCollar').value || null; renderFw(); };
 $('fwMethod').onclick = e => { const b = e.target.closest('button'); if (b) { fwMethod = b.dataset.m; renderFw(); } };
 $('fwMode').onchange = renderFw;
 $('fwCollar').onchange = renderFw;
@@ -2174,6 +2250,7 @@ let outline = null, outlineKey = '', sideOffsets = [];
 function renderParcelSel() {
   const sel = selectedParcels();
   $('parcelSel').hidden = !sel.length;
+  if (sel.length) $('parcelDetails').open = true; // picked on the map: show what can be done with them
   perimeterLayer.clearLayers();
   perimeter = null;
   if (!sel.length) { outline = null; outlineKey = ''; return; }
@@ -2389,6 +2466,38 @@ for (const b of $('unitPick').children) b.setAttribute('aria-pressed', String(b.
 document.querySelectorAll('.unit').forEach(e => { e.textContent = unitLabel(); });
 document.querySelectorAll('.unitName').forEach(e => { e.textContent = isFt() ? 'Feet' : 'Metres'; });
 
+// ---------------------------------------------------------------------------------------------
+// The two pages. "Collars" is the collar list, the selected collar's panel and the map;
+// "Settings" is the base radio, adding collars, the owner's contact and collar firmware.
+// ---------------------------------------------------------------------------------------------
+var tab = 'collars';
+function showTab(name, scrollTo) {
+  tab = name === 'settings' ? 'settings' : 'collars';
+  document.body.classList.toggle('settings', tab === 'settings');
+  for (const b of document.querySelectorAll('.tabs [role=tab]')) {
+    const on = b.dataset.tab === tab;
+    b.setAttribute('aria-selected', String(on));
+    b.tabIndex = on ? 0 : -1;
+  }
+  $('viewCollars').hidden = tab !== 'collars';
+  $('viewSettings').hidden = tab !== 'settings';
+  if (tab === 'collars') map.invalidateSize(); // the map was hidden: let Leaflet measure it again
+  else {
+    if (collars[selected]) fwOtaId = selected; // "select a collar, then update it" keeps working
+    fwRefresh();
+  }
+  const target = scrollTo && $(scrollTo);
+  if (target) target.scrollIntoView({ block: 'start' });
+  else (tab === 'settings' ? $('viewSettings') : $('viewCollars')).scrollTop = 0;
+}
+document.querySelector('.tabs').addEventListener('click', e => { const b = e.target.closest('[role=tab]'); if (b) showTab(b.dataset.tab); });
+document.querySelector('.tabs').addEventListener('keydown', e => {
+  if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+  e.preventDefault();
+  showTab(tab === 'collars' ? 'settings' : 'collars');
+  $(tab === 'collars' ? 'tabCollars' : 'tabSettings').focus();
+});
+
 window.addEventListener('beforeunload', e => { if (isDirty() || Object.keys(drafts).length) { e.preventDefault(); e.returnValue = ''; } });
 
 loadContact();
@@ -2401,6 +2510,7 @@ async function loop() {
 }
 renderZones();
 loop();
+fwRefresh();
 </script>
 </body>
 </html>

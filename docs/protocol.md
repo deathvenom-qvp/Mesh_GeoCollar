@@ -58,7 +58,16 @@ band of any zone wins.
 The collar saves a complete set to flash and reports its fence version in every Status, so the
 base can resend until the versions match. It refuses a set whose version is older than the one it holds
 (16-bit, wrapping), so an old set recorded off the air cannot replace newer fences; the base
-numbers new sets after the version the collar last reported.
+numbers new sets after the version the collar last reported. A chunk of an older version is
+dropped as it arrives, so it cannot throw away a newer set that is still coming in.
+
+A set with the version and the content the collar already holds is not loaded again: the collar
+answers with a Status and carries on. Loading it would restart the fence state, and with it the
+shock limits and the lost beacon, so a recording of the current fences cannot be used to reset
+them. The same version with different content is loaded (the base and the collar had lost step).
+
+The collar checks its fences only against fixes from its own GPS. A position a phone app shares
+with the collar, a fixed position, or one restored from flash after a restart is never used.
 
 ## 2. Status and 3. Breach (collar to base)
 
@@ -74,7 +83,17 @@ Same 20-byte layout; Breach is sent the moment the collar enters Lost, and every
 | 14 | 2 | PDOP × 100 |
 | 16 | 1 | satellites in view |
 | 17 | 2 | clearance to nearest fence line, metres, signed (negative = on the wrong side) |
-| 19 | 1 | flags: bit 0 corrections enabled, bit 1 shock enabled, bit 2 lost beacon on, bit 3 lost beacon silenced |
+| 19 | 1 | flags: bit 0 corrections enabled, bit 1 shock enabled, bit 2 lost beacon on, bit 3 lost beacon silenced, bit 4 no current GPS fix, bit 5 the collar reads sequence numbers on Owner and Config |
+
+With bit 4 set the position is the last one the collar had (0, 0 if it has had none since it
+started) and the clearance belongs to that position. A fix counts as current for the GPS interval
+plus a minute, or for 45 s when the GPS runs all the time (an interval of 10 s or less). With
+fences loaded the collar sends a Status when a fix goes missing and when it comes back, at most
+one such report in 5 minutes, and keeps its GPS searching instead of letting Meshtastic rest it
+for up to an hour after a failed search.
+
+A collar also sends a Status 15 s after it starts, so the base hears from it without waiting a
+whole report interval.
 
 ## 4. Command (base to collar)
 
@@ -91,12 +110,18 @@ cannot be played back. Golden bytes: vibrate 40 for 1500 ms, sequence 1763085600
 `02 04 02 28 dc05 208d1669`.
 
 A manual shock is only sent when shock is enabled on the collar, and is capped at its maximum level.
+With the collar's hardware switch off (GEOCOLLAR_DISABLE_PIN held low) manual beep, vibrate and
+shock are refused as well as the fence's own corrections.
+
+A correction lasts for its duration from the first frame the collar sends to the receiver. One
+the fence started is cut short the moment a fix puts the dog past the line; one the owner sent
+plays out.
 
 ## 5. Owner (base to collar)
 
 The dog's name and the owner's contact, for the lost beacon. Three text fields, each a one-byte
-length then that many bytes of UTF-8, with no control characters. The message must be exactly
-this long.
+length then that many bytes of UTF-8, with no control characters, then an optional 4-byte
+sequence number (never 0). The message must be exactly this long, with or without the number.
 
 | Field | Max bytes |
 | --- | --- |
@@ -104,7 +129,29 @@ this long.
 | owner's name | 24 |
 | owner's phone | 20 |
 
-Golden bytes for Rex / Ken / 555-123-4567: `02 05 03 526578 03 4b656e 0c 3535352d3132332d34353637`.
+Golden bytes for Rex / Ken / 555-123-4567: `02 05 03 526578 03 4b656e 0c 3535352d3132332d34353637`;
+for Rex / Ken / 5551234567 with sequence number 1763085600:
+`02 05 03 526578 03 4b656e 0a 35353531323334353637 208d1669`.
+
+The sequence number comes from the same counter as a command's. The collar keeps the highest one
+it has accepted for Owner messages (saved across reboots) and refuses a message whose number is
+not higher, so a recording cannot put an old name or phone number back. Once it has accepted a
+numbered message it refuses unnumbered ones too. Collar firmware before 0.16 refuses the longer
+message, so the base adds the number only for a collar whose Status has flag bit 5, and sends
+the message again, numbered, when such a collar last got it without one.
+
+## 7. Config (base to collar)
+
+| Offset | Size | Field |
+| --- | --- | --- |
+| 2 | 2 | report interval, seconds: 30..3600, or 0 for the firmware's default (10 minutes) |
+| 4 | 4 | sequence number, optional (never 0) |
+
+How often the collar sends a Status. While lost it reports at least every 30 s whatever this
+says. The sequence number works as for Owner, with its own counter on the collar. More bytes may
+follow the number (room for later settings); 1 to 3 bytes after the interval are refused.
+Firmware 0.15 reads the interval and ignores the rest, so the base always sends the number.
+Golden bytes for 300 s: `02 07 2c01`, and with sequence number 1763085600: `02 07 2c01 208d1669`.
 
 ## 6. Hello (collar, broadcast)
 

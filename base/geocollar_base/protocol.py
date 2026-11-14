@@ -104,6 +104,8 @@ class Status:
     shock_enabled: bool
     beacon_active: bool = False  # lost beacon on: Bluetooth name and mesh plea
     beacon_silenced: bool = False
+    no_fix: bool = False  # no current GPS fix: lat / lon are the last position the collar knew
+    numbered: bool = False  # the collar's firmware reads sequence numbers on Owner and Config
 
 
 _STATUS = struct.Struct("<BBHBBiiHBhB")
@@ -143,13 +145,19 @@ def fit_text(text: str, limit: int) -> str:
     return data.decode(errors="ignore").strip()
 
 
-def encode_owner(dog: str, owner: str, phone: str) -> bytes:
-    """The dog's name and owner contact, used by the collar's lost beacon."""
+def encode_owner(dog: str, owner: str, phone: str, seq: int = 0) -> bytes:
+    """The dog's name and owner contact, used by the collar's lost beacon.
+
+    seq is a sequence number that grows with every message (Store.next_command_seq): the collar
+    refuses one it has already passed, so a recording cannot put an old name or phone number
+    back. 0 leaves it out, which collar firmware before 0.16 needs: it refuses the longer message."""
     out = bytearray([VERSION, MsgType.OWNER])
     for text, limit in ((dog, MAX_DOG_NAME), (owner, MAX_OWNER_NAME), (phone, MAX_PHONE)):
         data = fit_text(text, limit).encode()
         out.append(len(data))
         out += data
+    if seq:
+        out += struct.pack("<I", seq & 0xFFFFFFFF)
     return bytes(out)
 
 
@@ -168,18 +176,28 @@ def mesh_names(dog: str) -> tuple[str, str]:
     return _cut_utf8(name, 39), short
 
 
-def encode_config(report_s: int) -> bytes:
+def encode_config(report_s: int, seq: int = 0) -> bytes:
     """How often the collar reports, in seconds (MIN_REPORT_S..MAX_REPORT_S). While lost it
-    reports at least every 30 s whatever this says. Older collar firmware ignores it."""
+    reports at least every 30 s whatever this says. Collar firmware before 0.15 ignores it.
+
+    seq is a sequence number as for encode_owner (0 leaves it out). Firmware 0.15 reads the
+    interval and ignores the number."""
     if not MIN_REPORT_S <= report_s <= MAX_REPORT_S:
         raise ValueError(f"report interval must be {MIN_REPORT_S}..{MAX_REPORT_S} s")
-    return bytes([VERSION, MsgType.CONFIG]) + struct.pack("<H", report_s)
+    out = bytes([VERSION, MsgType.CONFIG]) + struct.pack("<H", report_s)
+    return out + struct.pack("<I", seq & 0xFFFFFFFF) if seq else out
 
 
 def decode_config(data: bytes) -> int:
     if len(data) < 4 or data[0] != VERSION or data[1] != MsgType.CONFIG:
         raise ValueError("not a GeoCollar config message")
     return struct.unpack_from("<H", data, 2)[0]
+
+
+def decode_config_seq(data: bytes) -> int:
+    """The sequence number on a config message, 0 if it has none."""
+    decode_config(data)
+    return struct.unpack_from("<I", data, 4)[0] if len(data) >= 8 else 0
 
 
 def decode_hello(data: bytes) -> dict:
@@ -195,17 +213,29 @@ def encode_hello(has_admin_key: bool, has_fences: bool = False, battery_pct: int
                   255 if battery_pct is None else battery_pct])
 
 
-def decode_owner(data: bytes) -> tuple[str, str, str]:
+def _owner_fields(data: bytes) -> tuple[list[str], int]:
     if len(data) < 5 or data[0] != VERSION or data[1] != MsgType.OWNER:
         raise ValueError("not a GeoCollar owner message")
     fields, i = [], 2
     for _ in range(3):
+        if i >= len(data) or i + 1 + data[i] > len(data):
+            raise ValueError("bad owner message length")
         n = data[i]
         fields.append(data[i + 1 : i + 1 + n].decode())
         i += 1 + n
-    if i != len(data):
+    if len(data) - i not in (0, 4):  # nothing after the texts but a sequence number
         raise ValueError("bad owner message length")
+    return fields, struct.unpack_from("<I", data, i)[0] if len(data) - i == 4 else 0
+
+
+def decode_owner(data: bytes) -> tuple[str, str, str]:
+    fields, _ = _owner_fields(data)
     return fields[0], fields[1], fields[2]
+
+
+def decode_owner_seq(data: bytes) -> int:
+    """The sequence number on an owner message, 0 if it has none."""
+    return _owner_fields(data)[1]
 
 
 def decode_status(data: bytes) -> Status:
@@ -228,6 +258,8 @@ def decode_status(data: bytes) -> Status:
         shock_enabled=bool(flags & 2),
         beacon_active=bool(flags & 4),
         beacon_silenced=bool(flags & 8),
+        no_fix=bool(flags & 0x10),
+        numbered=bool(flags & 0x20),
     )
 
 
@@ -236,6 +268,7 @@ def encode_status(s: Status) -> bytes:
     flags = (
         (1 if s.corrections_enabled else 0) | (2 if s.shock_enabled else 0)
         | (4 if s.beacon_active else 0) | (8 if s.beacon_silenced else 0)
+        | (0x10 if s.no_fix else 0) | (0x20 if s.numbered else 0)
     )
     return _STATUS.pack(
         VERSION, s.msg_type, s.fence_version, s.state, s.battery_pct, _to_i(s.lat), _to_i(s.lon),

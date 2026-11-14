@@ -56,7 +56,7 @@ keep arriving, and the collar's battery voltage.
   the shock electrodes.
 - Plan a new sealed enclosure: the Tracker will not fit the original receiver housing.
 - Optional: a switch from GPIO 7 (`GEOCOLLAR_DISABLE_PIN`) to ground turns off every correction
-  in hardware.
+  in hardware: the fence's own, and beeps, vibrations and shocks sent from the base.
 
 ## Meshtastic settings for a collar
 
@@ -67,7 +67,17 @@ keep arriving, and the collar's battery voltage.
   updates and commands. Measure battery life early.
 - GPS update interval: GeoCollar paces the GPS itself while fences are loaded (5 s near the line,
   up to 60 s deep inside, 15 s while lost) and puts your configured interval back when there are
-  no fences. The paced value is only changed in memory, but if Meshtastic saves its config for
-  another reason while pacing is active, the paced value is what gets saved.
+  no fences. Meshtastic saves the paced value with the rest of its config when it shuts down or a
+  setting changes, so the collar keeps your own interval in its state file and puts that back
+  after a restart. Change the interval in the Meshtastic app while the collar is running and it
+  becomes the new value to put back.
+- GPS power: on the Wireless Tracker V1.1 and V2 one switch (Vext, GPIO 3) powers the GPS, its
+  antenna amplifier and the screen, and Meshtastic leaves it on, so the GPS chip draws current
+  whenever the collar is on, whatever the interval. Setting the Position option **GPS EN GPIO** to 3
+  lets Meshtastic switch Vext off between fixes when the interval is over 10 s (deep inside the
+  fences). The screen goes off with it, and the GPS may start cold each time. Untested with
+  GeoCollar: measure the time to a fix and the battery current before relying on it.
+- Screen: GeoCollar shortens Meshtastic's default screen timeout (10 minutes) to 30 seconds. A
+  timeout you set yourself is kept.
 - Turn off position broadcasts on any public channel; the collar reports its position to the base
   by encrypted direct message.

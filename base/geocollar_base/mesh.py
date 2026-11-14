@@ -295,13 +295,14 @@ class MeshLink:
         out["issues"] = issues
         return out
 
-    def send_owner(self, node_id: str, dog: str, owner: str, phone: str) -> None:
-        """The dog's name and the owner's contact, for the collar's lost beacon."""
-        self._send(node_id, protocol.encode_owner(dog, owner, phone))
+    def send_owner(self, node_id: str, dog: str, owner: str, phone: str, seq: int = 0) -> None:
+        """The dog's name and the owner's contact, for the collar's lost beacon. seq as in
+        protocol.encode_owner: 0 for collar firmware that does not read it."""
+        self._send(node_id, protocol.encode_owner(dog, owner, phone, seq))
 
-    def send_config(self, node_id: str, report_s: int) -> None:
+    def send_config(self, node_id: str, report_s: int, seq: int = 0) -> None:
         """How often the collar reports."""
-        self._send(node_id, protocol.encode_config(report_s))
+        self._send(node_id, protocol.encode_config(report_s, seq))
 
     def send_command(self, node_id: str, action: protocol.CommandAction, intensity: int = 0, duration_ms: int = 1000,
                      seq: int = 0):

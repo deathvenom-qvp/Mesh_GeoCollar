@@ -1,5 +1,77 @@
 # Changelog
 
+## 0.16.0
+
+A line-by-line review of the collar firmware, the base app and the page, and a new layout. Update
+the collars too (over Wi-Fi or USB): most of the fixes are in the collar firmware. The base still
+works with collars on 0.15. The firmware changes pass the PC tests and compile; they have not
+been run on a collar yet.
+
+**New layout**
+
+- The page has two tabs. **Collars** is the map, the collar list, the selected collar, its
+  fences and property lines. **Settings** holds the base radio, adding a collar, your contact
+  details and collar firmware, side by side on a wide screen.
+- Collar firmware has its own **Collar to update** picker, so you no longer select the collar on
+  the map first. A radio problem shows at the top of the Collars tab, and the radio badge opens
+  Settings.
+
+**Collar firmware: fixed**
+
+- Corrections could start up to a second late and be cut short by as much. With the default
+  one-second correction that could leave a single short pulse, or none. A correction now starts
+  at once and runs its full length.
+- The collar took its position from Meshtastic's stored position, which can also come from a
+  phone app sharing its location, a fixed position, or the last position before a restart. It now
+  checks fences only against fixes from its own GPS.
+- After 15 minutes without a GPS lock Meshtastic rests the GPS for 15 minutes to an hour, so a dog
+  coming back out from under a roof could be unfenced for that long. With fences loaded the
+  collar keeps the GPS searching.
+- **No GPS fix** is now reported and shown: in the collar list, on a greyed marker at the last
+  known position, and in the collar's panel. The trail only gets real fixes, and a collar that
+  restarts indoors stays on the map where it last was.
+- A correction the fence started stops the moment a fix puts the dog past the line, not when
+  its time is up. One you send from the page plays out.
+- The hardware switch now also blocks beeps, vibrations and shocks sent from the page.
+- A stuck or failed transmitter no longer holds the collar up; it gives up on that correction
+  and logs why.
+- The collar reports about 15 seconds after it starts, not a whole report interval later.
+- Your own GPS interval is put back properly when a collar has no fences. Before, a shutdown
+  could save the collar's own fast interval in its place.
+- At most one write to flash per message from the base (a command used to write twice), and
+  none when nothing changed. Settings read back from flash are checked against the ranges the
+  firmware relies on.
+
+**Security**
+
+- Sending a collar the fences it already has no longer restarts its shock limits or lost alert,
+  so a recorded fence message cannot be replayed to reset them. An older fence chunk can no
+  longer interrupt a newer set that is still arriving.
+- The dog's name, your contact details and the report rate now carry a sequence number, like
+  commands do, so a recording cannot put old ones back. Once a collar on 0.16 has had numbered
+  messages from this base, a base on an older version can no longer change those settings on it.
+- The base refuses changes that come from another website open in your browser. The page has no
+  login of its own, so before this a malicious page could have sent commands to the base.
+- Building firmware from source accepts only a branch or tag of the configured repository, not
+  an unmerged pull request.
+- The base checks node IDs, names, correction levels and durations, and malformed fences, and
+  answers with a clear error.
+
+**Battery**
+
+- The collar's screen turns off after 30 seconds, not Meshtastic's 10 minutes after every button
+  press or text message on the mesh. A timeout you set in the Meshtastic app is kept.
+- Fewer writes to flash.
+- Found but not changed, because each needs a decision or a test on a collar: on the Wireless
+  Tracker the GPS chip is powered all the time whatever the fix interval (see "Battery" in the
+  documentation for a setting that can switch it off between fixes); Meshtastic's light sleep;
+  and the collar relaying other people's mesh traffic.
+
+**Base**
+
+- The data file is written more safely, with an hourly backup beside it. A file damaged by a
+  power cut no longer stops the app from starting.
+
 ## 0.15.0
 
 Needs the new collar firmware (update the collars over Wi-Fi or USB).

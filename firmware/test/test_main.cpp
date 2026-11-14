@@ -222,6 +222,71 @@ static void testGpsPacing()
     CHECK(gpsIntervalSecs(s, CollarState::Inside, 1000, 10) == 5); // nonsense settings: stay safe
 }
 
+static void testFixWatch()
+{
+    CHECK(fixOverdueMs(0) == 180 * 1000u);  // Meshtastic's default, 2 minutes, plus one
+    CHECK(fixOverdueMs(5) == 45 * 1000u);   // the GPS stays on
+    CHECK(fixOverdueMs(10) == 45 * 1000u);
+    CHECK(fixOverdueMs(11) == 71 * 1000u);
+    CHECK(fixOverdueMs(60) == 120 * 1000u);
+    CHECK(fixOverdueMs(100000) == 3660 * 1000u);
+
+    // No fix at boot, whatever the time.
+    FixWatch w;
+    CHECK(w.noFix());
+    CHECK(w.tick(1000, 5));
+    CHECK(w.tick(500000, 5));
+
+    // A fix counts at once, before the next tick, so a report sent with it says so.
+    w.onFix(500000);
+    CHECK(!w.noFix());
+    CHECK(!w.tick(500000 + 45000, 5));
+    CHECK(w.tick(500000 + 45001, 5)); // overdue
+    CHECK(w.tick(500000 + 46000, 60)); // a slower interval does not bring an old fix back
+    CHECK(w.noFix());
+    w.onFix(600000);
+    CHECK(!w.tick(600001, 60));
+
+    // Slow to fast: the last fix may be older than the fast allowance already. The GPS gets a
+    // full allowance from the change before the fix counts as old.
+    FixWatch v;
+    v.tick(0, 60);
+    v.onFix(1000);
+    CHECK(!v.tick(101000, 60));          // 100 s old, 120 s allowed
+    CHECK(!v.tick(102000, 5));           // the interval drops to 5 s: not overdue yet
+    CHECK(!v.tick(102000 + 45000, 5));
+    CHECK(v.tick(102000 + 45001, 5));    // 45 s after the change and still nothing
+    v.onFix(150000);
+    CHECK(!v.tick(150000 + 45000, 5));
+    CHECK(v.tick(150000 + 45001, 5));    // later on, the usual allowance from the fix itself
+
+    // Fast to slow gives more time, never less.
+    FixWatch u;
+    u.tick(0, 5);
+    u.onFix(1000);
+    CHECK(!u.tick(40000, 5));
+    CHECK(!u.tick(41000, 60));
+    CHECK(!u.tick(121000, 60));
+    CHECK(!u.tick(41000 + 120000, 60));
+    CHECK(u.tick(41000 + 120001, 60));
+
+    // The millisecond clock wraps after 49.7 days: ages are still right across the wrap, and an
+    // interval set long ago does not hand out a second allowance.
+    FixWatch x;
+    x.tick(0xffff0000u, 5);
+    x.onFix(0xffffff00u);
+    CHECK(!x.tick(0x00000100u, 5));              // 512 ms later, across the wrap
+    CHECK(!x.tick(0xffffff00u + 45000u, 5));
+    CHECK(x.tick(0xffffff00u + 45001u, 5));
+    FixWatch y;
+    y.tick(1000, 5);
+    y.onFix(2000);
+    CHECK(!y.tick(47000, 5));                    // also ends the allowance from the first interval
+    y.onFix(0xfffe0000u);
+    CHECK(!y.tick(0xfffe0000u + 45000u, 5));
+    CHECK(y.tick(1000u + 10u, 5));               // the clock is back where the interval was set: still overdue
+}
+
 static void testShockCaps()
 {
     FenceEngine e;
@@ -375,6 +440,93 @@ static void testProtocol()
     CHECK(fenceVersionAcceptable(5, 4) && fenceVersionAcceptable(4, 4) && !fenceVersionAcceptable(3, 4));
     CHECK(fenceVersionAcceptable(2, 65530) && !fenceVersionAcceptable(65530, 2) && fenceVersionAcceptable(1, 0));
 
+    // Owner and Config carry an optional sequence number; golden vectors shared with the Python tests.
+    OwnerInfo who;
+    std::strcpy(who.dog, "Rex");
+    std::strcpy(who.owner, "Ken");
+    std::strcpy(who.phone, "5551234567");
+    uint32_t seq = 99;
+    OwnerInfo who2;
+    n = encodeOwner(buf, sizeof(buf), who);
+    CHECK(hex(buf, n) == "0205" "03526578" "034b656e" "0a35353531323334353637");
+    CHECK(decodeOwner(buf, n, who2, seq) && seq == 0 && std::strcmp(who2.dog, "Rex") == 0);
+    n = encodeOwner(buf, sizeof(buf), who, 1763085600);
+    CHECK(hex(buf, n) == "0205" "03526578" "034b656e" "0a35353531323334353637" "208d1669");
+    CHECK(decodeOwner(buf, n, who2, seq) && seq == 1763085600 && std::strcmp(who2.phone, "5551234567") == 0);
+    CHECK(!decodeOwner(buf, n - 1, who2, seq) && !decodeOwner(buf, n - 3, who2, seq)); // a cut-off number
+    buf[n] = 0;
+    CHECK(!decodeOwner(buf, n + 1, who2, seq)); // anything after the number
+    std::memset(buf + n - 4, 0, 4);
+    CHECK(!decodeOwner(buf, n, who2, seq)); // a number of 0 means "none" and is never sent
+
+    CollarConfig cfg, cfg2;
+    cfg.reportS = 300;
+    n = encodeConfig(buf, sizeof(buf), cfg);
+    CHECK(n == kConfigLength && hex(buf, n) == "02072c01");
+    seq = 99;
+    CHECK(decodeConfig(buf, n, cfg2, seq) && cfg2.reportS == 300 && seq == 0);
+    n = encodeConfig(buf, sizeof(buf), cfg, 1763085600);
+    CHECK(hex(buf, n) == "02072c01208d1669");
+    CHECK(decodeConfig(buf, n, cfg2, seq) && cfg2.reportS == 300 && seq == 1763085600);
+    buf[n] = 7; // later fields may follow the number
+    CHECK(decodeConfig(buf, n + 1, cfg2, seq) && seq == 1763085600);
+    CHECK(!decodeConfig(buf, n - 2, cfg2, seq)); // a cut-off number
+    cfg.reportS = 10;
+    n = encodeConfig(buf, sizeof(buf), cfg, 5);
+    CHECK(!decodeConfig(buf, n, cfg2, seq)); // below the shortest interval
+
+    // The replay guard: numbers must rise; a message without one only until the first numbered one.
+    CHECK(settingSeqAcceptable(0, 0) && settingSeqAcceptable(5, 0) && settingSeqAcceptable(6, 5));
+    CHECK(!settingSeqAcceptable(5, 5) && !settingSeqAcceptable(4, 5) && !settingSeqAcceptable(0, 5));
+
+    // Fences: older refused, the same set kept as it is, anything else loaded.
+    {
+        FenceSet cur, in;
+        cur.version = 7;
+        cur.zoneCount = 1;
+        cur.zones[0] = square(ZoneKind::KeepIn, 2, 4, 6);
+        in = cur;
+        CHECK(fenceUpdate(7, in, cur) == FenceUpdate::Keep && sameFences(in, cur));
+        CHECK(fenceUpdate(8, in, cur) == FenceUpdate::Load);
+        CHECK(fenceUpdate(6, in, cur) == FenceUpdate::Refuse);
+        in.zones[0].lonI[2] += 1;
+        CHECK(!sameFences(in, cur) && fenceUpdate(7, in, cur) == FenceUpdate::Load); // same number, other fences
+        in = cur;
+        in.vibratePulseS = 3;
+        CHECK(!sameFences(in, cur));
+        in = cur;
+        in.zones[0].warningM = 9;
+        CHECK(!sameFences(in, cur));
+        in = cur;
+        in.zones[0].latI[20] = 5; // beyond the vertices in use: not part of the fence
+        CHECK(sameFences(in, cur));
+        FenceSet none;
+        CHECK(fenceUpdate(0, none, none) == FenceUpdate::Load && fenceUpdate(3, in, none) == FenceUpdate::Load);
+    }
+
+    // Settings read back from flash are forced into range.
+    {
+        Settings bad;
+        bad.maxShockLevel = 200;
+        bad.shockLevel = 150;
+        bad.vibrateLevel = 255;
+        bad.maxShocksPerHour = 200;
+        bad.lostConfirmFixes = 0;
+        bad.rearmFixes = 0;
+        bad.correctionMs = 0;
+        bad.gpsFastSecs = 0;
+        bad.gpsSlowSecs = 0;
+        bad.gpsLostSecs = 0;
+        bad.dogSpeedMps = 0;
+        sanitizeSettings(bad);
+        CHECK(bad.maxShockLevel == 99 && bad.shockLevel == 99 && bad.vibrateLevel == 99 && bad.maxShocksPerHour == 16);
+        CHECK(bad.lostConfirmFixes == 3 && bad.rearmFixes == 3 && bad.correctionMs == 1000 && bad.gpsFastSecs == 5 &&
+              bad.gpsSlowSecs == 5 && bad.gpsLostSecs == 15 && bad.dogSpeedMps == 6);
+        Settings good, same;
+        sanitizeSettings(good);
+        CHECK(std::memcmp(&good, &same, sizeof(good)) == 0); // the defaults pass through untouched
+    }
+
     StatusReport s{3, 4, 87, 400001234, -750004321, 180, 9, -12, 1};
     n = encodeStatus(buf, sizeof(buf), MsgType::Breach, s);
     CHECK(n == kStatusLength);
@@ -506,18 +658,19 @@ static void testBeacon()
     strcpy(o.owner, "Ken");
     strcpy(o.phone, "555-123-4567");
     uint8_t buf[100];
+    uint32_t oseq = 0;
     size_t n = encodeOwner(buf, sizeof(buf), o);
     CHECK(n == 2 + 1 + 3 + 1 + 3 + 1 + 12);
     CHECK(hex(buf, n) == "0205035265780" "34b656e0c3535352d3132332d34353637");
     MsgType t;
     CHECK(messageType(buf, n, t) && t == MsgType::Owner);
-    CHECK(decodeOwner(buf, n, back) && strcmp(back.dog, "Rex") == 0 && strcmp(back.phone, "555-123-4567") == 0);
+    CHECK(decodeOwner(buf, n, back, oseq) && strcmp(back.dog, "Rex") == 0 && strcmp(back.phone, "555-123-4567") == 0);
     CHECK(encodeHello(buf, sizeof(buf), true, false, 87) == kHelloSize && hex(buf, kHelloSize) == "02060157");
     CHECK(messageType(buf, kHelloSize, t) && t == MsgType::Hello);
     n = encodeOwner(buf, sizeof(buf), o);
     buf[3] = '\n'; // control characters are refused
-    CHECK(!decodeOwner(buf, n, back));
-    CHECK(!decodeOwner(buf, n - 1, back));
+    CHECK(!decodeOwner(buf, n, back, oseq));
+    CHECK(!decodeOwner(buf, n - 1, back, oseq));
 
     // Collar settings: how often to report.
     CollarConfig cfg, cback;
@@ -525,19 +678,19 @@ static void testBeacon()
     n = encodeConfig(buf, sizeof(buf), cfg);
     CHECK(n == kConfigLength && hex(buf, n) == "02072c01");
     CHECK(messageType(buf, n, t) && t == MsgType::Config);
-    CHECK(decodeConfig(buf, n, cback) && cback.reportS == 300);
-    buf[n] = 9; // a later field: still read
-    CHECK(decodeConfig(buf, n + 1, cback) && cback.reportS == 300);
-    CHECK(!decodeConfig(buf, n - 1, cback));
+    CHECK(decodeConfig(buf, n, cback, oseq) && cback.reportS == 300);
+    buf[n] = 9;
+    CHECK(!decodeConfig(buf, n + 1, cback, oseq)); // one stray byte is not a sequence number
+    CHECK(!decodeConfig(buf, n - 1, cback, oseq));
     cfg.reportS = 0; // the default
     n = encodeConfig(buf, sizeof(buf), cfg);
-    CHECK(decodeConfig(buf, n, cback) && cback.reportS == 0);
+    CHECK(decodeConfig(buf, n, cback, oseq) && cback.reportS == 0);
     cfg.reportS = kMinReportS - 1; // too often
     n = encodeConfig(buf, sizeof(buf), cfg);
-    CHECK(!decodeConfig(buf, n, cback));
+    CHECK(!decodeConfig(buf, n, cback, oseq));
     cfg.reportS = kMaxReportS + 1;
     n = encodeConfig(buf, sizeof(buf), cfg);
-    CHECK(!decodeConfig(buf, n, cback));
+    CHECK(!decodeConfig(buf, n, cback, oseq));
 
     // The collar's Meshtastic names follow the dog's name.
     char ln[40], sn[5];
@@ -565,6 +718,7 @@ int main()
     testPulser();
     testBeacon();
     testGpsPacing();
+    testFixWatch();
     testProtocol();
     std::printf("%d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;

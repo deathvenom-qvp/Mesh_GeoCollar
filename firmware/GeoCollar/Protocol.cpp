@@ -158,7 +158,7 @@ bool getText(Reader &r, char *out, size_t max)
 }
 } // namespace
 
-size_t encodeOwner(uint8_t *out, size_t cap, const OwnerInfo &o)
+size_t encodeOwner(uint8_t *out, size_t cap, const OwnerInfo &o, uint32_t seq)
 {
     Writer w{out, cap};
     w.u8(kVersion);
@@ -166,30 +166,41 @@ size_t encodeOwner(uint8_t *out, size_t cap, const OwnerInfo &o)
     putText(w, o.dog, kMaxDogName);
     putText(w, o.owner, kMaxOwnerName);
     putText(w, o.phone, kMaxPhone);
+    if (seq)
+        w.u32(seq);
     return w.done();
 }
 
-bool decodeOwner(const uint8_t *buf, size_t len, OwnerInfo &o)
+bool decodeOwner(const uint8_t *buf, size_t len, OwnerInfo &o, uint32_t &seq)
 {
     Reader r{buf, len};
     OwnerInfo tmp;
     if (!header(r, MsgType::Owner) || !getText(r, tmp.dog, kMaxDogName) || !getText(r, tmp.owner, kMaxOwnerName) ||
-        !getText(r, tmp.phone, kMaxPhone) || r.pos != len)
+        !getText(r, tmp.phone, kMaxPhone))
         return false;
+    uint32_t n = 0;
+    if (r.pos != len) { // nothing may follow the three texts except a sequence number
+        n = r.u32();
+        if (!r.ok || r.pos != len || n == 0)
+            return false;
+    }
     o = tmp;
+    seq = n;
     return true;
 }
 
-size_t encodeConfig(uint8_t *out, size_t cap, const CollarConfig &c)
+size_t encodeConfig(uint8_t *out, size_t cap, const CollarConfig &c, uint32_t seq)
 {
     Writer w{out, cap};
     w.u8(kVersion);
     w.u8(static_cast<uint8_t>(MsgType::Config));
     w.u16(c.reportS);
+    if (seq)
+        w.u32(seq);
     return w.done();
 }
 
-bool decodeConfig(const uint8_t *buf, size_t len, CollarConfig &c)
+bool decodeConfig(const uint8_t *buf, size_t len, CollarConfig &c, uint32_t &seq)
 {
     Reader r{buf, len};
     if (!header(r, MsgType::Config))
@@ -198,8 +209,24 @@ bool decodeConfig(const uint8_t *buf, size_t len, CollarConfig &c)
     tmp.reportS = r.u16();
     if (!r.ok || (tmp.reportS != 0 && (tmp.reportS < kMinReportS || tmp.reportS > kMaxReportS)))
         return false;
+    uint32_t n = 0;
+    if (r.pos != len) {
+        n = r.u32();
+        if (!r.ok || n == 0)
+            return false; // a few stray bytes, or a number of 0: not a message this firmware knows
+    }
     c = tmp;
+    seq = n;
     return true;
+}
+
+FenceUpdate fenceUpdate(uint16_t incomingVersion, const FenceSet &incoming, const FenceSet &current)
+{
+    if (!fenceVersionAcceptable(incomingVersion, current.version))
+        return FenceUpdate::Refuse;
+    if (current.version != 0 && incomingVersion == current.version && sameFences(incoming, current))
+        return FenceUpdate::Keep;
+    return FenceUpdate::Load;
 }
 
 namespace

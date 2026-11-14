@@ -110,6 +110,50 @@ Band bandFor(const Zone &z, float d)
     return Band::Clear;
 }
 
+bool sameFences(const FenceSet &a, const FenceSet &b)
+{
+    if (a.zoneCount != b.zoneCount || a.beepPulseS != b.beepPulseS || a.vibratePulseS != b.vibratePulseS)
+        return false;
+    for (size_t i = 0; i < a.zoneCount && i < kMaxZones; i++) {
+        const Zone &x = a.zones[i];
+        const Zone &y = b.zones[i];
+        if (x.kind != y.kind || x.dangerM != y.dangerM || x.warningM != y.warningM || x.attentionM != y.attentionM ||
+            x.vertexCount != y.vertexCount)
+            return false;
+        for (size_t v = 0; v < x.vertexCount && v < kMaxVertices; v++)
+            if (x.latI[v] != y.latI[v] || x.lonI[v] != y.lonI[v])
+                return false;
+    }
+    return true;
+}
+
+void sanitizeSettings(Settings &s)
+{
+    const Settings d; // the defaults, for values that make no sense at all
+    if (s.maxShockLevel > 99)
+        s.maxShockLevel = 99;
+    if (s.shockLevel > s.maxShockLevel)
+        s.shockLevel = s.maxShockLevel;
+    if (s.vibrateLevel > 99)
+        s.vibrateLevel = 99;
+    if (s.maxShocksPerHour > kShockHistory)
+        s.maxShocksPerHour = kShockHistory; // the hourly limit cannot count further than its history
+    if (s.lostConfirmFixes == 0)
+        s.lostConfirmFixes = d.lostConfirmFixes;
+    if (s.rearmFixes == 0)
+        s.rearmFixes = d.rearmFixes;
+    if (s.correctionMs == 0)
+        s.correctionMs = d.correctionMs;
+    if (s.gpsFastSecs == 0)
+        s.gpsFastSecs = d.gpsFastSecs;
+    if (s.gpsSlowSecs < s.gpsFastSecs)
+        s.gpsSlowSecs = s.gpsFastSecs;
+    if (s.gpsLostSecs == 0)
+        s.gpsLostSecs = d.gpsLostSecs;
+    if (s.dogSpeedMps == 0)
+        s.dogSpeedMps = d.dogSpeedMps;
+}
+
 // ---------------------------------------------------------------------------------------------
 
 void FenceEngine::setFences(const FenceSet &fences)
@@ -292,6 +336,40 @@ uint32_t gpsIntervalSecs(const Settings &s, CollarState state, float clearanceM,
     if (secs >= (float)slow)
         return slow;
     return (uint32_t)secs;
+}
+
+uint32_t fixOverdueMs(uint32_t gpsIntervalSecs)
+{
+    uint32_t secs = gpsIntervalSecs ? gpsIntervalSecs : 120;
+    if (secs <= 10)
+        return 45 * 1000;
+    if (secs > 3600)
+        secs = 3600;
+    return (secs + 60) * 1000;
+}
+
+bool FixWatch::tick(uint32_t nowMs, uint32_t gpsIntervalSecs)
+{
+    if (!started_ || gpsIntervalSecs != intervalSecs_) {
+        started_ = true;
+        intervalSecs_ = gpsIntervalSecs;
+        paceMs_ = nowMs;
+        paceFresh_ = true;
+    }
+    if (noFix_)
+        return true; // until the next fix
+    const uint32_t overdue = fixOverdueMs(intervalSecs_);
+    uint32_t age = nowMs - fixMs_;
+    if (paceFresh_) {
+        const uint32_t sincePace = nowMs - paceMs_;
+        if (sincePace > overdue)
+            paceFresh_ = false; // a flag, so the allowance does not come back when the clock wraps
+        else if (sincePace < age)
+            age = sincePace;
+    }
+    if (age > overdue)
+        noFix_ = true;
+    return noFix_;
 }
 
 // ---------------------------------------------------------------------------------------------
