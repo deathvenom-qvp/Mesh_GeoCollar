@@ -2,6 +2,7 @@
 
 import time
 
+import pytest
 from fastapi.testclient import TestClient
 
 from geocollar_base import protocol
@@ -595,3 +596,91 @@ def test_wifi_updates_are_gone_and_the_saved_network_is_forgotten(tmp_path, monk
     other.post("/api/collars", json={"node_id": "!a1b2c3d4", "name": "Rex"})
     assert other.get("/api/firmware").json()["wifi_leftover"] is None
     assert other.post("/api/firmware/forget-wifi").status_code == 409
+
+
+def test_collar_log_and_clearing_the_path(tmp_path):
+    client, link = make(tmp_path)
+    app = client.app
+    for node_id, name in (("!a1b2c3d4", "Rex"), ("!0000beef", "Biscuit")):
+        client.post("/api/collars", json={"node_id": node_id, "name": name})
+    assert client.get("/api/collars/!a1b2c3d4/log").json() == {"total": 0, "entries": []}
+
+    def report(node_id, **over):
+        status = {"state": "INSIDE", "fence_version": 0, "battery_pct": 88, "lat": 40.001, "lon": -75.001, "pdop": 1.2,
+                  "sats": 11, "clearance_m": 14, "no_fix": False, "pki": True, "sender_key": "a2V5" + node_id[1:3]}
+        app.state.on_status(node_id, {**status, **over})
+
+    t0 = time.time()
+    report("!a1b2c3d4")
+    report("!a1b2c3d4", lat=40.002, lon=-75.002, state="WARNING", battery_pct=87)
+    report("!a1b2c3d4", lat=0.0, lon=0.0, no_fix=True, sats=0, state="NO_FENCE")  # no fix: logged without a position
+    report("!0000beef", lat=41.0, lon=-76.0)
+    report("!deadbeef")  # not a collar on this base: nothing is kept
+    log = client.get("/api/collars/!a1b2c3d4/log").json()
+    assert log["total"] == 3 and [e.get("lat") for e in log["entries"]] == [40.001, 40.002, None]
+    first, second, third = log["entries"]
+    assert first == {"t": first["t"], "state": "INSIDE", "bat": 88, "sats": 11, "lat": 40.001, "lon": -75.001}
+    assert second["state"] == "WARNING" and second["bat"] == 87 and t0 - 1 <= first["t"] <= second["t"] <= time.time() + 1
+    assert third == {"t": third["t"], "state": "NO_FENCE", "bat": 88, "sats": 0}
+    assert client.get("/api/collars/!0000beef/log").json()["total"] == 1
+    assert client.get("/api/collars/!deadbeef/log").status_code == 404
+    assert not (tmp_path / "log" / "deadbeef.jsonl").exists() and (tmp_path / "log" / "a1b2c3d4.jsonl").exists()
+    # From a time on, and only the newest when there are more than asked for.
+    assert client.get(f"/api/collars/!a1b2c3d4/log?since={time.time() + 5}").json() == {"total": 0, "entries": []}
+    newest = client.get("/api/collars/!a1b2c3d4/log?limit=2").json()
+    assert newest["total"] == 3 and [e.get("lat") for e in newest["entries"]] == [40.002, None]
+    # What is new since the page last asked: only the later entries, with the count of them all.
+    fresh = client.get(f"/api/collars/!a1b2c3d4/log?after={second['t']}").json()
+    assert fresh["total"] == 3 and fresh["entries"] == [e for e in log["entries"] if e["t"] > second["t"]]
+
+    # Clearing the path on the map leaves the log, and the other collar, alone.
+    assert len(client.get("/api/collars").json()["!a1b2c3d4"]["track"]) == 2
+    assert client.delete("/api/collars/!a1b2c3d4/track").json() == {"cleared": "!a1b2c3d4"}
+    collars = client.get("/api/collars").json()
+    assert collars["!a1b2c3d4"]["track"] == [] and len(collars["!0000beef"]["track"]) == 1
+    assert collars["!a1b2c3d4"]["status"]["lat"] == 40.002  # the collar's last known position stays
+    assert client.get("/api/collars/!a1b2c3d4/log").json()["total"] == 3
+    assert client.delete("/api/collars/!nope0000/track").status_code == 404
+    report("!a1b2c3d4", lat=40.003, lon=-75.003)
+    assert [p[1] for p in client.get("/api/collars").json()["!a1b2c3d4"]["track"]] == [40.003]  # and starts again
+
+    # Clearing the log; removing a collar removes its log too.
+    assert client.delete("/api/collars/!a1b2c3d4/log").json() == {"cleared": "!a1b2c3d4"}
+    assert client.get("/api/collars/!a1b2c3d4/log").json()["total"] == 0
+    assert len(client.get("/api/collars").json()["!a1b2c3d4"]["track"]) == 1
+    client.delete("/api/collars/!0000beef")
+    assert not (tmp_path / "log" / "0000beef.jsonl").exists()
+    # Another site's page can't clear either (the same rule as every other change).
+    assert client.delete("/api/collars/!a1b2c3d4/log", headers={"origin": "https://evil.example"}).status_code == 403
+
+
+def test_collar_log_file(tmp_path):
+    from geocollar_base.collarlog import CollarLog
+
+    clog = CollarLog(tmp_path, keep=8)
+    for i in range(10):
+        clog.add("!a1b2c3d4", {"t": 1000 + i, "lat": 40.0 + i, "lon": -75.0})
+    assert clog.read("!a1b2c3d4")["total"] == 10  # may grow a quarter past the limit...
+    clog.add("!a1b2c3d4", {"t": 1010})
+    got = clog.read("!a1b2c3d4")
+    assert got["total"] == 8 and [e["t"] for e in got["entries"]] == list(range(1003, 1011))  # ...then the oldest go
+    # It is read from the file, so it survives a restart, and a line cut short by a power cut is skipped.
+    with open(tmp_path / "log" / "a1b2c3d4.jsonl", "a") as f:
+        f.write('{"t": 1011, "lat": 4')
+    again = CollarLog(tmp_path, keep=8)
+    assert [e["t"] for e in again.read("!a1b2c3d4", since=1008)["entries"]] == [1008, 1009, 1010]
+    again.add("!a1b2c3d4", {"t": 1012})
+    assert again.read("!a1b2c3d4", since=1010)["total"] == 2
+    # A collar that got a new node ID during setup keeps its log.
+    again.move("!a1b2c3d4", "!0badf00d")
+    assert again.read("!a1b2c3d4")["total"] == 0 and again.read("!0badf00d", since=1010)["total"] == 2
+    again.move("!11111111", "!22222222")  # nothing to move
+    again.clear("!0badf00d")
+    again.clear("!0badf00d")
+    assert again.read("!0badf00d") == {"total": 0, "entries": []}
+    # A node ID becomes a file name: anything else is refused.
+    for bad in ("../../etc/passwd", "!a1b2c3d", "a1b2c3d4", "!A1B2C3D4", ""):
+        with pytest.raises(ValueError):
+            clog.add(bad, {"t": 1})
+        with pytest.raises(ValueError):
+            clog.read(bad)

@@ -3,10 +3,11 @@
 Draw geofences for your Meshtastic dog collars, send them over the mesh, and watch where each
 dog is. The page opens from the **GeoCollar** entry in the Home Assistant sidebar.
 
-The page has two tabs. **Collars** is the everyday view: the map, the list of collars, the
-selected collar with its commands, its fences, and property lines. **Settings** holds what you
-set up once and seldom touch: the base radio, adding a collar, your contact details for a lost
-dog, and collar firmware.
+The page has three tabs. **Collars** is the everyday view: the map, the list of collars, the
+selected collar with its commands, its fences, and property lines. **Log** is where a collar has
+been: its reports with the time and the GPS position, and a map of them. **Settings** holds what
+you set up once and seldom touch: the base radio, adding a collar, your contact details for a
+lost dog, and collar firmware.
 
 ## What you need
 
@@ -177,6 +178,31 @@ Tracker this costs no extra battery, because that board's GPS is powered wheneve
 
 The collar only ever uses fixes from its own GPS. A position shared with it by a phone running
 the Meshtastic app, or a fixed position set in its Meshtastic settings, is ignored.
+
+## Where a collar has been
+
+On the **Collars** tab the selected collar has a dotted path behind it on the map: its last 120
+positions. **Clear path**, under the collar's details, takes that path off the map. A new one
+starts with the collar's next position. Clearing the path leaves the log alone.
+
+The **Log** tab lists every report the base has heard from a collar: the time, the GPS position
+(latitude and longitude), whether the dog was inside, near the line or outside, the battery and
+the number of satellites. Pick the collar and how far back to look: the last hour, 24 hours,
+7 days, or everything. The newest report is at the top, and new ones are added as they come in.
+A report made without a GPS fix says **No GPS fix** and has no position. **See the log**, next to
+Clear path, opens the Log tab on the selected collar.
+
+The map beside the table has a point for each position, joined in the order they came and
+coloured by state, over the collar's fences. The largest point is the newest. Click a row to see
+its point, which gets a ring and a card with the details, or click a point to find its row. With
+the table focused, the up and down arrow keys step through the positions. On a phone the map
+stays at the top of the screen while the table scrolls under it, and the table shows the time,
+the position and the state; the battery and the satellites are on the card.
+
+The base keeps the newest 20,000 reports of each collar, which is more than four months at one
+report every 10 minutes. The page shows up to 2,000 at a time, the newest of the time you picked.
+**Clear log** deletes that collar's log for good, after asking. Removing a collar deletes its log
+too. The log starts with version 0.19.0: reports from before it are not in it.
 
 ## Battery
 
@@ -371,6 +397,7 @@ that an older version left in update mode says so in its panel; flash it over US
 
 Collars, fences and recent positions are kept in the app's `/data` folder (`geocollar.json`) and
 included in Home Assistant backups. The app keeps an hourly copy beside it, `geocollar.json.bak`.
+Each collar's log is a file of its own in `/data/log`, also in the backups.
 If a power cut damages the data file, the app starts from that copy, keeps the damaged file under
 a `.damaged-` name, and says so in its log. Through the sidebar the page is behind your Home Assistant login. The
 optional port on the **Network** tab opens the page without any login, so leave it empty unless

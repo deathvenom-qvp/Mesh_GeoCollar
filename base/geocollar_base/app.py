@@ -23,6 +23,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from . import firmware as fw
+from .collarlog import CollarLog
 from . import geo
 from . import protocol
 from . import radio
@@ -203,6 +204,7 @@ def clean_parcels(fc: dict) -> dict:
 def create_app(settings: dict | None = None, link: MeshLink | None = None) -> FastAPI:
     settings = settings or load_settings()
     store = Store(settings["data_dir"])
+    clog = CollarLog(settings["data_dir"])  # each collar's reports over time, for the Log tab
     # Wi-Fi updates were removed in 0.17. The home Wi-Fi password an older version kept here for
     # them is forgotten; the network's name is kept until the collars have been told to forget
     # it too (see forget-wifi).
@@ -307,7 +309,17 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
             return
         if not c.get("public_key"):
             store.set_collar_info(node_id, "public_key", key)
-        store.record_status(node_id, status)
+        recorded = store.record_status(node_id, status)
+        if recorded:
+            # The log: every report, with the position only when it was a fix from that moment.
+            entry = {"t": round(recorded["received"], 3), "state": recorded.get("state"),
+                     "bat": recorded.get("battery_pct"), "sats": recorded.get("sats")}
+            if not recorded.get("no_fix") and (recorded.get("lat") or recorded.get("lon")):
+                entry["lat"], entry["lon"] = recorded["lat"], recorded["lon"]
+            try:
+                clog.add(node_id, entry)
+            except (OSError, ValueError) as e:  # a full disk must not stop the reports
+                log.warning("could not log a report from %s: %s", node_id, e)
         if node_id in sim:
             return
         numbered = bool(status.get("numbered"))
@@ -417,10 +429,18 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
         if not new:
             return
         if old and old != new and store.collar(old) is not None:
-            if store.collar(new) is None:
+            kept = store.collar(new) is None
+            if kept:
                 store.move_collar(old, new)
             else:
                 store.remove_collar(old)
+            try:
+                if kept:
+                    clog.move(old, new)  # its log goes with it
+                else:
+                    clog.clear(old)
+            except (OSError, ValueError) as e:
+                log.warning("could not move the log of %s: %s", old, e)
             job.log(f"Moved the collar's record from {old} to its new node ID {new}")
         # Its key goes to the radio (note_setup) before anything is sent to it.
         result["new_collar"] = note_device(new, "usb", name, push=False)
@@ -474,6 +494,7 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
         return await call_next(request)
 
     app.state.store = store
+    app.state.clog = clog
     app.state.sim = sim
     app.state.on_status = on_status
     app.state.on_hello = on_hello
@@ -611,7 +632,32 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
         sim.remove(node_id)
         if not store.remove_collar(node_id):
             raise HTTPException(404, "unknown collar")
+        try:
+            clog.clear(node_id)
+        except (OSError, ValueError) as e:
+            log.warning("could not remove the log of %s: %s", node_id, e)
         return {"removed": node_id}
+
+    @app.delete("/api/collars/{node_id}/track")
+    def clear_track(node_id: str):
+        """Forget the path drawn behind the collar on the map. The log keeps its reports."""
+        require(node_id)
+        store.clear_track(node_id)
+        return {"cleared": node_id}
+
+    @app.get("/api/collars/{node_id}/log")
+    def collar_log(node_id: str, since: float = 0, limit: int = 2000, after: float | None = None):
+        """The collar's reports from `since` (seconds since 1970) on, oldest first; the newest
+        `limit` of them if there are more. With `after`, only those later than that time are
+        returned, while total still counts from `since`."""
+        require(node_id)
+        return clog.read(node_id, since, max(1, min(limit, 5000)), after)
+
+    @app.delete("/api/collars/{node_id}/log")
+    def clear_log(node_id: str):
+        require(node_id)
+        clog.clear(node_id)
+        return {"cleared": node_id}
 
     @app.put("/api/collars/{node_id}/fences")
     def set_fences(node_id: str, geojson: dict):

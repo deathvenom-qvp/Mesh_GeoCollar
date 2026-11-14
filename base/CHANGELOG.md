@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.19.0
+
+A log of where each collar has been, and a way to clear the path on the map. Only the base app
+changed; the collar firmware is the same as in 0.16.0. Tested with the app's own tests and in a
+browser against simulated collars, not on a real one.
+
+- **Log tab**, between Collars and Settings. For the collar you pick it lists every report the
+  base heard: the time, the GPS position, the state, the battery and the satellites, newest
+  first, for the last hour, 24 hours, 7 days or everything. Beside it is a map with a point for
+  each position, joined in order and coloured by state, over the collar's fences. A row and its
+  point go together: click either to find the other. New reports are added as they come in.
+- The base keeps the newest 20,000 reports of each collar in `/data/log`, which Home Assistant
+  backups include. The log starts with this version: earlier reports are not in it. **Clear log**
+  deletes one collar's log, and removing a collar deletes its log.
+- **Clear path** on the Collars tab, under the selected collar's details, takes the dotted path
+  behind the collar off the map. The log keeps its reports.
+- On a phone the Log tab's map stays at the top of the screen while the table scrolls under it.
+- The two maps keep the same background, satellite or street.
+
 ## 0.18.0
 
 Flashing no longer starts with getting a build. Tested with the app's own tests and in a browser

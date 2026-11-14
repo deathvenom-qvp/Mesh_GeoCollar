@@ -853,6 +853,7 @@ def test_setup_from_the_browser_over_a_websocket(tmp_path, monkeypatch):
     c = TestClient(create_app({"data_dir": str(tmp_path)}))
     # Flashed (full install) as !0badf00d; setup gives it a key, and with it a new node ID.
     c.post("/api/collars", json={"node_id": "!0badf00d", "name": "Rex"})
+    c.app.state.clog.add("!0badf00d", {"t": 1000, "lat": 40.0, "lon": -75.0})
     with c.websocket_connect("/api/firmware/setup-web?name=Rex&lock=false",
                              headers={"origin": "http://testserver"}) as ws:
         job = ws.receive_json()["job"]
@@ -867,6 +868,8 @@ def test_setup_from_the_browser_over_a_websocket(tmp_path, monkeypatch):
     assert j["state"] == "done", j
     collars = c.get("/api/collars").json()
     assert list(collars) == ["!a1b2c3d4"] and collars["!a1b2c3d4"]["name"] == "Rex"
+    assert c.get("/api/collars/!a1b2c3d4/log").json()["entries"] == [{"t": 1000, "lat": 40.0, "lon": -75.0}]  # its log too
+    assert not (tmp_path / "log" / "0badf00d.jsonl").exists()
 
     # Another site's page can't open it: WebSockets ignore CORS.
     with pytest.raises(WebSocketDisconnect):

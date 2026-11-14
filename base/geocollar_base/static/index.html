@@ -40,20 +40,23 @@
   }
   * { box-sizing: border-box; }
   html, body { height: 100%; }
-  /* Two pages share one header: "Collars" is the sidebar with the map beside it, "Settings"
+  /* Three pages share one header: "Collars" is the sidebar with the map beside it, "Log"
+     (body.log) is a collar's reports in a wider sidebar with a map of its own, and "Settings"
      (body.settings) takes the whole width and has no map. */
   body { margin: 0; font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; background: var(--bg); color: var(--fg);
          display: grid; grid-template-columns: 360px minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr);
          grid-template-areas: "top map" "side map"; }
   body.settings { grid-template-columns: minmax(0, 1fr); grid-template-areas: "top" "settings"; }
+  body.log { grid-template-columns: 440px minmax(0, 1fr); }
   #top { grid-area: top; padding: 12px 16px 0; border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); }
   #top > * { max-width: 328px; } /* the sidebar's width, so the header does not move between the two pages */
   aside { grid-area: side; border-right: 1px solid var(--line); overflow-y: auto; min-height: 0; }
   main { grid-area: map; position: relative; min-height: 0; }
-  #map { position: absolute; inset: 0; }
+  #map, #logMap { position: absolute; inset: 0; }
   #viewSettings { grid-area: settings; overflow-y: auto; min-height: 0; background: var(--panel); }
   body.settings #top { border-right: 0; }
   body.settings aside, body.settings main, body:not(.settings) #viewSettings { display: none; }
+  body:not(.log) #viewLog, body:not(.log) #logMain, body.log #viewCollars, body.log #mapMain { display: none; }
   .tabs { display: flex; gap: 4px; margin-top: 10px; }
   .tabs button { flex: 1; border: 0; border-bottom: 3px solid transparent; border-radius: 0; background: none; padding: 7px 6px;
                  font-weight: 600; color: var(--muted); }
@@ -149,6 +152,11 @@
   .radioedit label.row { gap: 6px; font-size: 12px; align-items: flex-start; }
   .radioedit[hidden] { display: none; }
   @media (max-width: 420px) { .radioedit { grid-template-columns: 1fr; } }
+  /* A narrow phone has room for the time, the position and the state; the battery and the
+     satellite count are on the card that a row's point gets on the map. A very narrow one lets
+     the position wrap. */
+  @media (max-width: 420px) { #logTable th:nth-child(n+4), #logTable td:nth-child(n+4) { display: none; } }
+  @media (max-width: 350px) { #logTable td:nth-child(2) { white-space: normal; } }
   .shockbox { margin-top: 8px; padding: 8px; border: 1px solid var(--line); border-radius: 8px; font-size: 13px; }
   .shockbox input[type=range] { width: 100%; }
   button.danger { background: var(--bad); color: #fff; border-color: var(--bad); }
@@ -197,6 +205,29 @@
   .callout { padding: 6px 8px; border-radius: 6px; font-size: 12px; margin-top: 8px; background: color-mix(in srgb, var(--warn) 16%, transparent); }
   .callout.bad { background: color-mix(in srgb, var(--bad) 14%, transparent); }
 
+  /* The selected collar's path on the map, and the Log page */
+  .pathrow { margin: -4px 0 10px; }
+  .pathrow .row { gap: 12px; flex: none; }
+  .logpick { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 10px; }
+  #logEmpty { padding: 14px 16px; }
+  #logTable { width: 100%; border-collapse: collapse; font-size: 12px; font-variant-numeric: tabular-nums; }
+  #logTable[hidden] { display: none; }
+  #logTable th, #logTable td { padding: 4px 6px; text-align: left; white-space: nowrap; }
+  #logTable th:first-child, #logTable td:first-child { padding-left: 16px; }
+  #logTable th:last-child, #logTable td:last-child { padding-right: 16px; text-align: right; }
+  #logTable thead th { position: sticky; top: 0; z-index: 1; background: var(--bg); color: var(--muted); font-weight: 600;
+                       border-bottom: 1px solid var(--line); }
+  #logTable tr.day th { padding-top: 10px; color: var(--muted); font-weight: 600; text-align: left; border-bottom: 1px solid var(--line); }
+  #logTable tr { scroll-margin-top: 30px; } /* clear of the column headings when a row is scrolled to */
+  #logTable tr.pt { cursor: pointer; }
+  #logTable tr.pt:hover { background: color-mix(in srgb, var(--accent) 8%, transparent); }
+  #logTable tr.picked, #logTable tr.picked:hover { background: color-mix(in srgb, var(--accent) 20%, transparent); }
+  #logTable tr.nofix td { color: var(--muted); }
+  #logTable .dot { margin-right: 5px; width: 8px; height: 8px; }
+  #logRows:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+  .logpop { font-size: 12px; line-height: 1.5; }
+  .logpop b { font-size: 13px; }
+
   /* Map overlays */
   .banner { position: absolute; z-index: 1000; top: 12px; left: 50%; transform: translateX(-50%); background: var(--bg); color: var(--fg);
             border: 1px solid var(--line); box-shadow: var(--shadow); border-radius: 10px; padding: 8px 12px; display: flex; gap: 10px; align-items: center;
@@ -227,6 +258,17 @@
     html, body { height: auto; min-height: 100%; }
     body { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto 58vh auto; grid-template-areas: "top" "map" "side"; }
     body.settings { grid-template-rows: auto auto; }
+    /* The Log page on a phone: its map stays at the top of the screen while the table scrolls
+       under it, so a tapped row's point can be seen. The map and the table share one grid cell
+       (an element can only stick within its own cell). */
+    body.log { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto auto; grid-template-areas: "top" "side"; }
+    body.log #logMain { grid-area: side; align-self: start; position: sticky; top: 0; z-index: 2; height: 44vh; }
+    #viewLog { padding-top: 44vh; }
+    #logTable thead th { top: 44vh; }
+    #logTable tr { scroll-margin-top: calc(44vh + 30px); }
+    #logTable th, #logTable td { padding: 4px; }
+    #logTable th:first-child, #logTable td:first-child { padding-left: 12px; }
+    #logTable th:last-child, #logTable td:last-child { padding-right: 12px; }
     #top { border-right: 0; }
     #top > * { max-width: none; }
     main { height: 58vh; }
@@ -251,6 +293,7 @@
   </div>
   <div class="tabs" role="tablist" aria-label="Pages">
     <button type="button" role="tab" id="tabCollars" data-tab="collars" aria-controls="viewCollars" aria-selected="true">Collars</button>
+    <button type="button" role="tab" id="tabLog" data-tab="log" aria-controls="viewLog" aria-selected="false" tabindex="-1">Log</button>
     <button type="button" role="tab" id="tabSettings" data-tab="settings" aria-controls="viewSettings" aria-selected="false" tabindex="-1">Settings</button>
   </div>
 </header>
@@ -284,6 +327,11 @@
         <button id="zoomDog" title="Show this collar on the map">Find on map</button>
       </div>
       <div class="stats" id="selStats"></div>
+      <div class="row spread pathrow">
+        <span class="muted" id="trackInfo"></span>
+        <span class="row"><button type="button" class="link" id="openLog">See the log</button>
+          <button type="button" class="link" id="clearTrack" title="Remove the dotted path behind this collar from the map">Clear path</button></span>
+      </div>
       <div id="beaconBox"></div>
       <div class="shockbox" id="shockBox">
         <div class="row spread"><span id="shockState"></span><button id="shockToggle"></button></div>
@@ -417,13 +465,45 @@
   </section>
 </aside>
 
-<main>
+<main id="mapMain">
   <div id="map"></div>
   <div class="banner" id="banner" hidden>
     <span id="bannerText"></span>
     <button class="primary" id="finishDraw">Finish</button>
     <button id="cancelDraw">Cancel</button>
   </div>
+</main>
+
+<!-- Log tab: one collar's reports over time, newest first, and (in #logMain) the same points on a map. -->
+<aside id="viewLog" role="tabpanel" aria-labelledby="tabLog" hidden>
+  <section>
+    <h2>Log</h2>
+    <div class="logpick">
+      <label class="field">Collar
+        <select id="logCollar"></select></label>
+      <label class="field">Show
+        <select id="logRange">
+          <option value="3600">Last hour</option>
+          <option value="86400" selected>Last 24 hours</option>
+          <option value="604800">Last 7 days</option>
+          <option value="0">Everything</option>
+        </select></label>
+    </div>
+    <div class="row spread" style="margin-top:10px">
+      <span class="muted" id="logCount" role="status"></span>
+      <span class="row" style="gap:12px;flex:none"><button type="button" class="link" id="logRefresh">Refresh</button>
+        <button type="button" class="link" id="logClear">Clear log</button></span>
+    </div>
+  </section>
+  <div class="muted" id="logEmpty" hidden></div>
+  <table id="logTable" hidden>
+    <thead><tr><th scope="col">Time</th><th scope="col">Position</th><th scope="col">State</th><th scope="col">Battery</th><th scope="col">Sats</th></tr></thead>
+    <tbody id="logRows" tabindex="0" aria-label="Reports, newest first. Up and down arrows step through the positions."></tbody>
+  </table>
+</aside>
+
+<main id="logMain" hidden>
+  <div id="logMap"></div>
 </main>
 
 <!-- Settings tab: the base radio, adding collars, the owner's contact and collar firmware. -->
@@ -614,15 +694,28 @@ const speedText = mps => isFt() ? `${(mps * 2.23694).toFixed(1)} mph` : `${(+mps
 // Map
 // ---------------------------------------------------------------------------------------------
 const map = L.map('map', { zoomControl: true }).setView([30, -40], 3);
-const baseLayers = {
+// A set for each map (this one and the Log page's): a layer can be on one map only.
+const makeBaseLayers = () => ({
   Satellite: L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
     { maxZoom: 21, maxNativeZoom: 19, referrerPolicy: 'strict-origin-when-cross-origin', attribution: 'Imagery &copy; Esri' }),
   Street: L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png',
     { maxZoom: 21, maxNativeZoom: 19, referrerPolicy: 'strict-origin-when-cross-origin', attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors' }),
-};
+});
+const baseLayers = makeBaseLayers();
 let baseName = 'Satellite';
 try { baseName = localStorage.getItem('geocollar.base') || baseName; } catch {}
-(baseLayers[baseName] || baseLayers.Satellite).addTo(map);
+if (!baseLayers[baseName]) baseName = 'Satellite';
+baseLayers[baseName].addTo(map);
+// The choice of background is remembered, and the two maps keep to the same one.
+const baseMaps = [[map, baseLayers]];
+function setBase(name) {
+  if (name === baseName || !baseLayers[name]) return;
+  baseName = name;
+  try { localStorage.setItem('geocollar.base', name); } catch {}
+  for (const [m, layers] of baseMaps) {
+    for (const [n, layer] of Object.entries(layers)) { if (n === name) layer.addTo(m); else m.removeLayer(layer); }
+  }
+}
 // Address search (OpenStreetMap Nominatim, through the base). Searches on Enter only, as
 // Nominatim's usage policy asks.
 let searchMarker = null;
@@ -667,7 +760,7 @@ const Search = L.Control.extend({
 });
 new Search().addTo(map);
 L.control.layers(baseLayers, null, { position: 'topright' }).addTo(map);
-map.on('baselayerchange', e => { try { localStorage.setItem('geocollar.base', e.name); } catch {} });
+map.on('baselayerchange', e => setBase(e.name));
 
 const Locate = L.Control.extend({
   options: { position: 'topleft' },
@@ -727,6 +820,7 @@ const dogLayer = L.featureGroup().addTo(map);
 // ---------------------------------------------------------------------------------------------
 let collars = {};          // from the API
 let selected = null;       // node id
+let pathCleared = null;    // the collar whose path was just cleared here, until it has a new one
 let shownShockOff = false; // shock-off state the zone list was last drawn with
 let zones = [];            // [{ layer, props: { name, kind, danger_m, warning_m, attention_m } }] for the selected collar
 let activeZone = null;     // the zone being edited
@@ -1179,6 +1273,12 @@ function renderSelected() {
     + (c.update_available ? '. Update available: see Settings' : '')]);
   $('selStats').replaceChildren(...rows.flatMap(([k, v]) => [el('span', {}, k), el('span', {}, v)]));
   $('zoomDog').disabled = !(s && (s.lat || s.lon));
+  // The dotted path behind the collar on the map (renderDogs draws it).
+  const pathLen = Math.min((c.track || []).length, TRACK_POINTS);
+  if (pathLen) pathCleared = null;
+  $('trackInfo').textContent = pathLen ? `Path on the map: ${pathLen} position${pathLen === 1 ? '' : 's'}`
+    : pathCleared === selected ? 'Path cleared. The log still has the positions.' : 'No path on the map yet';
+  $('clearTrack').disabled = !pathLen;
   renderCopyFrom();
   renderSim();
 }
@@ -1642,6 +1742,7 @@ async function refresh() {
   renderContact();
   if (selected) renderStatusArea();
   if (tab === 'settings') renderFw();
+  if (tab === 'log') logTick();
   if (parcelSelected.size) updateParcelMake();
   // The danger row's label follows the collar's shock switch; redraw it only when that changes.
   if (shockOffOnCollar() !== shownShockOff && !drawKind && document.activeElement?.type !== 'number') { shownShockOff = shockOffOnCollar(); renderZones(); }
@@ -1692,6 +1793,20 @@ $('zoomDog').onclick = () => {
   const s = collars[selected] && collars[selected].status;
   if (s) map.setView([s.lat, s.lon], Math.max(map.getZoom(), 18));
 };
+// Clearing the path takes the dotted line off this map. The collar's reports stay in its log.
+$('clearTrack').onclick = async () => {
+  const id = selected;
+  if (!id) return;
+  $('clearTrack').disabled = true;
+  try {
+    await api(`collars/${encodeURIComponent(id)}/track`, { method: 'DELETE' });
+    if (collars[id]) collars[id].track = [];
+    pathCleared = id;
+    renderDogs();
+    renderSelected();
+  } catch (e) { $('trackInfo').textContent = `Could not clear the path: ${e.message}`; $('clearTrack').disabled = false; }
+};
+$('openLog').onclick = () => showTab('log');
 
 $('addForm').onsubmit = async e => {
   e.preventDefault();
@@ -2650,32 +2765,280 @@ document.querySelectorAll('.unit').forEach(e => { e.textContent = unitLabel(); }
 document.querySelectorAll('.unitName').forEach(e => { e.textContent = isFt() ? 'Feet' : 'Metres'; });
 
 // ---------------------------------------------------------------------------------------------
-// The two pages. "Collars" is the collar list, the selected collar's panel and the map;
-// "Settings" is the base radio, adding collars, the owner's contact and collar firmware.
+// Log: one collar's reports over time (the base keeps them, see collarlog.py). The table is
+// newest first; the map beside it has the same positions as points, joined in the order they
+// came. A row and its point are two views of one report: picking either marks both.
 // ---------------------------------------------------------------------------------------------
+const LOG_ROWS = 2000;      // reports shown at once; the newest, if the time asked for has more
+let logId = null;           // the collar picked on this page
+let logShown = null;        // the collar whose reports are in logEntries
+let logFrom = null;         // the collar selected on the Collars page when the log was last opened
+let logEntries = [];        // its reports, oldest first: { t, state, bat, sats, lat?, lon? } and k, a key given here
+let logKey = 0;             // the last key given
+let logTotal = 0;           // how many reports the base has for the time asked for
+let logSeen = null;         // that collar's last report when the log was read
+let logPicked = null;       // the picked report's key
+let logReq = 0;             // counts the requests, so a late answer to an old one is dropped
+let logFit = true;          // show all the points when the map is next drawn
+let logMap = null, logLayer = null, logRing = null, logPopup = null;
+let logClosing = false;     // the card on the map is closing (so it is not closed a second time)
+let logDots = new Map();    // a report's key -> its point on the map
+const hasPos = e => e.lat != null && e.lon != null;
+// Made once: a formatter is slow to make, and the table can have 2000 rows.
+const logDayFmt = new Intl.DateTimeFormat([], { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
+const logTimeFmt = new Intl.DateTimeFormat([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+const logDay = t => logDayFmt.format(t * 1000);
+const logTime = t => logTimeFmt.format(t * 1000);
+const logPos = e => `${e.lat.toFixed(6)}, ${e.lon.toFixed(6)}`;
+const logBat = e => e.bat != null && e.bat !== 255 ? `${e.bat}%` : '';
+const stateColor = st => css({ INSIDE: '--ok', WARNING: '--warn', OUTSIDE: '--bad', LOST: '--bad' }[st] || '--idle');
+
+function logMapInit() {
+  if (logMap) return;
+  // Canvas: a few thousand points stay quick to pan and zoom.
+  logMap = L.map('logMap', { zoomControl: true, preferCanvas: true }).setView(map.getCenter(), map.getZoom());
+  const layers = makeBaseLayers();
+  layers[baseName].addTo(logMap);
+  baseMaps.push([logMap, layers]);
+  L.control.layers(layers, null, { position: 'topright' }).addTo(logMap);
+  logMap.on('baselayerchange', e => setBase(e.name));
+  logLayer = L.featureGroup().addTo(logMap);
+  logPopup = L.popup({ offset: [0, -4], autoPanPadding: [30, 30] });
+  logMap.on('popupclose', e => {
+    if (e.popup !== logPopup || logClosing) return;
+    logClosing = true;
+    try { pickLog(null); } finally { logClosing = false; }
+  });
+  new (L.Control.extend({
+    options: { position: 'bottomleft' },
+    onAdd() {
+      return el('div', { class: 'legend' },
+        ...[['--ok', 'Inside'], ['--warn', 'Near the line'], ['--bad', 'Outside or lost'], ['--idle', 'No fence']]
+          .map(([color, text]) => el('div', {}, el('i', { style: `background:var(${color});border-radius:50%` }), text)));
+    },
+  }))().addTo(logMap);
+}
+
+// The collar picker. It follows the collar selected on the Collars page each time that changed.
+function renderLogPicker() {
+  const ids = Object.keys(collars);
+  if (!collars[logId]) { logId = collars[selected] ? selected : ids[0] || null; }
+  const sel = $('logCollar');
+  const want = JSON.stringify(ids.map(id => [id, collars[id].name]));
+  if (sel.dataset.shown !== want) { // only when a collar was added, removed or renamed
+    sel.replaceChildren(...ids.map(id => el('option', { value: id }, collars[id].name)));
+    sel.dataset.shown = want;
+  }
+  sel.disabled = !ids.length;
+  if (logId && sel.value !== logId) sel.value = logId;
+}
+
+// Read the log from the base. fresh: all of it for the time asked for; otherwise only what has
+// come in since the newest report already here.
+async function loadLog(fresh = true) {
+  const id = logId, range = +$('logRange').value, req = ++logReq;
+  if (!id || !collars[id]) { logShown = id; logEntries = []; logTotal = 0; logSeen = null; logPicked = null; renderLog(); drawLogMap(); return; }
+  const from = range ? Date.now() / 1000 - range : 0;
+  const last = !fresh && logShown === id && logEntries.length ? logEntries[logEntries.length - 1].t : null;
+  const seen = collars[id].status ? collars[id].status.received : null;
+  let got;
+  try {
+    got = await api(`collars/${encodeURIComponent(id)}/log?since=${from}&limit=${LOG_ROWS}${last != null ? `&after=${last}` : ''}`);
+  } catch (e) {
+    if (req === logReq) $('logCount').textContent = `Could not read the log: ${e.message}`;
+    return;
+  }
+  if (req !== logReq) return; // the collar or the time was changed meanwhile
+  for (const e of got.entries) e.k = ++logKey;
+  // Read afresh, the reports have new keys: the picked one is found again by what it says.
+  const was = logPicked != null && logEntries.find(e => e.k === logPicked);
+  logEntries = (last != null ? logEntries.filter(e => e.t >= from).concat(got.entries) : got.entries).slice(-LOG_ROWS);
+  logTotal = got.total;
+  logShown = id;
+  logSeen = seen;
+  const still = was && logEntries.find(e => e === was || (last == null && e.t === was.t && e.lat === was.lat && e.lon === was.lon));
+  logPicked = still ? still.k : null;
+  renderLog();
+  drawLogMap();
+}
+
+function renderLog() {
+  const c = collars[logId], n = logEntries.length;
+  const rows = [];
+  let day = '';
+  for (let i = n - 1; i >= 0; i--) {
+    const e = logEntries[i];
+    if (logDay(e.t) !== day) { day = logDay(e.t); rows.push(el('tr', { class: 'day' }, el('th', { colspan: 5, scope: 'colgroup' }, day))); }
+    rows.push(el('tr', { class: (hasPos(e) ? 'pt' : 'nofix') + (e.k === logPicked ? ' picked' : ''), 'data-k': e.k },
+      el('td', {}, logTime(e.t)),
+      el('td', {}, hasPos(e) ? logPos(e) : 'No GPS fix'),
+      el('td', {}, el('span', { class: `dot st-${e.state || 'NONE'}` }), stateLabel(e.state)),
+      el('td', {}, logBat(e)),
+      el('td', {}, e.sats != null ? String(e.sats) : '')));
+  }
+  $('logRows').replaceChildren(...rows);
+  $('logTable').hidden = !n;
+  const span = { 3600: 'in the last hour', 86400: 'in the last 24 hours', 604800: 'in the last 7 days' }[$('logRange').value] || 'yet';
+  $('logEmpty').hidden = !!n;
+  $('logEmpty').textContent = !c ? 'No collars yet. Add one in Settings.'
+    : `No reports from ${c.name} ${span}.` + (span === 'yet' ? ' Each report the base hears from now on is added here.' : '');
+  const placed = logEntries.filter(hasPos).length;
+  $('logCount').textContent = !n ? ''
+    : (logTotal > n ? `The newest ${n} of ${logTotal} reports` : `${n} report${n === 1 ? '' : 's'}`)
+      + (placed === n ? '' : `, ${placed} with a position`);
+  $('logClear').disabled = !c;
+  $('logRefresh').disabled = !c;
+}
+
+function drawLogMap() {
+  if (!logMap) return;
+  logLayer.clearLayers();
+  logDots = new Map();
+  logRing = null;
+  const c = collars[logId];
+  // The collar's fences, faintly, to place the points.
+  if (c && c.fences && c.fences.features && c.fences.features.length) {
+    try {
+      L.geoJSON(c.fences, { interactive: false, pmIgnore: true, snapIgnore: true,
+        style: f => ({ color: css(f.properties && f.properties.kind === 'keep_out' ? '--keep-out' : '--keep-in'), weight: 2, opacity: 0.9, fillOpacity: 0.06 }) }).addTo(logLayer);
+    } catch {}
+  }
+  const pts = logEntries.filter(hasPos);
+  if (pts.length > 1) { // a white line on a dark one: it shows on the satellite picture and on the street map
+    const line = pts.map(e => [e.lat, e.lon]), plain = { interactive: false, pmIgnore: true, snapIgnore: true };
+    L.polyline(line, { ...plain, color: '#000', weight: 4, opacity: 0.3 }).addTo(logLayer);
+    L.polyline(line, { ...plain, color: '#fff', weight: 1.5, opacity: 0.9 }).addTo(logLayer);
+  }
+  pts.forEach((e, i) => {
+    const newest = i === pts.length - 1;
+    const dot = L.circleMarker([e.lat, e.lon], { radius: newest ? 8 : 5, color: '#fff', weight: newest ? 3 : 1.5, fillColor: stateColor(e.state), fillOpacity: 1,
+      pmIgnore: true, snapIgnore: true, bubblingMouseEvents: false });
+    dot.bindTooltip(() => `${logTime(e.t)} · ${stateLabel(e.state)}${newest ? ' · newest' : ''}`, { direction: 'top', offset: [0, -6] });
+    dot.on('click', () => pickLog(e.k, 'map'));
+    dot.addTo(logLayer);
+    logDots.set(e.k, dot);
+  });
+  if (logFit) {
+    logFit = false;
+    const where = pts.length ? L.latLngBounds(pts.map(e => [e.lat, e.lon])) : logLayer.getLayers().length ? logLayer.getBounds() : null;
+    // Not animated: while Leaflet animates one zoom it ignores the next, and a second collar
+    // picked straight after the first would be left showing the first one's place.
+    if (where && where.isValid()) logMap.fitBounds(where, { maxZoom: 19, padding: [40, 40], animate: false });
+    else if (c && c.status && (c.status.lat || c.status.lon)) logMap.setView([c.status.lat, c.status.lon], 18, { animate: false });
+  }
+  markLogPick(false);
+}
+
+// Mark the picked report on the map: a ring round its point and a card with its details.
+function markLogPick(show) {
+  if (!logMap) return;
+  if (logRing) { logLayer.removeLayer(logRing); logRing = null; }
+  const e = logPicked != null && logEntries.find(x => x.k === logPicked);
+  if (!e || !hasPos(e)) {
+    if (!logClosing && logMap.hasLayer(logPopup)) { logClosing = true; try { logMap.closePopup(logPopup); } finally { logClosing = false; } }
+    return;
+  }
+  logRing = L.circleMarker([e.lat, e.lon], { radius: 12, color: css('--accent'), weight: 3, fill: false, interactive: false, pmIgnore: true, snapIgnore: true }).addTo(logLayer);
+  const c = collars[logId];
+  logPopup.setLatLng([e.lat, e.lon]).setContent(el('div', { class: 'logpop' },
+    el('b', {}, c ? c.name : ''), el('br'), `${logDay(e.t)}, ${logTime(e.t)}`, el('br'), logPos(e), el('br'),
+    [stateLabel(e.state), logBat(e) && `battery ${logBat(e)}`, e.sats != null && `${e.sats} sats`].filter(Boolean).join(' · ')));
+  if (!logMap.hasLayer(logPopup)) logPopup.openOn(logMap);
+  if (show && !logMap.getBounds().pad(-0.1).contains([e.lat, e.lon])) logMap.panTo([e.lat, e.lon]);
+}
+
+// Pick a report by its key, from its row ('table') or its point ('map'), or none (null).
+function pickLog(k, from) {
+  if (k === logPicked) return;
+  logPicked = k;
+  let row = null;
+  for (const tr of $('logRows').children) {
+    const on = k != null && tr.dataset.k === String(k);
+    tr.classList.toggle('picked', on);
+    if (on) row = tr;
+  }
+  markLogPick(from === 'table');
+  if (row) row.scrollIntoView({ block: 'nearest' });
+}
+
+// Called with each refresh while the Log page is showing.
+function logTick() {
+  renderLogPicker();
+  const c = collars[logId];
+  if (logShown !== logId) { logPicked = null; logFit = true; loadLog(); } // its collar was removed, or the first collar was added
+  else if (c && (c.status ? c.status.received : null) !== logSeen) loadLog(false);
+}
+
+function openLog() {
+  logMapInit();
+  logMap.invalidateSize(); // it was hidden: let Leaflet measure it again
+  if (collars[selected] && selected !== logFrom) logId = selected;
+  logFrom = selected;
+  renderLogPicker();
+  logPicked = null;
+  logFit = true;
+  loadLog();
+}
+
+$('logCollar').onchange = () => { logId = $('logCollar').value; logPicked = null; logFit = true; loadLog(); };
+$('logRange').onchange = () => { logPicked = null; logFit = true; loadLog(); };
+$('logRefresh').onclick = () => { logFit = true; loadLog(); };
+$('logClear').onclick = async () => {
+  const id = logId, c = collars[id];
+  if (!c || !confirm(`Delete every logged report from ${c.name}? This can't be undone.`)) return;
+  try { await api(`collars/${encodeURIComponent(id)}/log`, { method: 'DELETE' }); }
+  catch (e) { $('logCount').textContent = `Could not clear the log: ${e.message}`; return; }
+  if (id === logId) { logPicked = null; loadLog(); }
+};
+$('logRows').addEventListener('click', e => {
+  const tr = e.target.closest('tr.pt');
+  if (tr) pickLog(+tr.dataset.k, 'table');
+});
+// Up and down step through the reports that have a position.
+$('logRows').addEventListener('keydown', e => {
+  if (e.key !== 'ArrowDown' && e.key !== 'ArrowUp') return;
+  const pts = logEntries.filter(hasPos);
+  if (!pts.length) return;
+  e.preventDefault();
+  const at = pts.findIndex(x => x.k === logPicked);
+  // The table is newest first, so down is one report earlier.
+  const next = at < 0 ? pts.length - 1 : Math.max(0, Math.min(pts.length - 1, at + (e.key === 'ArrowDown' ? -1 : 1)));
+  pickLog(pts[next].k, 'table');
+});
+
+// ---------------------------------------------------------------------------------------------
+// The three pages. "Collars" is the collar list, the selected collar's panel and the map; "Log"
+// is one collar's reports and a map of them; "Settings" is the base radio, adding collars, the
+// owner's contact and collar firmware.
+// ---------------------------------------------------------------------------------------------
+const TABS = ['collars', 'log', 'settings'];
+const tabView = { collars: 'viewCollars', log: 'viewLog', settings: 'viewSettings' };
 var tab = 'collars';
 function showTab(name, scrollTo) {
-  tab = name === 'settings' ? 'settings' : 'collars';
+  tab = TABS.includes(name) ? name : 'collars';
   document.body.classList.toggle('settings', tab === 'settings');
+  document.body.classList.toggle('log', tab === 'log');
   for (const b of document.querySelectorAll('.tabs [role=tab]')) {
     const on = b.dataset.tab === tab;
     b.setAttribute('aria-selected', String(on));
     b.tabIndex = on ? 0 : -1;
   }
-  $('viewCollars').hidden = tab !== 'collars';
-  $('viewSettings').hidden = tab !== 'settings';
+  for (const t of TABS) $(tabView[t]).hidden = tab !== t;
+  $('mapMain').hidden = tab !== 'collars';
+  $('logMain').hidden = tab !== 'log';
   if (tab === 'collars') map.invalidateSize(); // the map was hidden: let Leaflet measure it again
+  else if (tab === 'log') openLog();
   else fwRefresh();
   const target = scrollTo && $(scrollTo);
   if (target) target.scrollIntoView({ block: 'start' });
-  else (tab === 'settings' ? $('viewSettings') : $('viewCollars')).scrollTop = 0;
+  else $(tabView[tab]).scrollTop = 0;
 }
 document.querySelector('.tabs').addEventListener('click', e => { const b = e.target.closest('[role=tab]'); if (b) showTab(b.dataset.tab); });
 document.querySelector('.tabs').addEventListener('keydown', e => {
   if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
   e.preventDefault();
-  showTab(tab === 'collars' ? 'settings' : 'collars');
-  $(tab === 'collars' ? 'tabCollars' : 'tabSettings').focus();
+  showTab(TABS[(TABS.indexOf(tab) + (e.key === 'ArrowRight' ? 1 : TABS.length - 1)) % TABS.length]);
+  document.querySelector(`.tabs [data-tab=${tab}]`).focus();
 });
 
 window.addEventListener('beforeunload', e => { if (isDirty() || Object.keys(drafts).length) { e.preventDefault(); e.returnValue = ''; } });

@@ -139,13 +139,13 @@ class Store:
                 c["sim"] = settings
             self._save()
 
-    def record_status(self, node_id: str, status: dict) -> None:
-        """Record a report from a collar on this base. Reports from unknown nodes are dropped:
-        a collar is only ever added on purpose."""
+    def record_status(self, node_id: str, status: dict) -> dict | None:
+        """Record a report from a collar on this base and return it as stored (None for an unknown
+        node: a collar is only ever added on purpose, so its reports are dropped)."""
         with self._lock:
             c = self._data["collars"].get(node_id)
             if c is None:
-                return
+                return None
             status = dict(status, received=time.time())
             # A collar that restarted and has had no fix since reports no position at all: keep
             # the last one this base knew, which the page shows as the last known position.
@@ -164,6 +164,17 @@ class Store:
                 track.append([status["received"], status["lat"], status["lon"]])
                 del track[:-TRACK_LIMIT]
             self._save(sync=False)
+            return dict(status)
+
+    def clear_track(self, node_id: str) -> bool:
+        """Forget the path drawn behind a collar on the map. Its log is kept apart (collarlog)."""
+        with self._lock:
+            c = self._data["collars"].get(node_id)
+            if c is None:
+                return False
+            c["track"] = []
+            self._save()
+            return True
 
     def set_collar_info(self, node_id: str, key: str, value) -> None:
         """Set or clear (value None) one extra field on a collar, e.g. firmware or update_mode."""
