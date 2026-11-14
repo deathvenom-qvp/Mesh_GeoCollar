@@ -122,10 +122,16 @@
   .stats span:nth-child(odd) { color: var(--muted); }
 
   /* Property lines */
-  .parcel-pop { font: 13px/1.4 system-ui, sans-serif; min-width: 200px; }
-  .parcel-pop dl { display: grid; grid-template-columns: auto 1fr; gap: 1px 8px; margin: 6px 0; font-size: 12px; }
-  .parcel-pop dt { color: #686b72; } .parcel-pop dd { margin: 0; word-break: break-word; }
-  .parcel-pop .actions { margin-top: 6px; }
+  .psel { border: 1px solid var(--parcel); border-radius: 8px; padding: 8px 10px; margin-top: 8px; background: var(--bg); }
+  .psel ul { list-style: none; margin: 4px 0 8px; padding: 0; font-size: 13px; }
+  .psel li { display: flex; justify-content: space-between; gap: 8px; padding: 2px 0; }
+  .psel li .muted { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .psel [hidden] { display: none !important; }
+  .psel .offset { display: grid; grid-template-columns: 1fr 80px; gap: 8px; align-items: end; }
+  .psel .sides { display: grid; grid-template-columns: 22px 1fr 80px; gap: 4px 8px; align-items: center; font-size: 13px; }
+  .sidetag { width: 22px; height: 22px; border-radius: 50%; background: var(--keep-in); color: var(--bg); font: 600 12px/22px system-ui, sans-serif;
+             text-align: center; box-shadow: 0 1px 3px rgba(0,0,0,.4); }
+  .sides .sidetag { box-shadow: none; }
 
   /* Firmware */
   .builds { list-style: none; margin: 6px 0; padding: 0; }
@@ -202,8 +208,31 @@
     <div class="row spread"><h2 style="margin:0">Property lines</h2>
       <label class="row muted" style="gap:5px"><input type="checkbox" id="parcelShow" checked> Show</label></div>
     <div class="muted" style="margin-top:6px">Import your parcel from your county's GIS or tax map site as GeoJSON, KML, or a
-      shapefile (the .zip, or the .shp, .dbf and .prj files together). Click a parcel on the map to turn it into a keep-in zone.
+      shapefile (the .zip, or the .shp, .dbf and .prj files together). Click parcels on the map to select them, then make
+      a keep-in zone from their outline, set back from the property line by as much as you like.
       Tax-map lines are often 1 to 5 m off, so check them against the satellite view.</div>
+    <div class="psel" id="parcelSel" hidden>
+      <div class="row spread"><b id="parcelSelTitle"></b><button class="link" id="parcelSelClear">Clear selection</button></div>
+      <ul id="parcelSelList"></ul>
+      <div class="muted">Set the perimeter back from the property line</div>
+      <div style="margin:4px 0 8px">
+        <div class="segmented" id="parcelMode" role="group" aria-label="Set-back">
+          <button type="button" data-mode="same" aria-pressed="true">Same all round</button>
+          <button type="button" data-mode="sides" aria-pressed="false">Each side</button>
+        </div>
+      </div>
+      <div class="offset" id="parcelSame">
+        <label class="field">Set-back
+          <input type="range" id="parcelOffsetRange" min="-10" max="30" step="0.5" value="3" aria-label="Set-back in metres"></label>
+        <label class="field">Metres <input type="number" id="parcelOffset" min="-10" max="30" step="0.5" value="3"></label>
+      </div>
+      <div class="sides" id="parcelSides" hidden></div>
+      <div class="muted" id="parcelOffsetNote" style="margin-top:4px"></div>
+      <div class="actions" style="margin-top:8px">
+        <button class="primary" id="parcelMake">Make keep-in zone</button>
+        <button class="link" id="parcelRemoveSel">Remove selected parcels</button>
+      </div>
+    </div>
     <div class="actions" style="margin-top:8px">
       <button id="parcelImport">Import file…</button>
       <button class="link" id="parcelClear" hidden>Remove all</button>
@@ -722,6 +751,7 @@ function renderZones() {
   const full = zones.length >= MAX_ZONES;
   $('drawIn').disabled = $('drawOut').disabled = full || !!drawKind;
   $('drawIn').title = $('drawOut').title = full ? `The collar holds at most ${MAX_ZONES} zones` : '';
+  if (typeof parcelSelected !== 'undefined' && parcelSelected.size) updateParcelMake();
   renderBands();
 }
 
@@ -992,6 +1022,7 @@ async function refresh() {
   renderSelected();
   if (selected) renderStatusArea();
   if ($('fwDetails').open) renderFw();
+  if (parcelSelected.size) updateParcelMake();
   // The danger row's label follows the collar's shock switch; redraw it only when that changes.
   if (shockOffOnCollar() !== shownShockOff && !drawKind && document.activeElement?.type !== 'number') { shownShockOff = shockOffOnCollar(); renderZones(); }
   if (firstLoad) {
@@ -1281,19 +1312,32 @@ map.createPane('parcels').style.zIndex = 380;
 let parcels = { type: 'FeatureCollection', features: [] };
 const parcelLayer = L.geoJSON(null, {
   pane: 'parcels', pmIgnore: true, snapIgnore: false, // zones being drawn snap to parcel corners
-  style: () => ({ color: css('--parcel'), weight: 2, dashArray: '6 5', fill: true, fillOpacity: 0.04, fillColor: css('--parcel') }),
-  onEachFeature: (f, layer) => layer.on('click', e => {
-    if (drawKind || pickMode) return; // let the click reach the map, to place a corner or a point
-    L.DomEvent.stopPropagation(e);
-    L.popup({ maxWidth: 320 }).setLatLng(e.latlng).setContent(parcelPopup(f, e.latlng)).openOn(map);
-  }),
+  style: f => parcelSelected.has(parcelKey(f))
+    ? { color: css('--parcel'), weight: 3, dashArray: null, fill: true, fillOpacity: 0.18, fillColor: css('--parcel') }
+    : { color: css('--parcel'), weight: 2, dashArray: '6 5', fill: true, fillOpacity: 0.04, fillColor: css('--parcel') },
+  onEachFeature: (f, layer) => {
+    layer.bindTooltip(() => parcelTitle(f.properties || {}), { sticky: true, direction: 'top', opacity: 0.9 });
+    layer.on('click', e => {
+      if (drawKind || pickMode) return; // let the click reach the map, to place a corner or a point
+      L.DomEvent.stopPropagation(e);
+      const k = parcelKey(f);
+      if (parcelSelected.has(k)) parcelSelected.delete(k); else parcelSelected.add(k);
+      parcelLayer.resetStyle(layer);
+      renderParcelSel();
+    });
+  },
 });
+var parcelSelected = new Set(); // parcelKey of each selected parcel
+const perimeterLayer = L.featureGroup().addTo(map);
 const parcelSay = t => { $('parcelMsg').textContent = t; };
 const parcelKey = f => JSON.stringify(f.geometry.coordinates);
 
 function showParcels() {
+  const keys = new Set(parcels.features.map(parcelKey));
+  for (const k of [...parcelSelected]) if (!keys.has(k)) parcelSelected.delete(k);
   parcelLayer.clearLayers();
   parcelLayer.addData(parcels);
+  renderParcelSel();
   const on = $('parcelShow').checked && parcels.features.length > 0;
   if (on) parcelLayer.addTo(map); else parcelLayer.remove();
   $('parcelClear').hidden = !parcels.features.length;
@@ -1320,27 +1364,8 @@ function parcelTitle(p) {
   return k ? String(p[k]) : 'Parcel';
 }
 
-function parcelPopup(f, latlng) {
-  const p = f.properties || {};
-  const keys = Object.keys(p).filter(k => p[k] !== '' && p[k] != null);
-  keys.sort((a, b) => PARCEL_LABELS.test(b) - PARCEL_LABELS.test(a));
-  const c = selected && collars[selected];
-  const full = zones.length >= MAX_ZONES;
-  return el('div', { class: 'parcel-pop' },
-    el('b', {}, parcelTitle(p)),
-    keys.length ? el('dl', {}, ...keys.slice(0, 8).flatMap(k => [el('dt', {}, k), el('dd', {}, String(p[k]))])) : null,
-    el('div', { class: 'actions' },
-      el('button', { class: 'primary', disabled: !c || full, title: !c ? 'Select a collar first' : full ? `A collar holds at most ${MAX_ZONES} zones` : '',
-        onclick: () => { map.closePopup(); useParcel(f, latlng); } }, c ? `Use as keep-in zone for ${c.name}` : 'Select a collar to use it'),
-      el('button', { onclick: async () => {
-        map.closePopup();
-        try { await saveParcels({ type: 'FeatureCollection', features: parcels.features.filter(x => x !== f && parcelKey(x) !== parcelKey(f)) }); }
-        catch (e) { parcelSay(e.message); }
-      } }, 'Remove')));
-}
-
 // Douglas-Peucker in local metres, loosened until the ring fits the collar's corner limit.
-function simplifyRing(latlngs, maxPoints) {
+function simplifyRing(latlngs, maxPoints, startTol = 0.1) {
   const fr = localFrame(latlngs[0]);
   const pts = latlngs.map(ll => fr.fwd(ll));
   const segDist = (p, a, b) => {
@@ -1362,7 +1387,7 @@ function simplifyRing(latlngs, maxPoints) {
   // Split the closed ring at its farthest point from the start, so both halves are open paths.
   let far = 0;
   pts.forEach((p, k) => { if (Math.hypot(p[0] - pts[0][0], p[1] - pts[0][1]) > Math.hypot(pts[far][0] - pts[0][0], pts[far][1] - pts[0][1])) far = k; });
-  let tol = 0.1, out = pts;
+  let tol = startTol, out = pts;
   for (; tol < 1000; tol *= 1.5) {
     out = [...dp(pts.slice(0, far + 1), tol), ...dp([...pts.slice(far), pts[0]], tol).slice(1, -1)];
     if (out.length <= maxPoints) break;
@@ -1370,22 +1395,205 @@ function simplifyRing(latlngs, maxPoints) {
   return { ring: out.map(p => L.latLng(fr.back(p))), tolerance: out.length < pts.length ? tol : 0 };
 }
 
-function useParcel(f, latlng) {
-  if (!selected || zones.length >= MAX_ZONES) return;
-  const polys = f.geometry.type === 'Polygon' ? [f.geometry.coordinates] : f.geometry.coordinates;
-  const rings = polys.map(poly => poly[0].slice(0, -1).map(([lon, lat]) => L.latLng(lat, lon)));
-  const area = r => Math.abs(r.reduce((a, p, i) => { const q = r[(i + 1) % r.length]; return a + p.lng * q.lat - q.lng * p.lat; }, 0));
-  const ring = rings.find(r => pointInRing(latlng.lat, latlng.lng, r)) || rings.sort((a, b) => area(b) - area(a))[0];
-  const { ring: simple, tolerance } = simplifyRing(ring, MAX_VERTICES);
-  if (simple.length < 3) { say('That parcel is too small to use as a zone.'); return; }
+// The perimeter: the selected parcels merged into one outline, then each side moved inward by its
+// set-back (outward if negative), then simplified to the collar's corner limit. In local metres.
+const PARCEL_GAP_M = 0.5;     // close slivers up to 1 m wide between neighbouring tax-map parcels
+const SIDE_TURN_DEG = 25;     // a bend sharper than this starts a new side
+const ringArea2 = r => Math.abs(r.reduce((a, p, i) => { const q = r[(i + 1) % r.length]; return a + p[0] * q[1] - q[0] * p[1]; }, 0)) / 2;
+const largestPoly = mp => mp.reduce((best, poly) => !best || ringArea2(poly[0]) > ringArea2(best[0]) ? poly : best, null);
+// polygon-clipping can trip over nearly-collinear edges ("Unable to find segment"), which tax maps
+// are full of. Snapping every coordinate to a 1 cm grid between steps avoids that.
+const snapCm = g => typeof g[0] === 'number' ? [Math.round(g[0] * 100) / 100, Math.round(g[1] * 100) / 100] : g.map(snapCm);
+const clip = (fn, ...geoms) => snapCm(fn(...geoms.map(snapCm)));
+
+// Everything within r metres of an open polyline (strips along each segment, discs at each point).
+function lineBuffer(pts, r) {
+  if (!(r > 0) || pts.length < 2) return [];
+  const N = 24, rr = r / Math.cos(Math.PI / N), parts = [];
+  pts.forEach((a, i) => {
+    const disc = [];
+    for (let k = 0; k < N; k++) disc.push([a[0] + rr * Math.cos(2 * Math.PI * k / N), a[1] + rr * Math.sin(2 * Math.PI * k / N)]);
+    disc.push(disc[0]);
+    parts.push([disc]);
+    if (i === pts.length - 1) return;
+    const b = pts[i + 1], dx = b[0] - a[0], dy = b[1] - a[1], len = Math.hypot(dx, dy) || 1, nx = -dy / len * r, ny = dx / len * r;
+    parts.push([[[a[0] + nx, a[1] + ny], [b[0] + nx, b[1] + ny], [b[0] - nx, b[1] - ny], [a[0] - nx, a[1] - ny], [a[0] + nx, a[1] + ny]]]);
+  });
+  return clip(polygonClipping.union, ...parts);
+}
+
+// Merge the parcels and split the outline into sides at its corners.
+function outlineFrom(features) {
+  const firstPt = features[0].geometry.type === 'Polygon' ? features[0].geometry.coordinates[0][0] : features[0].geometry.coordinates[0][0][0];
+  const fr = localFrame(L.latLng(firstPt[1], firstPt[0]));
+  const polys = [];
+  for (const f of features)
+    for (const poly of f.geometry.type === 'Polygon' ? [f.geometry.coordinates] : f.geometry.coordinates)
+      polys.push([poly[0].map(([lon, lat]) => fr.fwd(L.latLng(lat, lon)))]);
+  const open = r => r.slice(0, -1);
+  const notes = [];
+  let merged = clip(polygonClipping.union, ...polys);
+  merged = clip(polygonClipping.union, merged, ...merged.map(p => edgeBuffer(open(p[0]), PARCEL_GAP_M)));
+  if (merged.length > 1) notes.push('The selected parcels do not touch, so only the largest one is used.');
+  const best = largestPoly(merged);
+  if (best.length > 1) notes.push('Holes inside the parcels are ignored.');
+  // Drop the in-between points of straight runs, then cut the ring into sides at sharp bends.
+  const lls = open(best[0]).map(p => L.latLng(fr.back(p)));
+  // Within 0.75 m: also squares off the 0.5 m rounded corners the gap padding leaves.
+  let pts = simplifyRing(lls, 1e9, 0.75).ring.map(ll => fr.fwd(ll));
+  const turn = i => {
+    const a = pts[(i - 1 + pts.length) % pts.length], b = pts[i], c = pts[(i + 1) % pts.length];
+    const t = Math.atan2(c[1] - b[1], c[0] - b[0]) - Math.atan2(b[1] - a[1], b[0] - a[0]);
+    return Math.abs(Math.atan2(Math.sin(t), Math.cos(t))) * 180 / Math.PI;
+  };
+  let start = 0;
+  pts.forEach((_, i) => { if (turn(i) > turn(start)) start = i; });
+  pts = [...pts.slice(start), ...pts.slice(0, start)];
+  // Corners found on the simplified ring; each side is then the full-detail outline between two
+  // corners, so set-backs are measured from the real line.
+  const ring = open(best[0]);
+  const nearest = q => { let bi = 0, bd = Infinity; ring.forEach((r, i) => { const d = (r[0] - q[0]) ** 2 + (r[1] - q[1]) ** 2; if (d < bd) { bd = d; bi = i; } }); return bi; };
+  const corners = pts.map((_, i) => i).filter(i => i === 0 || turn(i) > SIDE_TURN_DEG).map(i => nearest(pts[i]));
+  const sides = corners.map((c0, k) => {
+    const c1 = corners[(k + 1) % corners.length], sp = [];
+    for (let i = c0; ; i = (i + 1) % ring.length) { sp.push(ring[i]); if (i === c1 && sp.length > 1) break; }
+    return sp;
+  });
+  // Name each side by the compass direction it faces (its outward normal).
+  const ccw = pts.reduce((a, p, i) => { const q = pts[(i + 1) % pts.length]; return a + p[0] * q[1] - q[0] * p[1]; }, 0) > 0;
+  const dirs = ['east', 'north-east', 'north', 'north-west', 'west', 'south-west', 'south', 'south-east'];
+  const named = sides.map(sp => {
+    const a = sp[0], b = sp[sp.length - 1];
+    let len = 0;
+    for (let i = 1; i < sp.length; i++) len += Math.hypot(sp[i][0] - sp[i - 1][0], sp[i][1] - sp[i - 1][1]);
+    const dx = b[0] - a[0], dy = b[1] - a[1];
+    const nx = ccw ? dy : -dy, ny = ccw ? -dx : dx; // outward normal
+    const dir = dirs[((Math.round(Math.atan2(ny, nx) / (Math.PI / 4)) % 8) + 8) % 8];
+    // Label point: halfway along the side.
+    let half = len / 2, mid = sp[0];
+    for (let i = 1; i < sp.length; i++) {
+      const seg = Math.hypot(sp[i][0] - sp[i - 1][0], sp[i][1] - sp[i - 1][1]);
+      if (half <= seg) { const t = seg ? half / seg : 0; mid = [sp[i - 1][0] + t * (sp[i][0] - sp[i - 1][0]), sp[i - 1][1] + t * (sp[i][1] - sp[i - 1][1])]; break; }
+      half -= seg;
+    }
+    return { pts: sp, len, dir, mid: L.latLng(fr.back(mid)) };
+  });
+  return { fr, outer: best[0], sides: named, notes };
+}
+
+// offsets: one number per side, metres inward (negative = outward).
+function perimeterFrom(o, offsets) {
+  const shift = offsets.map(d => d + PARCEL_GAP_M); // the gap padding comes off again
+  let shape = [[o.outer]];
+  if (shift.every(d => d === shift[0])) { // the same all round: buffer the whole ring
+    const r = o.outer.slice(0, -1);
+    if (shift[0] > 0) shape = clip(polygonClipping.difference, shape, edgeBuffer(r, shift[0]));
+    else if (shift[0] < 0) shape = clip(polygonClipping.union, shape, edgeBuffer(r, -shift[0]));
+    shift.fill(0);
+  }
+  const out = o.sides.map((sd, i) => shift[i] < 0 ? lineBuffer(sd.pts, -shift[i]) : []).filter(g => g.length);
+  if (out.length) shape = clip(polygonClipping.union, shape, ...out);
+  const inn = o.sides.map((sd, i) => shift[i] > 0 ? lineBuffer(sd.pts, shift[i]) : []).filter(g => g.length);
+  if (inn.length) shape = clip(polygonClipping.difference, shape, ...inn);
+  if (!shape.length) throw new Error('Those set-backs leave nothing of the property. Use smaller ones.');
+  const notes = [...o.notes];
+  if (shape.length > 1) notes.push('The set-backs split the property in two; the larger part is used.');
+  const ring = largestPoly(shape)[0].slice(0, -1).map(p => L.latLng(o.fr.back(p)));
+  const { ring: simple, tolerance } = simplifyRing(ring, MAX_VERTICES, 0.3); // 0.3 m: tidies sliver bumps, well under GPS error
+  if (tolerance > 0.5) notes.push(`Simplified to ${simple.length} corners, which moves the line by up to ${tolerance < 2 ? tolerance.toFixed(1) : Math.round(tolerance)} m.`);
+  return { ring: simple, notes };
+}
+
+function selectedParcels() {
+  return parcels.features.filter(f => parcelSelected.has(parcelKey(f)));
+}
+
+let perimeter = null, perimeterTimer = null, parcelMode = 'same';
+let outline = null, outlineKey = '', sideOffsets = [];
+function renderParcelSel() {
+  const sel = selectedParcels();
+  $('parcelSel').hidden = !sel.length;
+  perimeterLayer.clearLayers();
+  perimeter = null;
+  if (!sel.length) { outline = null; outlineKey = ''; return; }
+  $('parcelSelTitle').textContent = `${sel.length} parcel${sel.length > 1 ? 's' : ''} selected`;
+  $('parcelSelList').replaceChildren(...sel.map(f => el('li', {},
+    el('span', { class: 'muted', title: Object.entries(f.properties || {}).slice(0, 8).map(([k, v]) => `${k}: ${v}`).join('\n') }, parcelTitle(f.properties || {})),
+    el('button', { class: 'link', onclick: () => { parcelSelected.delete(parcelKey(f)); showParcels(); } }, 'Deselect'))));
+  for (const b of $('parcelMode').children) b.setAttribute('aria-pressed', String(b.dataset.mode === parcelMode));
+  $('parcelSame').hidden = parcelMode !== 'same';
+  $('parcelSides').hidden = parcelMode !== 'sides';
+  const same = Number($('parcelOffset').value) || 0;
+  try {
+    const key = sel.map(parcelKey).sort().join('|');
+    if (key !== outlineKey) { outline = outlineFrom(sel); outlineKey = key; sideOffsets = outline.sides.map(() => same); }
+    const offsets = parcelMode === 'same' ? outline.sides.map(() => same) : sideOffsets;
+    if (parcelMode === 'sides') renderSides();
+    perimeter = perimeterFrom(outline, offsets);
+    L.polygon(perimeter.ring, { pane: 'parcels', color: css('--keep-in'), weight: 3, dashArray: '2 6', fill: false, interactive: false, pmIgnore: true, snapIgnore: true })
+      .addTo(perimeterLayer);
+    if (parcelMode === 'sides')
+      outline.sides.forEach((sd, i) => L.marker(sd.mid, { pane: 'parcels', interactive: false, keyboard: false, pmIgnore: true, snapIgnore: true,
+        icon: L.divIcon({ className: '', iconSize: [22, 22], iconAnchor: [11, 11], html: `<div class="sidetag">${i + 1}</div>` }) }).addTo(perimeterLayer));
+    const lead = parcelMode === 'sides' ? 'The dotted green line is the perimeter, each side set back as listed.'
+      : same > 0 ? `The dotted green line is the perimeter, ${same} m inside the property line.`
+      : same < 0 ? `The dotted green line is the perimeter, ${-same} m outside the property line.`
+      : 'The dotted green line is the perimeter, on the property line.';
+    $('parcelOffsetNote').textContent = [lead, 'The zone\'s bands sit inside it. Negative set-backs go outside the line.', ...perimeter.notes].join(' ');
+  } catch (e) {
+    $('parcelOffsetNote').textContent = e.message;
+  }
+  updateParcelMake();
+}
+function renderSides() {
+  const box = $('parcelSides');
+  if (box.childElementCount === outline.sides.length * 3 && box.contains(document.activeElement)) return; // don't steal focus while typing
+  box.replaceChildren(...outline.sides.flatMap((sd, i) => [
+    el('div', { class: 'sidetag' }, String(i + 1)),
+    el('span', {}, `${sd.dir[0].toUpperCase()}${sd.dir.slice(1)} side`, el('span', { class: 'muted' }, ` · ${Math.round(sd.len)} m`)),
+    el('input', { type: 'number', min: -10, max: 30, step: 0.5, value: sideOffsets[i], 'aria-label': `Set-back for side ${i + 1} in metres`,
+      oninput: e => { sideOffsets[i] = Number(e.target.value) || 0; schedulePerimeter(); } }),
+  ]));
+}
+function schedulePerimeter() { clearTimeout(perimeterTimer); perimeterTimer = setTimeout(renderParcelSel, 150); }
+function updateParcelMake() {
+  const c = selected && collars[selected];
+  $('parcelMake').disabled = !perimeter || !c || zones.length >= MAX_ZONES;
+  $('parcelMake').textContent = !c ? 'Select a collar first' : zones.length >= MAX_ZONES ? `${c.name} already has ${MAX_ZONES} zones` : `Make keep-in zone for ${c.name}`;
+}
+function setOffset(v) {
+  $('parcelOffset').value = v; $('parcelOffsetRange').value = v;
+  schedulePerimeter();
+}
+$('parcelOffset').oninput = () => setOffset($('parcelOffset').value);
+$('parcelOffsetRange').oninput = () => setOffset($('parcelOffsetRange').value);
+$('parcelMode').onclick = e => {
+  const b = e.target.closest('button');
+  if (!b || b.dataset.mode === parcelMode) return;
+  parcelMode = b.dataset.mode;
+  // Switching to per-side starts every side at the single set-back.
+  if (parcelMode === 'sides' && outline) sideOffsets = outline.sides.map(() => Number($('parcelOffset').value) || 0);
+  $('parcelSides').replaceChildren();
+  renderParcelSel();
+};
+$('parcelSelClear').onclick = () => { parcelSelected.clear(); showParcels(); };
+$('parcelRemoveSel').onclick = async () => {
+  const sel = selectedParcels();
+  if (!confirm(`Remove ${sel.length} selected parcel${sel.length > 1 ? 's' : ''} from the map?`)) return;
+  try { await saveParcels({ type: 'FeatureCollection', features: parcels.features.filter(f => !parcelSelected.has(parcelKey(f))) }); }
+  catch (e) { parcelSay(e.message); }
+};
+$('parcelMake').onclick = () => {
+  if (!perimeter || !selected || zones.length >= MAX_ZONES) return;
+  const sel = selectedParcels();
   stopEditing();
-  const z = addZone(L.polygon(simple), { name: parcelTitle(f.properties || {}).slice(0, 40) || 'Property', kind: 'keep_in', ...DEFAULT_BANDS });
+  const name = sel.length === 1 ? parcelTitle(sel[0].properties || {}).slice(0, 40) : 'Property';
+  const z = addZone(L.polygon(perimeter.ring), { name: name === 'Parcel' ? 'Property' : name, kind: 'keep_in', ...DEFAULT_BANDS });
+  parcelSelected.clear(); showParcels();
   editZone(z);
   map.fitBounds(z.layer.getBounds(), { maxZoom: 19, padding: [40, 40] });
-  say(tolerance
-    ? `Added a keep-in zone from the parcel, simplified from ${ring.length} to ${simple.length} corners (lines moved by up to ${tolerance < 1 ? tolerance.toFixed(1) : Math.round(tolerance)} m). Check it, then send it to the collar.`
-    : 'Added a keep-in zone from the parcel. Check it against the satellite view, then send it to the collar.');
-}
+  say('Added a keep-in zone along the perimeter. Check it against the satellite view, then send it to the collar.');
+};
 
 // File reading. Returns a list of GeoJSON features.
 async function readParcelFiles(files) {
@@ -1469,7 +1677,7 @@ $('parcelFile').onchange = async () => {
     await saveParcels({ type: 'FeatureCollection', features: parcels.features.concat(found) });
     $('parcelShow').checked = true; showParcels();
     map.fitBounds(L.geoJSON({ type: 'FeatureCollection', features: found }).getBounds(), { maxZoom: 19, padding: [40, 40] });
-    parcelSay(`Imported ${found.length} parcel${found.length > 1 ? 's' : ''}. Click one on the map to use it as a keep-in zone.${note}`);
+    parcelSay(`Imported ${found.length} parcel${found.length > 1 ? 's' : ''}. Click parcels on the map to select them.${note}`);
   } catch (e) { parcelSay(`Could not import: ${e.message}`); }
 };
 $('parcelShow').onchange = showParcels;

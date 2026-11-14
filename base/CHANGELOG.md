@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.8.0
+
+- Property lines: click parcels to select one or more (neighbouring lots merge into one
+  outline), then make a keep-in zone set back from the property line, either by the same
+  distance all round or by a different distance for each side. The sides are numbered on the
+  map and named by the way they face. A dotted line previews the perimeter as you change it.
+
 ## 0.7.1
 
 - Fix importing a whole-county parcel file ("Maximum call stack size exceeded"). Large files now

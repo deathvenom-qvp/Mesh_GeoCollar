@@ -74,11 +74,15 @@ you download a parcel as GeoJSON, KML or a shapefile. Under **Property lines**, 
 dashed orange outlines, saved on the base so every device sees them, and a zone you draw snaps
 to their corners.
 
-Click a parcel and choose **Use as keep-in zone** to turn its outline into a zone for the
-selected collar. Outlines with more than 32 corners are simplified, and the page says by how many
-metres the line moved. Tax-map lines are often 1 to 5 m off, so compare the zone with the
-satellite view before sending it, and keep the danger band well inside anything that matters,
-such as a road. A whole-county file is cut down to the 500 parcels nearest the selected collar, or the middle of
+Click parcels on the map to select them; neighbouring lots you own merge into one outline. Then
+set how far the perimeter sits back from the property line: **Same all round**, or **Each side**,
+where the sides are numbered on the map and listed with the way they face and their length. A
+negative set-back puts the perimeter outside the line. A dotted green line previews the
+perimeter, and **Make keep-in zone** turns it into a zone for the selected collar; the zone's
+danger, warning and attention bands sit inside it. Outlines with more than 32 corners are
+simplified, and the page says by how much the line moved. Tax-map lines are often 1 to 5 m off,
+so compare the zone with the satellite view before sending it, and keep the danger band well
+inside anything that matters, such as a road. A whole-county file is cut down to the 500 parcels nearest the selected collar, or the middle of
 the map if it has no position yet, so centre the map on your property before importing one.
 
 ## Trying it without a collar
