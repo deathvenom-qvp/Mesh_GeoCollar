@@ -83,6 +83,7 @@ class Store:
             status = dict(status, received=time.time())
             c["status"] = status
             c.pop("radio_changed", None)  # heard on the base's current settings
+            c.pop("hello", None)  # it reports to this base now
             if status.get("lat") or status.get("lon"):
                 c["track"].append([status["received"], status["lat"], status["lon"]])
                 del c["track"][:-TRACK_LIMIT]

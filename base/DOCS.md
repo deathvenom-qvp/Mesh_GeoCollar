@@ -91,7 +91,15 @@ Meshtastic settings then need the base's key by hand (below).
 
 A collar running GeoCollar that no base has adopted says hello on the mesh every minute for 15
 minutes after it starts, then every 15 minutes. If the base hears it (same LoRa settings and
-primary channel), it shows under Collars as **New**, with an **Add** button.
+primary channel), it shows under Collars as **New**, with an **Add** button. A collar on the base
+that says hello hasn't heard from the base yet; the base answers it, and it starts reporting.
+
+**How to tell it runs GeoCollar.** A freshly installed collar names itself **GeoCollar** and the
+last four characters of its node ID (for example "GeoCollar c3d4") until the base names it after
+the dog; otherwise it looks like stock Meshtastic (same version number) in the Meshtastic app. Its
+serial log says "GeoCollar: ready" at start. A fresh install has no LoRa region, so it can't
+transmit anything until it is set up: use **Set up only** (or set the region and the base's key by
+hand). Until a collar reports, its panel says what it is waiting for.
 
 By hand, collars only obey messages from base nodes they trust:
 

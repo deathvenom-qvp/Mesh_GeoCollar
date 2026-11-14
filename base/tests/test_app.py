@@ -243,3 +243,31 @@ def test_new_fence_version_catches_up_with_the_collar(tmp_path):
     client.post("/api/collars", json={"node_id": "!a1b2c3d4", "name": "Rex"})
     client.app.state.on_status("!a1b2c3d4", {"state": "INSIDE", "fence_version": 41, "pki": True, "sender_key": "S0VZ"})
     assert client.put("/api/collars/!a1b2c3d4/fences", json=FENCE).json()["fence_version"] == 42
+
+
+def test_a_known_collar_saying_hello_gets_an_answer(tmp_path):
+    # A collar reports only to a base that has talked to it. If the base's first message was lost
+    # (say, while the collar restarted after setup), its hello is the cue to talk to it again.
+    client, link = make(tmp_path)
+    client.post("/api/collars", json={"node_id": "!a1b2c3d4", "name": "Rex"})
+    link.sent.clear()
+    on_hello = client.app.state.on_hello
+    on_hello("!a1b2c3d4", {"has_admin_key": True, "has_fences": False, "battery_pct": 80, "long_name": "Rex"})
+    assert link.sent == [("!a1b2c3d4", protocol.encode_owner("Rex", "", ""))]
+    assert client.get("/api/collars").json()["!a1b2c3d4"]["hello"]["battery_pct"] == 80
+    on_hello("!a1b2c3d4", {"has_admin_key": True})  # again within 30 s: ignored
+    assert len(link.sent) == 1
+    assert client.get("/api/discovered").json() == {}  # known collars are not "new"
+
+    # Its first report clears the hello.
+    client.app.state.on_status("!a1b2c3d4", {"state": "NO_FENCE", "lat": 0, "lon": 0, "pki": True, "sender_key": "a2V5"})
+    assert "hello" not in client.get("/api/collars").json()["!a1b2c3d4"]
+
+
+def test_a_collar_that_does_not_trust_the_base_is_not_sent_anything(tmp_path):
+    client, link = make(tmp_path)
+    client.post("/api/collars", json={"node_id": "!a1b2c3d4", "name": "Rex"})
+    link.sent.clear()
+    client.app.state.on_hello("!a1b2c3d4", {"has_admin_key": False})
+    assert link.sent == []
+    assert client.get("/api/collars").json()["!a1b2c3d4"]["hello"]["has_admin_key"] is False

@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.14.1
+
+Needs the new collar firmware for the collar's name.
+
+- Fixed: a collar set up over USB could stay silent. A collar reports only to a base that has
+  talked to it, and the base's first message went out while the collar was restarting. Now the
+  base answers a hello from a collar it already has, and the collar starts reporting.
+- A freshly installed collar names itself "GeoCollar" plus the end of its node ID (instead of
+  Meshtastic's "Meshtastic c3d4"), so you can tell it runs GeoCollar, until the base names it
+  after the dog. Its hello is logged at info level.
+- A collar that hasn't reported yet says why in its panel: not heard at all (not set up, or out of
+  range), heard but not trusting this base, or heard and answered.
+
 ## 0.14.0
 
 - **Change the base radio's settings from the page**: name, region, preset, hop limit and the

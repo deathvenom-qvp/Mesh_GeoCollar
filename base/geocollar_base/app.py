@@ -243,7 +243,17 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
     DISCOVERED_KEEP_S = 24 * 3600
 
     def on_hello(node_id: str, hello: dict) -> None:
-        if store.collar(node_id) is not None:
+        c = store.collar(node_id)
+        if c is not None:
+            # A collar only reports to a base that has talked to it, so one saying hello hasn't heard
+            # from this base yet (just set up, reinstalled, or the base's first message was lost while
+            # it restarted). Answer with the owner details; the collar replies with a status report.
+            # Hellos aren't authenticated, so this is rate-limited and only ever sends to the collar.
+            if c.get("sim") or time.time() - (c.get("hello") or {}).get("seen", 0) < 30:
+                return
+            store.set_collar_info(node_id, "hello", {**hello, "seen": time.time()})
+            if hello.get("has_admin_key"):
+                push_owner(node_id)
             return
         found = {k: v for k, v in (store.setting("discovered", {}) or {}).items()
                  if time.time() - v.get("seen", 0) < DISCOVERED_KEEP_S}

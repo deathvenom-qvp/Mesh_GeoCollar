@@ -1035,6 +1035,7 @@ function renderCollars() {
     const c = collars[id], s = c.status;
     const st = s ? s.state : 'NONE';
     const bits = [];
+    if (!s && c.hello) bits.push(`heard ${ago(now - c.hello.seen)}`);
     if (s) {
       bits.push(ago(now - s.received));
       if (s.battery_pct != null && s.battery_pct !== 255) bits.push(`battery ${s.battery_pct}%`);
@@ -1093,6 +1094,9 @@ function renderSelected() {
     if (s.sats) rows.push(['GPS', `${s.sats} sats, PDOP ${s.pdop}`]);
     rows.push(['Corrections', s.corrections_enabled ? 'On' : 'Off']);
     rows.push(['Lost alert', s.beacon_active ? 'On: Bluetooth and mesh' : s.beacon_silenced ? 'Silenced until back inside' : 'Off']);
+  } else if (c.hello) {
+    rows.push(['State', 'Not reporting yet'], ['Last heard', `${ago(Date.now() / 1000 - c.hello.seen)} (saying hello)`]);
+    if (c.hello.battery_pct != null) rows.push(['Battery', `${c.hello.battery_pct}%`]);
   } else rows.push(['State', 'No report yet']);
   if (!c.sim) rows.push(['Locked to this base', c.locked ? 'Yes' : 'Not set up from this base']);
   if (c.ble_pin) rows.push(['Bluetooth PIN', String(c.ble_pin)]);
@@ -1364,6 +1368,14 @@ function renderContact() {
 function renderBeacon(c) {
   const s = c.status, box = $('beaconBox');
   const parts = [];
+  if (!s && !c.sim) {
+    const h = c.hello;
+    parts.push(el('div', { class: 'callout beacon' }, !h
+      ? (c.locked ? `Not heard from ${c.name} since it was set up. Check that it is on and near the base: after it starts it says hello every minute for 15 minutes, and the base answers.`
+        : `Not heard from ${c.name} yet. A collar can only talk to the base once it is set up for it (region, channels and the base's key); a freshly installed one can't transmit at all. Plug it into the base and use "Set up only" under Collar firmware.`)
+      : !h.has_admin_key ? `${c.name} is on the air but does not trust this base yet, so it ignores it. Plug it into the base and use "Set up only" under Collar firmware.`
+      : `${c.name} is on the air and the base has answered. It reports once it gets the answer; if it keeps saying hello, it may trust a different base: use "Set up only" to set it up for this one.`));
+  }
   const rc = c.radio_changed;
   if (rc && rc.moved) parts.push(el('div', { class: 'callout beacon' },
     `Moved to the base radio's new settings ${ago(Date.now() / 1000 - rc.at)}. Waiting for its first report on them.`));

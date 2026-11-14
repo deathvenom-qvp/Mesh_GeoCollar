@@ -297,6 +297,10 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
 
     int32_t runOnce() override
     {
+        if (!named_) {
+            named_ = true;
+            nameFreshCollar();
+        }
         const int32_t txDelay = tx_.poll();
         if (tx_.busy())
             return txDelay; // keep frames flowing; position checks resume once the collar is quiet
@@ -519,6 +523,25 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
         sendStatus(proto::MsgType::Status);
     }
 
+    /// A freshly installed collar has Meshtastic's default name, "Meshtastic 1a2b". Call it
+    /// "GeoCollar 1a2b" instead, so it is recognisable in the Meshtastic app, in Bluetooth scans and
+    /// on the base page until the base names it after the dog. Runs once, from the first runOnce(),
+    /// when every other module (NodeInfo in particular) exists.
+    void nameFreshCollar()
+    {
+        if (!nodeDB || !service)
+            return;
+        const unsigned suffix = nodeDB->getNodeNum() & 0xffff;
+        char stock[sizeof(owner.long_name)];
+        snprintf(stock, sizeof(stock), "Meshtastic %04x", suffix);
+        if (strcmp(owner.long_name, stock) != 0)
+            return;
+        snprintf(owner.long_name, sizeof(owner.long_name), "GeoCollar %04x", suffix);
+        service->reloadOwner(false);
+        nodeDB->saveToDisk(SEGMENT_DEVICESTATE | SEGMENT_NODEDATABASE);
+        LOG_INFO("GeoCollar: named this collar \"%s\"", owner.long_name);
+    }
+
     void sendHello()
     {
         lastHelloMs_ = millis() | 1;
@@ -530,7 +553,7 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
         const uint8_t battery = powerStatus ? powerStatus->getBatteryChargePercent() : 255;
         p->decoded.payload.size = proto::encodeHello(p->decoded.payload.bytes, sizeof(p->decoded.payload.bytes),
                                                      config.security.admin_key_count > 0, engine_.fences().zoneCount > 0, battery);
-        LOG_DEBUG("GeoCollar: hello, waiting for a base");
+        LOG_INFO("GeoCollar: hello, waiting for a base");
         service->sendToMesh(p, RX_SRC_LOCAL, false);
     }
 
@@ -640,6 +663,7 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
     uint32_t lastPacedSecs_ = UINT32_MAX; // nothing set yet: the first pass records the owner's value
     uint32_t lastStatusMs_ = 0;
     uint32_t lastHelloMs_ = 0;
+    bool named_ = false;
     uint32_t lastCmdSeq_ = 0; // newest command accepted; older or repeated ones are replays
 };
 
