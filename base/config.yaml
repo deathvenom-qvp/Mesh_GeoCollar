@@ -2,7 +2,7 @@
 # Settings > Add-ons (called Apps in newer releases) > store > ⋮ > Repositories, then install
 # "GeoCollar base". Home Assistant builds the image from the Dockerfile on first install.
 name: GeoCollar base
-version: "0.5.0"
+version: "0.6.0"
 slug: geocollar_base
 description: Draw geofences and track Meshtastic dog collars. Built on Meshtastic; collar protocol by OpenShock.
 url: https://github.com/deathvenom-qvp/Mesh_GeoCollar
@@ -18,8 +18,13 @@ panel_title: GeoCollar
 # Optional direct port for use outside Home Assistant. Off by default: the page has no login.
 ports:
   8099/tcp: null
-# Access to USB serial devices, for a Meshtastic node plugged into the Home Assistant machine.
+# Access to USB serial devices, for a Meshtastic node plugged into the Home Assistant machine,
+# and for flashing a collar plugged in by USB.
 uart: true
+# Read-only network info, to find a collar's Wi-Fi update loader on the home network.
+hassio_api: true
 schema:
   mesh_serial: device(subsystem=tty)?
   mesh_host: str?
+  firmware_repo: str?
+  ota_subnet: str?

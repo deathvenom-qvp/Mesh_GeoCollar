@@ -74,6 +74,36 @@ report rate and GPS error are adjustable. It applies the same fence rules as the
 firmware, and **What the collar did** lists each beep, vibration, shock and switch to lost mode.
 Commands such as Lost mode work on it too. Remove it like any other collar.
 
+## Updating collar firmware
+
+Open **Collar firmware** at the bottom of the side panel.
+
+1. **Get a build.** *Download latest build* fetches the newest build of the main branch, which
+   GitHub Actions publishes as the `firmware-latest` release. *Build from source here* compiles
+   it on this machine instead: the first build downloads about 1.5 GB of tools and can take
+   30 minutes or more on a Raspberry Pi. The last three builds are kept.
+2. **Flash it** one of three ways:
+   - **USB on base**: plug the collar into the Home Assistant machine and pick its port. The
+     base station's own radio port is greyed out. If the collar's port is missing, restart the app
+     after plugging it in.
+   - **USB on this computer**: plug the collar into the computer you are browsing from. Needs
+     Chrome or Edge, and Home Assistant opened over `https://`.
+   - **Wi-Fi**: select the collar, save your Wi-Fi network once, and press *Update over Wi-Fi*.
+     The base sends the Wi-Fi details to the collar over the mesh (they stay saved, with the
+     collar's own Wi-Fi left off to save battery), restarts it into Meshtastic's update loader,
+     finds it on your network and sends the firmware. Put the collar on its charger in Wi-Fi
+     range first: **it does not enforce fences while it updates**, usually 2 to 5 minutes.
+
+The first install on a new collar must be over USB, as a **Full install**: that also puts
+Meshtastic's update loader on the collar, which Wi-Fi updates need. *Update, keep settings* keeps
+the collar's keys and fences; a full install erases them, so pair the collar again afterwards.
+
+If a Wi-Fi update fails partway, the collar waits in update mode, and the page says so. Press
+*Retry upload*, or flash it over USB, which also brings it out of update mode. If the base can't
+find the collar on the network, enter the collar's address (from your router's device list), or
+set **Network to search for collars being updated** on the Configuration tab, such as
+`192.168.1.0/24`.
+
 ## Data and access
 
 Collars, fences and recent positions are kept in the app's `/data` folder and included in Home

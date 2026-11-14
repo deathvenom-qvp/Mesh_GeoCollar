@@ -9,5 +9,15 @@ configuration:
     description: >-
       IP address or host name of the base station's Meshtastic node on Wi-Fi or Ethernet
       (port 4403). Used when no USB device is set.
+  firmware_repo:
+    name: Firmware repository
+    description: >-
+      GitHub repository (owner/name) to download collar firmware from and build it from.
+      Leave empty for the official one.
+  ota_subnet:
+    name: Network to search for collars being updated
+    description: >-
+      For Wi-Fi updates, the network the collar joins, such as 192.168.1.0/24. Leave empty to
+      use this machine's own network.
 network:
   8099/tcp: Web page without Home Assistant login. Leave empty unless you need it.

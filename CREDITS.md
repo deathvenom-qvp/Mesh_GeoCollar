@@ -40,4 +40,11 @@ postamble, and the "vibrate at 0" stop frame). No OpenShock source code is copie
   correction bands, vendored with their licences in `base/geocollar_base/static/vendor/`. Map tiles from
   [OpenStreetMap](https://www.openstreetmap.org/copyright) contributors and satellite imagery
   from Esri World Imagery.
+- [esptool](https://github.com/espressif/esptool) (GPL-2.0-or-later) for flashing collars over USB
+  from the base, and [esptool-js](https://github.com/espressif/esptool-js) 0.5.7 (Apache-2.0,
+  bundling pako, MIT and Zlib) for flashing from the browser, vendored with its licence in
+  `base/geocollar_base/static/vendor/esptool-js/`.
+- Meshtastic's [ESP32 unified OTA loader](https://github.com/meshtastic/esp32-unified-ota)
+  v1.0.1 (GPL-3.0) for Wi-Fi updates. `firmware/package.py` downloads its release image and ships
+  it unchanged next to the GeoCollar firmware.
 - [FastAPI](https://fastapi.tiangolo.com) and [Uvicorn](https://www.uvicorn.org) for the base app.

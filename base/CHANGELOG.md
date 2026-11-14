@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.6.0
+
+- Firmware panel: download the latest collar firmware built by CI, or build it from source on
+  this machine, then flash a collar over USB (plugged into this machine or into the computer
+  you are browsing from) or over Wi-Fi.
+- Wi-Fi updates use Meshtastic's own OTA loader. The first install must be over USB, which puts
+  the loader on the collar; after that the base can update it over the home Wi-Fi network.
+- Shock label: when shock is off on the collar, the danger band row says it vibrates instead.
+
 ## 0.5.0
 
 - Band colours: attention light blue, warning yellow, danger red.

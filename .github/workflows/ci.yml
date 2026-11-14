@@ -29,6 +29,11 @@ jobs:
   firmware-build:
     name: Firmware build (Heltec Wireless Tracker)
     runs-on: ubuntu-latest
+    permissions:
+      contents: write # to publish the firmware-latest release
+    concurrency:
+      group: firmware-${{ github.ref }}
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -43,13 +48,25 @@ jobs:
       - run: firmware/build.sh heltec-wireless-tracker
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }} # for the Meshtastic release lookup
+      - run: firmware/package.py dist heltec-wireless-tracker
       - uses: actions/upload-artifact@v4
         with:
           name: geocollar-heltec-wireless-tracker
-          path: |
-            firmware/.meshtastic/.pio/build/heltec-wireless-tracker/*.bin
-            firmware/.meshtastic/.pio/build/heltec-wireless-tracker/*.factory.bin
-          if-no-files-found: warn
+          path: dist/
+          if-no-files-found: error
+      # Each build of main replaces the files on the "firmware-latest" pre-release, which the base
+      # app downloads from (Firmware > Download latest build). manifest.json goes last, so a
+      # download that catches the upload halfway sees old hashes and simply retries.
+      - name: Publish to the firmware-latest release
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release view firmware-latest >/dev/null 2>&1 || gh release create firmware-latest --prerelease \
+            --title "Latest collar firmware" --notes "Built automatically from main. The base app downloads it from here."
+          gh release upload firmware-latest dist/*.bin --clobber
+          gh release upload firmware-latest dist/manifest.json --clobber
+          gh release edit firmware-latest --notes "Built automatically from main at ${GITHUB_SHA}. The base app downloads it from here."
 
   base-image:
     name: Base app image (amd64 + arm64) and Home Assistant app lint

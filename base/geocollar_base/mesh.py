@@ -122,3 +122,83 @@ class MeshLink:
 
     def send_command(self, node_id: str, action: protocol.CommandAction, intensity: int = 0, duration_ms: int = 1000):
         self._send(node_id, protocol.encode_command(action, intensity, duration_ms))
+
+    # ---------------------------------------------------------------------------------------------
+    # Remote admin, for firmware updates. The collar already trusts this base node's public key as
+    # an admin key (that is how it accepts fences), so standard Meshtastic admin messages work too.
+    # Changes need a session passkey, which the collar hands out in any admin response; the
+    # Meshtastic library stores it per node and _admin() copies it into each request.
+    # ---------------------------------------------------------------------------------------------
+    def _admin(self, node_id: str, message, want_response: bool = True, timeout: float = 90):
+        """Send an AdminMessage to a remote node. Returns the reply AdminMessage, or None when
+        want_response is False. Raises TimeoutError or RuntimeError."""
+        from meshtastic.protobuf import portnums_pb2
+
+        if not self.iface:
+            raise RuntimeError("not connected to a Meshtastic node")
+        num = int(node_id.lstrip("!"), 16)
+        key = self.iface._getOrCreateByNum(num).get("adminSessionPassKey")  # noqa: SLF001 - library-internal store
+        if key:
+            message.session_passkey = key
+        done = threading.Event()
+        reply: dict = {}
+
+        def on_response(packet):
+            decoded = packet.get("decoded") or {}
+            if "admin" in decoded:
+                reply["admin"] = decoded["admin"].get("raw")
+                done.set()
+            elif (decoded.get("routing") or {}).get("errorReason", "NONE") not in ("NONE", None):
+                reply["error"] = decoded["routing"]["errorReason"]
+                done.set()
+            elif not want_response:
+                done.set()
+
+        self.iface.sendData(
+            message, destinationId=num, portNum=portnums_pb2.PortNum.ADMIN_APP, wantAck=True,
+            wantResponse=want_response, onResponse=on_response, onResponseAckPermitted=not want_response,
+            pkiEncrypted=True,
+        )
+        if not done.wait(timeout):
+            raise TimeoutError(f"no answer from {node_id} within {int(timeout)} s")
+        if "error" in reply:
+            raise RuntimeError(f"{node_id} refused the request: {reply['error']}")
+        return reply.get("admin")
+
+    def get_metadata(self, node_id: str, timeout: float = 90):
+        """DeviceMetadata (firmware_version, hasWifi, hw_model...). Also fetches a session key."""
+        from meshtastic.protobuf import admin_pb2
+
+        m = admin_pb2.AdminMessage()
+        m.get_device_metadata_request = True
+        reply = self._admin(node_id, m, timeout=timeout)
+        return reply.get_device_metadata_response
+
+    def get_network_config(self, node_id: str, timeout: float = 90):
+        from meshtastic.protobuf import admin_pb2
+
+        m = admin_pb2.AdminMessage()
+        m.get_config_request = admin_pb2.AdminMessage.ConfigType.NETWORK_CONFIG
+        return self._admin(node_id, m, timeout=timeout).get_config_response.network
+
+    def set_wifi(self, node_id: str, ssid: str, psk: str, timeout: float = 90) -> None:
+        """Store Wi-Fi credentials on the node for its OTA loader, leaving Wi-Fi itself as it was
+        (normally off, to save battery). The node reboots to apply network settings."""
+        from meshtastic.protobuf import admin_pb2
+
+        net = self.get_network_config(node_id, timeout)
+        m = admin_pb2.AdminMessage()
+        m.set_config.network.CopyFrom(net)
+        m.set_config.network.wifi_ssid = ssid
+        m.set_config.network.wifi_psk = psk
+        self._admin(node_id, m, want_response=False, timeout=timeout)
+
+    def request_ota(self, node_id: str, sha256: bytes, timeout: float = 90) -> None:
+        """Reboot the node into its Wi-Fi OTA loader, which will only accept the image with this
+        SHA-256 (Meshtastic 2.7.18+ with the unified OTA loader in its app1 partition)."""
+        from meshtastic.protobuf import admin_pb2
+
+        m = admin_pb2.AdminMessage()
+        m.ota_request.reboot_ota_mode = admin_pb2.OTAMode.OTA_WIFI
+        m.ota_request.ota_hash = sha256
+        self._admin(node_id, m, want_response=False, timeout=timeout)

@@ -76,7 +76,9 @@ uses the newest patch release of the Meshtastic series named in `firmware/MESHTA
 or later: older series lack the optional-module slot and admin-key checks it uses. Moving to a new series is a one-line change. To
 build against one exact release, run `MESHTASTIC_VERSION=v2.8.2.d5f1619 firmware/build.sh`. Pin and ID settings
 are in `firmware/GeoCollar/GeoCollarConfig.h`. CI builds the firmware on every pull request and
-attaches the images.
+attaches the images. Each build of main is also published as the `firmware-latest` release
+(packaged by `firmware/package.py`), which the base app downloads and flashes to collars over USB
+or Wi-Fi from its **Collar firmware** panel. See [base/DOCS.md](base/DOCS.md#updating-collar-firmware).
 
 ## Run the base station
 

@@ -3,10 +3,13 @@
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import logging
 import os
 import secrets
+import shutil
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -15,6 +18,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from . import firmware as fw
 from . import protocol
 from .mesh import MeshLink
 from .sim import Simulator
@@ -30,6 +34,8 @@ def load_settings() -> dict:
         "data_dir": os.environ.get("GEOCOLLAR_DATA_DIR", "/data"),
         "mesh_serial": os.environ.get("GEOCOLLAR_MESH_SERIAL", ""),
         "mesh_host": os.environ.get("GEOCOLLAR_MESH_HOST", ""),
+        "firmware_repo": os.environ.get("GEOCOLLAR_FIRMWARE_REPO", fw.DEFAULT_REPO),
+        "ota_subnet": os.environ.get("GEOCOLLAR_OTA_SUBNET", ""),
     }
     options = Path(settings["data_dir"]) / "options.json"
     if options.exists():
@@ -46,6 +52,34 @@ class SimIn(BaseModel):
     name: str | None = None
     lat: float
     lon: float
+
+
+class WifiIn(BaseModel):
+    ssid: str
+    psk: str | None = None  # None keeps the saved password
+
+
+class BuildIn(BaseModel):
+    ref: str = "main"
+
+
+class UsbFlashIn(BaseModel):
+    build: str
+    port: str
+    mode: str = "update"
+    node_id: str | None = None  # which collar is plugged in, to record what it now runs
+
+
+class OtaIn(BaseModel):
+    build: str
+    ip: str | None = None  # the collar's address in update mode, if known
+    send_wifi: bool = True
+    resume: bool = False
+
+
+class FlashedIn(BaseModel):
+    build: str
+    via: str = "browser"
 
 
 class CommandIn(BaseModel):
@@ -160,6 +194,171 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
             raise HTTPException(503, "not connected to a Meshtastic node")
         link.send_command(node_id, action, body.intensity, body.duration_ms)
         return {"sent": action.name}
+
+    # -- Firmware -------------------------------------------------------------------------------
+    fw_root = Path(settings["data_dir"]) / "firmware"
+    builds = fw.BuildStore(fw_root)
+    jobs = fw.JobRunner()
+    app.state.builds, app.state.jobs = builds, jobs
+    repo = settings.get("firmware_repo") or fw.DEFAULT_REPO
+
+    def subnets() -> list[str]:
+        if settings.get("ota_subnet"):
+            return [s.strip() for s in str(settings["ota_subnet"]).split(",") if s.strip()]
+        return fw.supervisor_subnets() or fw.local_subnets()
+
+    def start(kind: str, title: str, fn) -> dict:
+        try:
+            return jobs.start(kind, title, fn).view()
+        except fw.FirmwareError as e:
+            raise HTTPException(409, str(e)) from e
+
+    def build_or_404(build_id: str) -> dict:
+        try:
+            return builds.manifest(build_id)
+        except (fw.FirmwareError, OSError, ValueError) as e:
+            raise HTTPException(404, "unknown build") from e
+
+    def record_flash(node_id: str | None, m: dict, via: str) -> None:
+        if node_id and store.collar(node_id) is not None:
+            store.set_collar_info(node_id, "firmware", {
+                "build": m["id"], "commit": m.get("geocollar_commit"), "meshtastic": m.get("meshtastic_version"),
+                "flashed_at": time.time(), "via": via,
+            })
+            store.set_collar_info(node_id, "update_mode", None)
+
+    @app.get("/api/firmware")
+    def firmware_overview():
+        wifi = store.setting("ota_wifi") or {}
+        try:
+            ports = fw.serial_ports(settings.get("mesh_serial", ""))
+        except Exception as e:  # noqa: BLE001 - pyserial missing or no /dev access
+            log.warning("could not list serial ports: %s", e)
+            ports = []
+        return {
+            "repo": repo,
+            "builds": builds.list(),
+            "job": jobs.current.view() if jobs.current else None,
+            "ports": ports,
+            "wifi": {"ssid": wifi.get("ssid", ""), "has_psk": bool(wifi.get("psk"))},
+            "subnets": subnets(),
+            "can_build": bool(shutil.which("git")),
+        }
+
+    @app.post("/api/firmware/download")
+    def firmware_download():
+        return start("download", "Download latest build", lambda job: fw.fetch_release(job, builds, repo))
+
+    @app.post("/api/firmware/build")
+    def firmware_build(body: BuildIn):
+        return start("build", f"Build {body.ref} from source",
+                     lambda job: fw.build_from_source(job, builds, fw_root / "work", repo, body.ref))
+
+    @app.delete("/api/firmware/builds/{build_id}")
+    def firmware_delete(build_id: str):
+        build_or_404(build_id)
+        builds.delete(build_id)
+        return {"removed": build_id}
+
+    @app.get("/api/firmware/builds/{build_id}/{kind}")
+    def firmware_file(build_id: str, kind: str):
+        build_or_404(build_id)
+        try:
+            return FileResponse(builds.file(build_id, kind), media_type="application/octet-stream")
+        except fw.FirmwareError as e:
+            raise HTTPException(404, str(e)) from e
+
+    @app.put("/api/firmware/wifi")
+    def firmware_wifi(body: WifiIn):
+        old = store.setting("ota_wifi") or {}
+        psk = old.get("psk", "") if body.psk is None else body.psk
+        if not body.ssid.strip():
+            store.set_setting("ota_wifi", None)
+            return {"ssid": "", "has_psk": False}
+        if len(body.ssid.encode()) > 32 or len(psk.encode()) > 63:
+            raise HTTPException(400, "Wi-Fi name is at most 32 bytes and password at most 63")
+        store.set_setting("ota_wifi", {"ssid": body.ssid, "psk": psk})
+        return {"ssid": body.ssid, "has_psk": bool(psk)}
+
+    @app.post("/api/firmware/flash-usb")
+    def firmware_flash_usb(body: UsbFlashIn):
+        m = build_or_404(body.build)
+
+        def run(job):
+            result = fw.flash_usb(job, builds, body.build, body.port, body.mode, settings.get("mesh_serial", ""))
+            record_flash(body.node_id, m, "usb")
+            return result
+
+        return start("usb", f"Flash over USB ({body.port})", run)
+
+    @app.post("/api/collars/{node_id}/firmware/flashed")
+    def firmware_flashed(node_id: str, body: FlashedIn):
+        require(node_id)
+        record_flash(node_id, build_or_404(body.build), body.via)
+        return store.collar(node_id).get("firmware")
+
+    @app.post("/api/collars/{node_id}/firmware/ota")
+    def firmware_ota(node_id: str, body: OtaIn):
+        c = require(node_id)
+        m = build_or_404(body.build)
+        if body.ip:
+            try:
+                ipaddress.ip_address(body.ip)
+            except ValueError as e:
+                raise HTTPException(400, "not an IP address") from e
+        pending = c.get("update_mode")
+        if body.resume and (not pending or pending.get("build") != body.build):
+            raise HTTPException(409, "this collar is not waiting for that build")
+        if node_id in sim:
+            return start("ota", f"Wi-Fi update of {c['name']} (simulated)",
+                         lambda job: sim_ota(job, node_id, m))
+        wifi = store.setting("ota_wifi") if body.send_wifi else None
+        if body.send_wifi and not (wifi and wifi.get("ssid")):
+            raise HTTPException(400, "save the Wi-Fi network for updates first")
+
+        def run(job):
+            result = fw.wifi_ota(job, builds, body.build, link, node_id, wifi, subnets(), body.ip or "", body.resume,
+                                 on_update_mode=lambda b: store.set_collar_info(
+                                     node_id, "update_mode", {"build": b, "since": time.time()}))
+            record_flash(node_id, m, "wifi")
+            return result
+
+        return start("ota", f"Wi-Fi update of {c['name']}", run)
+
+    def sim_ota(job, node_id: str, m: dict) -> dict:
+        """Walk through the Wi-Fi update steps without a radio, so the page can be tried out."""
+        steps = ["Asking the collar for its firmware details", "Sending the collar into update mode",
+                 "Looking for the collar on Wi-Fi"]
+        for step in steps:
+            job.set_step(step)
+            for _ in range(10):
+                job.check_cancel()
+                time.sleep(0.1)
+        store.set_collar_info(node_id, "update_mode", {"build": m["id"], "since": time.time()})
+        size = m["files"]["app"]["size"]
+        job.set_step(f"Sending {size // 1024} KB", 0.0)
+        for i in range(20):
+            job.check_cancel()
+            job.progress = (i + 1) / 20
+            time.sleep(0.1)
+        job.set_step("Image accepted. The collar is restarting into the new firmware.", 1.0)
+        record_flash(node_id, m, "wifi")
+        return {"build": m["id"], "commit": m.get("geocollar_commit"), "ip": "simulated"}
+
+    @app.get("/api/firmware/jobs/{job_id}")
+    def firmware_job(job_id: str, since: int = 0):
+        job = jobs.get(job_id)
+        if not job:
+            raise HTTPException(404, "unknown job")
+        return job.view(since)
+
+    @app.post("/api/firmware/jobs/{job_id}/cancel")
+    def firmware_cancel(job_id: str):
+        job = jobs.get(job_id)
+        if not job:
+            raise HTTPException(404, "unknown job")
+        job.cancel.set()
+        return job.view()
 
     # -- Simulated collars ---------------------------------------------------------------------
     @app.post("/api/sim")

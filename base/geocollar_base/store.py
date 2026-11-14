@@ -81,3 +81,28 @@ class Store:
                 c["track"].append([status["received"], status["lat"], status["lon"]])
                 del c["track"][:-TRACK_LIMIT]
             self._save()
+
+    def set_collar_info(self, node_id: str, key: str, value) -> None:
+        """Set or clear (value None) one extra field on a collar, e.g. firmware or update_mode."""
+        with self._lock:
+            c = self._data["collars"].get(node_id)
+            if c is None:
+                return
+            if value is None:
+                c.pop(key, None)
+            else:
+                c[key] = value
+            self._save()
+
+    def setting(self, key: str, default=None):
+        with self._lock:
+            return json.loads(json.dumps(self._data.get("settings", {}).get(key, default)))
+
+    def set_setting(self, key: str, value) -> None:
+        with self._lock:
+            s = self._data.setdefault("settings", {})
+            if value is None:
+                s.pop(key, None)
+            else:
+                s[key] = value
+            self._save()

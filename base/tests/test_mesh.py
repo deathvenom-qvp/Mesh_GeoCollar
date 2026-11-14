@@ -33,3 +33,35 @@ def test_link_retries_until_the_node_answers():
         time.sleep(0.01)
     assert link.connected
     link.close()
+
+
+def test_remote_admin_for_ota():
+    from meshtastic.protobuf import admin_pb2, portnums_pb2
+
+    sent = []
+
+    class Iface:
+        nodes = {0x12345678: {"adminSessionPassKey": b"k" * 8}}
+
+        def _getOrCreateByNum(self, num):
+            return self.nodes.setdefault(num, {})
+
+        def sendData(self, data, destinationId, portNum, wantAck, wantResponse, onResponse, onResponseAckPermitted, pkiEncrypted):
+            sent.append((data, destinationId, portNum, wantResponse, pkiEncrypted))
+            if wantResponse:
+                reply = admin_pb2.AdminMessage()
+                reply.get_device_metadata_response.firmware_version = "2.8.2.d5f1619"
+                reply.get_device_metadata_response.hasWifi = True
+                onResponse({"decoded": {"admin": {"raw": reply}}})
+            else:
+                onResponse({"decoded": {"routing": {"errorReason": "NONE"}}})
+
+    link = MeshLink(lambda *_: None)
+    link.iface = Iface()
+    meta = link.get_metadata("!12345678")
+    assert meta.firmware_version == "2.8.2.d5f1619" and meta.hasWifi
+    link.request_ota("!12345678", b"\x01" * 32)
+    msg, dest, port, want_response, pki = sent[-1]
+    assert dest == 0x12345678 and port == portnums_pb2.PortNum.ADMIN_APP and pki and not want_response
+    assert msg.ota_request.reboot_ota_mode == admin_pb2.OTAMode.OTA_WIFI and msg.ota_request.ota_hash == b"\x01" * 32
+    assert msg.session_passkey == b"k" * 8
