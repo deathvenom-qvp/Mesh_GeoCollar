@@ -120,6 +120,11 @@
   button.pill { cursor: pointer; font-family: inherit; background: none; }
   #radioInfo .stats { margin-top: 4px; }
   #radioInfo ol { margin: 6px 0 0 18px; padding: 0; font-size: 13px; }
+  .radioedit { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 8px; margin-top: 8px; padding: 8px; border: 1px solid var(--line); border-radius: 8px; }
+  .radioedit .wide { grid-column: 1 / -1; }
+  .radioedit label.row { gap: 6px; font-size: 12px; align-items: flex-start; }
+  .radioedit[hidden] { display: none; }
+  @media (max-width: 420px) { .radioedit { grid-template-columns: 1fr; } }
   .shockbox { margin-top: 8px; padding: 8px; border: 1px solid var(--line); border-radius: 8px; font-size: 13px; }
   .shockbox input[type=range] { width: 100%; }
   button.danger { background: var(--bad); color: #fff; border-color: var(--bad); }
@@ -218,6 +223,8 @@
     <details id="radioBox">
       <summary class="muted">Base radio</summary>
       <div id="radioInfo" style="margin-top:6px"></div>
+      <form id="radioEdit" class="radioedit" hidden></form>
+      <div id="radioJob"></div>
     </details>
   </section>
 
@@ -251,7 +258,7 @@
       It stops when the dog is back inside, or when you silence it.</div>
     <form id="contactForm">
       <div class="contact">
-        <label class="field">Your name <input id="contactName" maxlength="24" autocomplete="name" placeholder="Ken"></label>
+        <label class="field">Your name <input id="contactName" maxlength="24" autocomplete="name" placeholder="Sam"></label>
         <label class="field">Phone <input id="contactPhone" maxlength="20" type="tel" autocomplete="tel" placeholder="555 123 4567"
           pattern="[0-9+\-.() ]*" title="Digits, spaces and + - . ( ) only"></label>
       </div>
@@ -1181,12 +1188,123 @@ function renderRadio() {
   }
   const rows = [['Node', `${b.long_name || ''} ${b.node_id || ''}`.trim()], ['Connected by', b.connection], ['Board', b.hw_model],
     ['Meshtastic', b.firmware], ['Region', b.region], ['Preset', b.preset], ['Role', b.role], ['Primary channel', b.channel],
-    ['Public channel', b.public_channel == null ? '' : b.public_channel ? 'Yes (lost-dog messages reach strangers)' : 'No']].filter(([, v]) => v);
+    ['Public channel', b.public_channel == null ? '' : !b.public_channel ? 'No'
+      : b.default_slot === false ? 'Yes, but on your own frequency: only radios set up like yours hear lost-dog messages'
+      : 'Yes (lost-dog messages reach strangers)']].filter(([, v]) => v);
   box.replaceChildren(
     ...(b.issues || []).map(t => el('div', { class: 'callout bad' }, t)),
+    ...(b.radio_pending ? [el('div', { class: 'callout bad' }, 'The collars moved to new radio settings, but the base radio did not take them, so it can\'t hear them.',
+      el('div', { class: 'actions', style: 'margin-top:6px' }, el('button', { class: 'primary', onclick: finishRadio }, 'Finish the change')))] : []),
     el('div', { class: 'stats' }, ...rows.flatMap(([k, v]) => [el('span', {}, k), el('span', {}, v)])),
-    el('div', { class: 'muted', style: 'margin-top:6px' }, 'Collars must use the same region, preset and primary channel. "Set up only" under Collar firmware copies them to a collar over USB.'));
+    el('div', { class: 'muted', style: 'margin-top:6px' }, 'Collars must use the same region, preset and primary channel. "Set up only" under Collar firmware copies them to a collar over USB.'),
+    ...($('radioEdit').hidden && !b.radio_pending ? [el('div', { class: 'actions', style: 'margin-top:6px' },
+      el('button', { type: 'button', onclick: openRadioEdit }, 'Change settings…'))] : []));
   if ((b.issues || []).length) $('radioBox').open = true;
+}
+
+// Changing the base radio's settings. Region, preset and channels must match on every collar, and
+// a locked collar only takes changes from this base over the mesh, so the app moves the collars
+// first (while they can still hear the old settings) and the base last.
+let radioCur = null, radioJobId = null, radioJobLog = [], radioJobTimer = null;
+async function openRadioEdit() {
+  let r;
+  try { r = await api('base/settings'); } catch (e) { say(e.message); return; }
+  radioCur = r;
+  const s = r.settings, f = $('radioEdit');
+  const sel = (id, opts, val) => el('select', { id }, ...opts.map(o => el('option', { value: o, selected: o === val }, o.replace(/_/g, ' '))));
+  const keyNow = { default: 'the public default key', private: 'a private key', simple: 'a simple key', none: 'no key' }[s.channel_key] || s.channel_key;
+  f.replaceChildren(
+    el('label', { class: 'field' }, 'Name', el('input', { id: 'rLong', value: s.long_name, maxlength: 39, required: true })),
+    el('label', { class: 'field' }, 'Short name', el('input', { id: 'rShort', value: s.short_name, maxlength: 4, required: true })),
+    el('label', { class: 'field' }, 'Region', sel('rRegion', r.options.regions, s.region)),
+    el('label', { class: 'field' }, 'Preset', sel('rPreset', r.options.presets, s.preset || (s.custom_lora ? '' : 'LONG_FAST'))),
+    el('label', { class: 'field' }, 'Hop limit', el('input', { id: 'rHops', type: 'number', min: 1, max: 7, value: s.hop_limit })),
+    el('label', { class: 'field' }, 'Primary channel', el('select', { id: 'rKey' },
+      el('option', { value: 'keep' }, `Keep it (${s.channel_name || 'unnamed'}, ${keyNow})`),
+      s.channel_key === 'default' ? null : el('option', { value: 'default' }, 'Public default (LongFast)'),
+      el('option', { value: 'new' }, 'New private key'))),
+    el('label', { class: 'field wide', id: 'rNameRow' }, 'Channel name (optional: letters, digits, - or _)',
+      el('input', { id: 'rChan', value: s.channel_key === 'default' ? '' : s.channel_name, maxlength: 11, pattern: '[A-Za-z0-9_\\-]*' })),
+    el('label', { class: 'row muted wide' }, el('input', { type: 'checkbox', id: 'rPublic', checked: s.public_secondary }),
+      'Keep a public LongFast channel too, so lost-dog messages reach strangers\' radios'),
+    r.collars ? el('label', { class: 'row muted wide' }, el('input', { type: 'checkbox', id: 'rMove', checked: true }),
+      `Move the ${r.collars === 1 ? 'collar' : r.collars + ' collars'} to the new settings first (recommended)`) : null,
+    r.collars ? el('label', { class: 'row muted wide' }, el('input', { type: 'checkbox', id: 'rSkip' }),
+      'Change anyway if a collar does not answer') : null,
+    el('div', { class: 'wide', id: 'rNote' }),
+    el('div', { class: 'wide actions' }, el('button', { class: 'primary', id: 'rGo' }, 'Apply'),
+      el('button', { type: 'button', class: 'link', onclick: closeRadioEdit }, 'Cancel')),
+    el('div', { class: 'wide muted', id: 'rMsg', role: 'status' }));
+  f.hidden = false;
+  f.oninput = f.onchange = radioNote;
+  radioNote();
+  renderRadio();
+}
+async function finishRadio() {
+  try { const j = await api('base/settings/finish', { method: 'POST' }); watchRadioJob(j.id); } catch (e) { say(e.message); }
+}
+function closeRadioEdit() { $('radioEdit').hidden = true; radioCur = null; renderRadio(); }
+
+// What the form asks for, as only the settings that differ from the radio's.
+function radioChanges() {
+  const s = radioCur.settings, out = {};
+  const long = $('rLong').value.trim(), short = $('rShort').value.trim(), hops = +$('rHops').value;
+  if (long !== s.long_name) out.long_name = long;
+  if (short !== s.short_name) out.short_name = short;
+  if ($('rRegion').value !== s.region) out.region = $('rRegion').value;
+  if ($('rPreset').value && $('rPreset').value !== s.preset) out.preset = $('rPreset').value;
+  if (hops !== s.hop_limit) out.hop_limit = hops;
+  const key = $('rKey').value, chan = $('rChan').value.trim();
+  if (key !== 'keep') out.channel_key = key;
+  if ((key === 'new' && chan) || (key === 'keep' && s.channel_key !== 'default' && chan !== s.channel_name)) out.channel_name = chan;
+  const pub = $('rPublic').checked && key !== 'default';
+  if (pub !== s.public_secondary && !(key === 'default' && !s.public_secondary)) out.public_secondary = pub;
+  return out;
+}
+const MESH_KEYS = ['region', 'preset', 'channel_key', 'channel_name', 'public_secondary'];
+function radioNote() {
+  const s = radioCur.settings, key = $('rKey').value, ch = radioChanges();
+  $('rNameRow').hidden = key === 'default' || (key === 'keep' && s.channel_key === 'default');
+  $('rPublic').disabled = key === 'default';
+  const mesh = MESH_KEYS.some(k => k in ch), move = $('rMove') ? $('rMove').checked : false;
+  if ($('rSkip')) $('rSkip').closest('label').hidden = !mesh || !move;
+  const notes = [];
+  if (!Object.keys(ch).length) notes.push(el('div', { class: 'muted' }, 'Nothing changed yet.'));
+  else if (!mesh) notes.push(el('div', { class: 'muted' }, 'Only the base changes. Collars are not affected.'));
+  else if (!radioCur.collars) notes.push(el('div', { class: 'muted' }, 'The base radio restarts with the new settings. Collars you set up later get them too.'));
+  else if (move) notes.push(el('div', { class: 'callout' }, 'Each collar is checked first; if any does not answer, nothing changes. Then the collars get the new settings over the mesh and restart, and the base changes last. Collars that miss this cannot hear the base until they are set up again over USB (a full install if they are locked to this base).'));
+  else notes.push(el('div', { class: 'callout bad' }, 'The collars keep the old settings and will stop hearing the base. Locked collars then need a full install over USB to be set up again.'));
+  const named = (key === 'new' || (key === 'keep' && s.channel_key !== 'default')) && $('rChan').value.trim();
+  if (key === 'new') notes.push(el('div', { class: 'muted', style: 'margin-top:4px' }, 'Only radios with the new key can read your channel.'));
+  if (named && $('rPublic').checked) notes.push(el('div', { class: 'callout', style: 'margin-top:4px' }, 'Radios pick their frequency from the primary channel\'s name, so a named channel moves your radios off the default LongFast frequency and strangers won\'t hear lost-dog messages. Leave the name empty to stay on it.'));
+  else if (!named && key !== 'default' && $('rPublic').checked && !(key === 'keep' && s.channel_key === 'default')) notes.push(el('div', { class: 'muted', style: 'margin-top:4px' }, 'No name keeps your radios on the default LongFast frequency, so strangers hear lost-dog messages on the public channel.'));
+  if (key === 'default' || (key === 'keep' && s.channel_key === 'default')) notes.push(el('div', { class: 'muted', style: 'margin-top:4px' }, 'Your primary channel is the public one: anyone nearby can read it, and lost-dog messages reach strangers\' radios.'));
+  $('rNote').replaceChildren(...notes);
+  $('rGo').disabled = !Object.keys(ch).length;
+  $('rGo').textContent = mesh && radioCur.collars && move ? `Apply to the base and ${radioCur.collars === 1 ? 'the collar' : radioCur.collars + ' collars'}` : 'Apply';
+}
+$('radioEdit').onsubmit = async e => {
+  e.preventDefault();
+  const body = { ...radioChanges(), update_collars: $('rMove') ? $('rMove').checked : true, skip_unreachable: $('rSkip') ? $('rSkip').checked : false };
+  $('rGo').disabled = true; $('rMsg').textContent = '';
+  try {
+    const j = await api('base/settings', { method: 'PUT', body: JSON.stringify(body) });
+    $('radioEdit').hidden = true; radioCur = null; renderRadio(); watchRadioJob(j.id);
+  } catch (err) { $('rMsg').textContent = err.message; $('rGo').disabled = false; }
+};
+function watchRadioJob(id) {
+  radioJobId = id; radioJobLog = [];
+  clearTimeout(radioJobTimer);
+  $('radioBox').open = true;
+  const tick = async () => {
+    let j;
+    try { j = await api(`firmware/jobs/${id}?since=${radioJobLog.length}`); } catch { radioJobTimer = setTimeout(tick, 3000); return; }
+    radioJobLog = radioJobLog.concat(j.log);
+    renderJob(j, $('radioJob'), radioJobLog);
+    if (j.state === 'running') radioJobTimer = setTimeout(tick, 1000);
+    else { baseInfo.fetched = 0; fwRefresh(); refresh(); loadDiscovery(); }
+  };
+  tick();
 }
 $('health').onclick = () => { $('radioBox').open = !$('radioBox').open; };
 
@@ -1246,6 +1364,11 @@ function renderContact() {
 function renderBeacon(c) {
   const s = c.status, box = $('beaconBox');
   const parts = [];
+  const rc = c.radio_changed;
+  if (rc && rc.moved) parts.push(el('div', { class: 'callout beacon' },
+    `Moved to the base radio's new settings ${ago(Date.now() / 1000 - rc.at)}. Waiting for its first report on them.`));
+  else if (rc) parts.push(el('div', { class: 'callout bad beacon' },
+    `${c.name} missed the base radio's change ${ago(Date.now() / 1000 - rc.at)}, so it can't hear the base. Plug it into the base and use "Set up only" under Collar firmware (a full install first if it is locked to this base).`));
   if (c.key_mismatch) parts.push(el('div', { class: 'callout bad beacon' },
     `Ignored a report ${ago(Date.now() / 1000 - c.key_mismatch)} that claimed to be ${c.name} but was signed with a different key. `
     + 'Another node may be pretending to be this collar. If you fully re-installed this collar yourself, set it up again over USB (or remove and re-add it) so the base accepts its new key.'));
@@ -1490,8 +1613,10 @@ const webSerialOk = () => 'serial' in navigator && window.isSecureContext;
 async function fwRefresh() {
   try { fw = await api('firmware'); } catch (e) { fwSay(e.message); return; }
   if (!fw.builds.some(b => b.id === fwSel)) fwSel = fw.builds[0] ? fw.builds[0].id : null;
-  if (fw.job && fw.job.state === 'running' && fwJobId !== fw.job.id) watchJob(fw.job.id);
-  else if (!fwJobId && fw.job) { fwJobId = fw.job.id; fwJobLog = fw.job.log; renderJob(fw.job); }
+  const fj = fw.job && fw.job.kind !== 'radio' ? fw.job : null;
+  if (fw.job && fw.job.kind === 'radio' && fw.job.state === 'running' && radioJobId !== fw.job.id) watchRadioJob(fw.job.id);
+  if (fj && fj.state === 'running' && fwJobId !== fj.id) watchJob(fj.id);
+  else if (!fwJobId && fj) { fwJobId = fj.id; fwJobLog = fj.log; renderJob(fj); }
   renderFw();
 }
 
@@ -1560,13 +1685,13 @@ function renderFw() {
     : 'Keeps the collar\'s Meshtastic settings, keys and fences. Also brings a collar out of update mode.';
 }
 
-function renderJob(j) {
-  if (!j) { $('fwJob').replaceChildren(); return; }
+function renderJob(j, box = $('fwJob'), lines = fwJobLog) {
+  if (!j) { box.replaceChildren(); return; }
   const pct = j.progress == null ? null : Math.round(j.progress * 100);
   const bar = el('div', { class: 'bar' + (j.state === 'running' && pct == null ? ' busy' : '') }, el('i', { style: `width:${pct ?? 100}%` }));
-  const log = el('pre', { class: 'joblog' }, fwJobLog.join('\n'));
-  const details = el('details', { open: j.state === 'failed' || $('fwJob').querySelector('details')?.open }, el('summary', {}, 'Log'), log);
-  $('fwJob').replaceChildren(el('div', { class: 'job ' + j.state },
+  const log = el('pre', { class: 'joblog' }, lines.join('\n'));
+  const details = el('details', { open: j.state === 'failed' || box.querySelector('details')?.open }, el('summary', {}, 'Log'), log);
+  box.replaceChildren(el('div', { class: 'job ' + j.state },
     el('div', { class: 'row spread' }, el('b', {}, j.title),
       j.state === 'running' && j.id !== 'web' ? el('button', { class: 'link', onclick: () => api(`firmware/jobs/${j.id}/cancel`, { method: 'POST' }).catch(() => {}) }, 'Cancel')
         : el('span', { class: 'muted' }, { done: 'Done', failed: 'Failed', cancelled: 'Cancelled' }[j.state] || '')),

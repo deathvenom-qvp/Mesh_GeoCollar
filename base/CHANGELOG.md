@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.14.0
+
+- **Change the base radio's settings from the page**: name, region, preset, hop limit and the
+  primary channel (keep it, public default, or a new private key), plus a public LongFast channel
+  for lost-dog messages. Under **Base radio**, choose **Change settings…**.
+- Collars move with the base: each collar is checked first (nothing changes if one doesn't
+  answer, unless you choose to leave it behind), gets the new settings over the mesh, and the base
+  changes last. This works on collars locked to the base. Each moved collar shows as waiting until
+  it reports on the new settings, and a collar left behind says how to set it up again.
+- If the base fails to take the settings after the collars moved, **Finish the change** applies
+  the same settings, including any new channel key.
+- The base radio panel now says when a public channel is on a private channel's frequency, where
+  strangers won't hear lost-dog messages.
+
 ## 0.13.0
 
 Security review. Needs the new collar firmware, and the base and collars must be updated

@@ -182,6 +182,10 @@ class MeshLink:
             primary = chans[0].settings
             out["channel"] = primary.name or "(default)"
             out["public_channel"] = any(c.role and bytes(c.settings.psk) in (b"", b"\x01") for c in chans)
+            # Radios pick their frequency slot from the primary channel's name: only a blank name (shown
+            # as the preset's) shares the slot with strangers on the default channel.
+            lora = getattr(cfg, "lora", None)
+            out["default_slot"] = not primary.name and not (lora and (lora.channel_num or lora.override_frequency))
         if user.get("isLicensed"):
             issues.append("Licensed (ham) mode is on, which turns off encryption; collars cannot trust this base.")
         if not key:
@@ -244,6 +248,65 @@ class MeshLink:
         if "error" in reply:
             raise RuntimeError(f"{node_id} refused the request: {reply['error']}")
         return reply.get("admin")
+
+    # ---------------------------------------------------------------------------------------------
+    # The base radio's own settings, and moving collars along with them.
+    # ---------------------------------------------------------------------------------------------
+    def radio_settings(self) -> dict:
+        from . import radio
+
+        if not self.iface:
+            raise RuntimeError("not connected to a Meshtastic node")
+        user = (self.iface.getMyNodeInfo() or {}).get("user", {})
+        return radio.describe(self.iface.localNode, user)
+
+    def apply_local(self, lora=None, channels=None, long_name: str | None = None, short_name: str | None = None) -> None:
+        """Write settings to the base radio in one transaction (it reboots once if needed)."""
+        if not self.iface:
+            raise RuntimeError("not connected to a Meshtastic node")
+        node = self.iface.localNode
+        licensed = bool((self.iface.getMyNodeInfo() or {}).get("user", {}).get("isLicensed"))
+        node.beginSettingsTransaction()
+        if long_name is not None or short_name is not None:
+            node.setOwner(long_name=long_name, short_name=short_name, is_licensed=licensed)
+        if lora is not None:
+            node.localConfig.lora.CopyFrom(lora)
+            node.writeConfig("lora")
+        for ch in channels or []:
+            node.channels[ch.index].CopyFrom(ch)
+            node.writeChannel(ch.index)
+        node.commitSettingsTransaction()
+
+    def push_radio(self, node_id: str, lora, channels, primary_moves: bool = True, timeout: float = 90) -> bool:
+        """Give a collar new LoRa settings and channels over the mesh, as its admin (this works on
+        a collar locked to this base). All in one edit, so it restarts once, at the end.
+
+        The collar keeps its radio settings until the edit is committed, but switches its primary
+        channel the moment it gets it, and acknowledges with that channel's key, which the base can't
+        read until it changes too. So the primary channel and the commit go last, and when the primary
+        changes their acknowledgements may never arrive. Returns True when every step was
+        acknowledged, False when those last two could not be confirmed. Raises if an earlier step
+        fails."""
+        from meshtastic.protobuf import admin_pb2
+
+        def send(build, blind=False):
+            m = admin_pb2.AdminMessage()
+            build(m)
+            try:
+                self._admin(node_id, m, want_response=False, timeout=45 if blind else timeout)
+            except (TimeoutError, RuntimeError):
+                if not blind:
+                    raise
+                return False
+            return True
+
+        send(lambda m: setattr(m, "begin_edit_settings", True))
+        for ch in channels:
+            if ch.index != 0:
+                send(lambda m, ch=ch: m.set_channel.CopyFrom(ch))
+        send(lambda m: m.set_config.lora.CopyFrom(lora))
+        ok = send(lambda m: m.set_channel.CopyFrom(channels[0]), blind=primary_moves)
+        return send(lambda m: setattr(m, "commit_edit_settings", True), blind=primary_moves) and ok
 
     def get_metadata(self, node_id: str, timeout: float = 90):
         """DeviceMetadata (firmware_version, hasWifi, hw_model...). Also fetches a session key."""

@@ -20,8 +20,8 @@ GeoCollar firmware. Before connecting it to this app:
 2. In the Meshtastic phone app (or [client.meshtastic.org](https://client.meshtastic.org)), set the
    **LoRa region** for your country. Leave the preset at the default (LongFast) unless you have a
    reason to change it; collars get the same settings.
-3. Leave the channels at the default, or set up a private primary channel and keep LongFast with
-   the default key as a secondary one, so lost-dog messages still reach other Meshtastic users.
+3. Leave the channels at the default. You can change them later from this app (see below), which
+   also moves the collars.
 4. Put the antenna as high as you can. The base's range is the yard you can cover.
 
 **USB or network?** USB is the better choice: plug the radio into the Home Assistant machine with
@@ -34,6 +34,32 @@ turns off Bluetooth, so you configure the node over the network from then on.
 Once connected, click the radio badge at the top of the page (or **Base radio** under it) to see
 the radio's node, firmware, region, preset and channel, and any problem that would stop collars
 working, such as no region set or firmware too old.
+
+### Changing the base radio's settings
+
+Open **Base radio** and choose **Change settings…** to change the radio's name, region, preset,
+hop limit or primary channel. The base and every collar must share the region, preset and
+channels, or they stop hearing each other, and a collar locked to this base can only be changed by
+the base over the mesh. So when one of those changes, the app:
+
+1. asks every collar for a reply, and changes nothing if one doesn't answer (bring it in range, or
+   tick **Change anyway** to leave it behind);
+2. sends each collar the new settings over the mesh, and it restarts on them;
+3. changes the base radio last. It restarts too, and the app reconnects within a minute.
+
+Each moved collar shows "Waiting for its first report" until it is heard on the new settings. A
+collar left behind can't hear the base: plug it in and use **Set up only** under Collar firmware
+(after a full install, if it is locked to this base). The name and hop limit only affect the base.
+
+If the base radio fails to take the settings after the collars have moved, the panel shows
+**Finish the change**, which applies the same settings (including any new key) to the base.
+
+**Channels.** The primary channel can stay as it is, go back to the public default (anyone nearby
+can read it), or get a new private key. Tick **Keep a public LongFast channel** so lost-dog
+messages still reach strangers' radios. Leave a private channel's name empty: radios pick their
+frequency from the primary channel's name, and a blank name keeps the default LongFast frequency,
+which is the one strangers listen on. With a named channel, lost-dog messages reach only radios
+set up like yours.
 
 ## Configuration
 

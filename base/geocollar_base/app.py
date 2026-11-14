@@ -22,6 +22,7 @@ from pydantic import BaseModel
 from . import firmware as fw
 from . import geo
 from . import protocol
+from . import radio
 from .mesh import MeshLink
 from .sim import Simulator
 from .store import Store
@@ -58,6 +59,19 @@ class CollarPatch(BaseModel):
 class ContactIn(BaseModel):
     name: str = ""
     phone: str = ""
+
+
+class RadioIn(BaseModel):
+    long_name: str | None = None
+    short_name: str | None = None
+    region: str | None = None
+    preset: str | None = None
+    hop_limit: int | None = None
+    channel_key: str = "keep"  # keep, default (public LongFast key) or new (random private key)
+    channel_name: str | None = None
+    public_secondary: bool | None = None  # keep a LongFast channel for lost-dog messages
+    update_collars: bool = True  # move collars over the mesh first
+    skip_unreachable: bool = False  # change anyway, leaving collars that did not answer behind
 
 
 class SimIn(BaseModel):
@@ -362,7 +376,8 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
     @app.get("/api/base")
     def base_info():
         """The base radio's node ID and public key: the key goes into each collar's admin keys."""
-        return link.base_info() if link.connected and hasattr(link, "base_info") else {}
+        info = link.base_info() if link.connected and hasattr(link, "base_info") else {}
+        return dict(info, radio_pending=bool(radio_pending)) if info else info
 
     @app.patch("/api/collars/{node_id}")
     def rename_collar(node_id: str, body: CollarPatch):
@@ -588,6 +603,136 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
             return result
 
         return start("usb", f"Set up the collar on {body.port}", run)
+
+    # -- Base radio settings ----------------------------------------------------------------------
+    # Set when collars moved to new settings but the base radio then failed to take them; the plan
+    # (with any new channel key) is kept so the change can be finished rather than started again.
+    radio_pending: dict = {}
+
+    def apply_base(job, lora, chans, names, moved, left) -> None:
+        job.set_step("Changing the base radio", 0.9)
+        if moved:  # kept until the base takes them, even if this job is cancelled
+            radio_pending.update(lora=lora, chans=chans, names=names, moved=moved, left=left)
+        for attempt in range(6):
+            try:
+                link.apply_local(lora, chans, names.get("long_name"), names.get("short_name"))
+                radio_pending.clear()
+                break
+            except Exception as e:  # noqa: BLE001 - often the radio reconnecting; retry for a minute or so
+                job.log(f"The base radio did not take the settings: {e}")
+                if attempt == 5 or not moved:
+                    raise fw.FirmwareError(
+                        f"the base radio did not take the new settings ({e})"
+                        + (". The collars that moved can't hear it until it does: use \"Finish the change\" "
+                           "under Base radio once it is connected" if moved else "")) from e
+                job.check_cancel()
+                time.sleep(15)
+        if chans is not None:  # the mesh settings changed: watch for each collar on the new ones
+            now = time.time()
+            for node_id in moved:
+                store.set_collar_info(node_id, "radio_changed", {"at": now, "moved": True})
+            for node_id in left:
+                store.set_collar_info(node_id, "radio_changed", {"at": now, "moved": False})
+
+    @app.get("/api/base/settings")
+    def base_settings():
+        if not link.connected:
+            raise HTTPException(503, "the base radio is not connected")
+        try:
+            current = link.radio_settings()
+        except Exception as e:  # noqa: BLE001 - the radio may still be loading its config
+            raise HTTPException(503, f"could not read the base radio's settings: {e}") from e
+        real = [k for k, c in store.collars().items() if not c.get("sim")]
+        return {"settings": current, "options": radio.options(), "collars": len(real), "pending": bool(radio_pending)}
+
+    @app.post("/api/base/settings/finish")
+    def finish_base_settings():
+        if not radio_pending:
+            raise HTTPException(409, "there is no unfinished change")
+        if not link.connected:
+            raise HTTPException(503, "the base radio is not connected")
+        p = dict(radio_pending)
+
+        def run(job):
+            apply_base(job, p["lora"], p["chans"], p["names"], p["moved"], p["left"])
+            job.set_step("Done. The base radio restarts with the new settings, and the app reconnects within a minute.", 1.0)
+            return {"changed": True, "moved": p["moved"]}
+
+        return start("radio", "Finish changing the base radio's settings", run)
+
+    @app.put("/api/base/settings")
+    def change_base_settings(body: RadioIn):
+        if not link.connected:
+            raise HTTPException(503, "the base radio is not connected")
+        if radio_pending:
+            raise HTTPException(409, "finish the last change first: the collars already moved to it")
+        req = {k: v for k, v in body.model_dump().items()
+               if v is not None and k not in ("update_collars", "skip_unreachable")}
+        try:
+            req = radio.validate(req)
+        except (radio.RadioError, ValueError, TypeError) as e:
+            raise HTTPException(400, str(e)) from e
+
+        def run(job):
+            current = link.radio_settings()
+            try:
+                lora, chans, mesh_changed = radio.plan(link.iface.localNode, req)
+            except radio.RadioError as e:
+                raise fw.FirmwareError(str(e)) from e
+            names = {k: req[k] for k in ("long_name", "short_name") if k in req and req[k] != current.get(k)}
+            hop_changed = req.get("hop_limit", current["hop_limit"]) != current["hop_limit"]
+            real = {k: c for k, c in store.collars().items() if not c.get("sim")}
+            moved, left = [], []
+            if mesh_changed and real and body.update_collars:
+                job.set_step("Checking that every collar can hear the base", 0.0)
+                reachable = []
+                for i, (node_id, c) in enumerate(real.items()):
+                    job.check_cancel()
+                    try:
+                        link.get_metadata(node_id, timeout=60)  # also fetches its admin session key
+                        reachable.append(node_id)
+                        job.log(f"{c['name']} answered")
+                    except Exception as e:  # noqa: BLE001
+                        left.append(node_id)
+                        job.log(f"{c['name']} did not answer: {e}")
+                    job.progress = (i + 1) / len(real) / 3
+                if left and not body.skip_unreachable:
+                    one = len(left) == 1
+                    raise fw.FirmwareError(
+                        "nothing was changed: " + ", ".join(real[k]["name"] for k in left)
+                        + f" did not answer. Bring {'it' if one else 'them'} in range and try again, or tick "
+                        f"\"Change anyway\" ({'it' if one else 'they'} would then need setting up again over USB, "
+                        f"and a full install if {'it is' if one else 'they are'} locked to this base)")
+                moves = radio.primary_moves(link.iface.localNode, lora, chans)
+                for i, node_id in enumerate(reachable):
+                    job.check_cancel()
+                    name = real[node_id]["name"]
+                    job.set_step(f"Moving {name} to the new settings", 1 / 3 + (i / len(reachable)) / 3)
+                    try:
+                        confirmed = link.push_radio(node_id, lora, chans, moves)
+                    except Exception as e:  # noqa: BLE001
+                        left.append(node_id)
+                        job.log(f"{name} did not take the new settings: {e}")
+                        continue
+                    moved.append(node_id)
+                    job.log(f"{name} has the new settings and is restarting" if confirmed else
+                            f"{name} took the new settings; it switched channel before it could confirm the last "
+                            "step, so its first report after the change confirms it")
+                if not moved and not body.skip_unreachable:
+                    raise fw.FirmwareError("no collar took the new settings, so the base radio was left as it was")
+            elif mesh_changed and real:
+                left = list(real)
+                job.log("Collars were not moved; they keep the old settings")
+            if not (mesh_changed or names or hop_changed):
+                job.set_step("Nothing to change.", 1.0)
+                return {"changed": False}
+            apply_base(job, lora if (mesh_changed or hop_changed) else None, chans if mesh_changed else None,
+                       names, moved, left)
+            job.set_step("Done. The base radio restarts if its radio settings changed, and the app reconnects "
+                         "within a minute." + (f" Not moved: {', '.join(real[k]['name'] for k in left)}." if left else ""), 1.0)
+            return {"changed": True, "moved": moved, "left_behind": left}
+
+        return start("radio", "Change the base radio's settings", run)
 
     @app.post("/api/firmware/flashed")
     def firmware_device_flashed(body: DeviceFlashedIn):
