@@ -110,3 +110,22 @@ def test_status_beacon_flags():
     s = p.Status(p.MsgType.BREACH, 3, p.CollarState.LOST, 80, 40.0, -75.0, 1.0, 9, -40, True, False, True, False)
     back = p.decode_status(p.encode_status(s))
     assert back.beacon_active and not back.beacon_silenced
+
+
+def test_config_matches_the_firmware():
+    # Same bytes as firmware/test/test_main.cpp: [version][7][report interval s, little-endian]
+    data = p.encode_config(300)
+    assert data.hex() == "02072c01" and p.message_type(data) == p.MsgType.CONFIG
+    assert p.decode_config(data) == 300
+    for bad in (p.MIN_REPORT_S - 1, p.MAX_REPORT_S + 1):
+        with pytest.raises(ValueError):
+            p.encode_config(bad)
+
+
+def test_mesh_names_match_the_firmware():
+    # The same cases as meshNames in firmware/test/test_main.cpp.
+    assert p.mesh_names("Rex") == ("Rex", "REX")
+    assert p.mesh_names("  Biscuit  ") == ("Biscuit", "BISC")
+    assert p.mesh_names("Old Yeller the Dog Star") == ("Old Yeller the Dog Star", "OYTD")
+    assert p.mesh_names("Zoë") == ("Zoë", "ZOë")
+    assert p.mesh_names("Chloé") == ("Chloé", "CHLO")

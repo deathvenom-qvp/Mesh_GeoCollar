@@ -299,6 +299,10 @@ class MeshLink:
         """The dog's name and the owner's contact, for the collar's lost beacon."""
         self._send(node_id, protocol.encode_owner(dog, owner, phone))
 
+    def send_config(self, node_id: str, report_s: int) -> None:
+        """How often the collar reports."""
+        self._send(node_id, protocol.encode_config(report_s))
+
     def send_command(self, node_id: str, action: protocol.CommandAction, intensity: int = 0, duration_ms: int = 1000,
                      seq: int = 0):
         self._send(node_id, protocol.encode_command(action, intensity, duration_ms, seq))

@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.15.0
+
+Needs the new collar firmware (update the collars over Wi-Fi or USB).
+
+- **Report rate**: **Rename** now has a slider for how often the collar reports its position, from
+  every 30 s to every hour (10 minutes by default). While lost, a collar still reports every 30 s.
+  The collar's panel shows the rate, and a collar out of reach gets it with its next report.
+- The collar takes the dog's name as its **Meshtastic name** (short name: initials, or the first
+  four letters), so it shows as the dog in the Meshtastic app and on other nodes. Collars that
+  already have the dog's name rename themselves after the firmware update. USB setup uses the
+  same short name.
+
 ## 0.14.6
 
 - Fixed: a collar added by **Set up only** got its first message before the base had given its

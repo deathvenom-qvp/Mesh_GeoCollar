@@ -81,7 +81,7 @@ bool header(Reader &r, MsgType expect)
 
 bool messageType(const uint8_t *buf, size_t len, MsgType &type)
 {
-    if (len < 2 || buf[0] != kVersion || buf[1] < 1 || buf[1] > 6)
+    if (len < 2 || buf[0] != kVersion || buf[1] < 1 || buf[1] > static_cast<uint8_t>(MsgType::Config))
         return false;
     type = static_cast<MsgType>(buf[1]);
     return true;
@@ -178,6 +178,90 @@ bool decodeOwner(const uint8_t *buf, size_t len, OwnerInfo &o)
         return false;
     o = tmp;
     return true;
+}
+
+size_t encodeConfig(uint8_t *out, size_t cap, const CollarConfig &c)
+{
+    Writer w{out, cap};
+    w.u8(kVersion);
+    w.u8(static_cast<uint8_t>(MsgType::Config));
+    w.u16(c.reportS);
+    return w.done();
+}
+
+bool decodeConfig(const uint8_t *buf, size_t len, CollarConfig &c)
+{
+    Reader r{buf, len};
+    if (!header(r, MsgType::Config))
+        return false;
+    CollarConfig tmp;
+    tmp.reportS = r.u16();
+    if (!r.ok || (tmp.reportS != 0 && (tmp.reportS < kMinReportS || tmp.reportS > kMaxReportS)))
+        return false;
+    c = tmp;
+    return true;
+}
+
+namespace
+{
+/// Copy at most cap - 1 bytes of s, cut on a UTF-8 character boundary.
+size_t copyUtf8(char *out, size_t cap, const char *s, size_t n)
+{
+    if (cap == 0)
+        return 0;
+    if (n > cap - 1) {
+        n = cap - 1;
+        while (n > 0 && (static_cast<uint8_t>(s[n]) & 0xC0) == 0x80)
+            n--; // s[n] continues a character: cut before that character starts
+    }
+    memcpy(out, s, n);
+    out[n] = '\0';
+    return n;
+}
+
+size_t utf8CharLen(const char *s)
+{
+    const uint8_t c = static_cast<uint8_t>(*s);
+    size_t n = c < 0x80 ? 1 : (c >> 5) == 6 ? 2 : (c >> 4) == 14 ? 3 : (c >> 3) == 30 ? 4 : 1;
+    for (size_t i = 1; i < n; i++)
+        if ((static_cast<uint8_t>(s[i]) & 0xC0) != 0x80)
+            return i; // truncated sequence: stop at what is there
+    return n;
+}
+} // namespace
+
+void meshNames(const char *dog, char *longName, size_t longCap, char *shortName, size_t shortCap)
+{
+    while (*dog == ' ')
+        dog++;
+    size_t len = strlen(dog);
+    while (len && dog[len - 1] == ' ')
+        len--;
+    copyUtf8(longName, longCap, dog, len);
+
+    // Count words, then take initials (several words) or the leading characters (one word).
+    size_t words = 0;
+    for (size_t i = 0; i < len; i++)
+        if (dog[i] != ' ' && (i == 0 || dog[i - 1] == ' '))
+            words++;
+    size_t n = 0;
+    const size_t room = shortCap ? shortCap - 1 : 0;
+    for (size_t i = 0; i < len && n < room;) {
+        const size_t cl = utf8CharLen(dog + i);
+        const bool take = words > 1 ? dog[i] != ' ' && (i == 0 || dog[i - 1] == ' ') : dog[i] != ' ';
+        if (take) {
+            if (n + cl > room)
+                break;
+            memcpy(shortName + n, dog + i, cl);
+            n += cl;
+        }
+        i += cl;
+    }
+    if (shortCap)
+        shortName[n] = '\0';
+    for (size_t i = 0; i < n; i++)
+        if (shortName[i] >= 'a' && shortName[i] <= 'z')
+            shortName[i] = static_cast<char>(shortName[i] - 'a' + 'A');
 }
 
 size_t encodeCommand(uint8_t *out, size_t cap, const Command &c)

@@ -22,6 +22,9 @@ MAX_DOG_NAME = 24  # bytes of UTF-8, as in firmware/GeoCollar/Protocol.h
 MAX_OWNER_NAME = 24
 MAX_PHONE = 20
 MAX_SHOCK_LEVEL = 30  # the collar firmware's cap (Settings::maxShockLevel)
+MIN_REPORT_S = 30  # how often a collar may be asked to report (kMinReportS..kMaxReportS)
+MAX_REPORT_S = 3600
+DEFAULT_REPORT_S = 600  # the firmware's GEOCOLLAR_STATUS_INTERVAL_MS
 
 
 class MsgType(IntEnum):
@@ -31,6 +34,7 @@ class MsgType(IntEnum):
     COMMAND = 4
     OWNER = 5  # base -> collar: the dog's name and the owner's contact, for the lost beacon
     HELLO = 6  # collar -> broadcast: runs GeoCollar, not adopted by a base yet
+    CONFIG = 7  # base -> collar: how often to report
 
 
 class CommandAction(IntEnum):
@@ -149,6 +153,35 @@ def encode_owner(dog: str, owner: str, phone: str) -> bytes:
     return bytes(out)
 
 
+def _cut_utf8(text: str, limit: int) -> str:
+    return text.encode()[:limit].decode(errors="ignore")
+
+
+def mesh_names(dog: str) -> tuple[str, str]:
+    """The collar's Meshtastic long and short name for a dog's name, as the collar firmware
+    (meshNames) makes them: the name itself, and its initials (several words) or first letters
+    (one word), at most 4 bytes, ASCII letters upper-cased."""
+    name = " ".join((dog or "").split())
+    words = name.split(" ") if name else []
+    short = "".join(w[0] for w in words) if len(words) > 1 else name
+    short = "".join(c.upper() if c.isascii() else c for c in _cut_utf8(short, 4))  # ASCII only, as the firmware
+    return _cut_utf8(name, 39), short
+
+
+def encode_config(report_s: int) -> bytes:
+    """How often the collar reports, in seconds (MIN_REPORT_S..MAX_REPORT_S). While lost it
+    reports at least every 30 s whatever this says. Older collar firmware ignores it."""
+    if not MIN_REPORT_S <= report_s <= MAX_REPORT_S:
+        raise ValueError(f"report interval must be {MIN_REPORT_S}..{MAX_REPORT_S} s")
+    return bytes([VERSION, MsgType.CONFIG]) + struct.pack("<H", report_s)
+
+
+def decode_config(data: bytes) -> int:
+    if len(data) < 4 or data[0] != VERSION or data[1] != MsgType.CONFIG:
+        raise ValueError("not a GeoCollar config message")
+    return struct.unpack_from("<H", data, 2)[0]
+
+
 def decode_hello(data: bytes) -> dict:
     if len(data) != 4 or data[0] != VERSION or data[1] != MsgType.HELLO:
         raise ValueError("not a GeoCollar hello")
@@ -211,7 +244,7 @@ def encode_status(s: Status) -> bytes:
 
 
 def message_type(data: bytes) -> MsgType | None:
-    if len(data) < 2 or data[0] != VERSION or data[1] not in (1, 2, 3, 4, 5, 6):
+    if len(data) < 2 or data[0] != VERSION or data[1] not in tuple(MsgType):
         return None
     return MsgType(data[1])
 

@@ -34,6 +34,7 @@ enum class MsgType : uint8_t {
     Command = 4,    // base -> collar
     Owner = 5,      // base -> collar: the dog's name and the owner's contact, for the lost beacon
     Hello = 6,      // collar -> broadcast: "I run GeoCollar and no base has adopted me yet"
+    Config = 7,     // base -> collar: how often to report
 };
 
 enum class CommandAction : uint8_t {
@@ -112,6 +113,24 @@ constexpr size_t kHelloSize = 4;
 size_t encodeHello(uint8_t *out, size_t cap, bool hasAdminKey, bool hasFences, uint8_t batteryPct);
 size_t encodeOwner(uint8_t *out, size_t cap, const OwnerInfo &o);
 bool decodeOwner(const uint8_t *buf, size_t len, OwnerInfo &o);
+
+/// Report interval limits, seconds. 0 means the firmware default (GEOCOLLAR_STATUS_INTERVAL_MS).
+constexpr uint16_t kMinReportS = 30;
+constexpr uint16_t kMaxReportS = 3600;
+
+/// Collar settings from the base: [version][7][report interval s, u16]. Later fields may follow, so
+/// a longer message is accepted.
+struct CollarConfig {
+    uint16_t reportS = 0;
+};
+constexpr size_t kConfigLength = 2 + 2;
+size_t encodeConfig(uint8_t *out, size_t cap, const CollarConfig &c);
+bool decodeConfig(const uint8_t *buf, size_t len, CollarConfig &c);
+
+/// The collar's Meshtastic names for a dog's name: the long name is the dog's name (cut to fit on a
+/// character boundary), the short name its initials (several words) or first letters (one word),
+/// at most 4 bytes, ASCII letters upper-cased. Both NUL-terminated.
+void meshNames(const char *dog, char *longName, size_t longCap, char *shortName, size_t shortCap);
 
 size_t encodeCommand(uint8_t *out, size_t cap, const Command &c);
 bool decodeCommand(const uint8_t *buf, size_t len, Command &c);

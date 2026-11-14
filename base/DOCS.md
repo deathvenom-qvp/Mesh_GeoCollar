@@ -127,6 +127,16 @@ By hand, collars only obey messages from base nodes they trust:
 3. In GeoCollar, open **Add a collar** and enter the collar's node ID (for example `!a1b2c3d4`,
    shown in the Meshtastic app's node list).
 
+## Name and report rate
+
+**Rename** next to a collar's name sets the dog's name and how often the collar reports its
+position, from every 30 seconds to every hour (10 minutes unless you change it). More often uses
+more battery and airtime. While a dog is lost, its collar reports every 30 seconds whatever the
+setting. The collar also takes the dog's name as its Meshtastic name ("Rex", short name "REX"), so
+it shows as the dog in the Meshtastic app and on other nodes. If the collar is out of reach, it
+gets the change when it next reports. Both need collar firmware from 0.15.0 on; older collars keep
+reporting every 10 minutes and keep their Meshtastic name.
+
 ## If a dog gets lost
 
 Give each collar the dog's name (**Rename** next to the collar's name) and fill in **If a dog

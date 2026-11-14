@@ -61,6 +61,9 @@ class FakeLink:
         self.seqs = getattr(self, "seqs", []) + [seq]
         self.sent.append((node_id, protocol.encode_command(action, intensity, duration_ms)))
 
+    def send_config(self, node_id, report_s):
+        self.sent.append((node_id, protocol.encode_config(report_s)))
+
     def send_owner(self, node_id, dog, owner, phone):
         self.sent.append((node_id, protocol.encode_owner(dog, owner, phone)))
         self.key_at_send = getattr(self, "key_at_send", []) + [node_id in self.radio_keys]
@@ -339,6 +342,33 @@ def test_setup_gives_the_radio_the_collars_key(tmp_path, monkeypatch):
     # Meshtastic 2.7 says PKI_FAILED when its radio has no key for the collar: give it again, ask.
     client.app.state.on_send_error("!0000beef", "PKI_FAILED")
     assert "!0000beef" not in link.radio_keys and link.asked == ["!0000beef"]
+
+
+def test_rename_and_report_interval(tmp_path):
+    client, link = make(tmp_path)
+    client.post("/api/collars", json={"node_id": "!a1b2c3d4", "name": "Rex"})
+    link.sent.clear()
+    r = client.patch("/api/collars/!a1b2c3d4", json={"name": "Biscuit", "report_s": 300}).json()
+    assert r["name"] == "Biscuit" and r["report_s"] == 300 and r["owner_sent"] and r["config_sent"]
+    assert link.sent == [("!a1b2c3d4", protocol.encode_owner("Biscuit", "", "")),
+                         ("!a1b2c3d4", protocol.encode_config(300))]
+    # Same interval again: only the name goes.
+    link.sent.clear()
+    client.patch("/api/collars/!a1b2c3d4", json={"name": "Biscuit", "report_s": 300})
+    assert link.sent == [("!a1b2c3d4", protocol.encode_owner("Biscuit", "", ""))]
+    for bad in (10, 7200):
+        assert client.patch("/api/collars/!a1b2c3d4", json={"report_s": bad}).status_code == 400
+    assert client.patch("/api/collars/!a1b2c3d4", json={"name": " "}).status_code == 400
+
+    # Not sent while the radio is away: it goes with the collar's next report.
+    link.connected = False
+    r = client.patch("/api/collars/!a1b2c3d4", json={"report_s": 60}).json()
+    assert r["config_sent"] is False and r["report_s"] == 60
+    link.connected = True
+    link.sent.clear()
+    client.app.state.on_status("!a1b2c3d4", {"state": "INSIDE", "pki": True, "sender_key": "a2V5"})
+    assert ("!a1b2c3d4", protocol.encode_config(60)) in link.sent
+    assert client.get("/api/collars").json()["!a1b2c3d4"]["config_sent"] == 60
 
 
 def test_a_collar_that_does_not_trust_the_base_is_not_sent_anything(tmp_path):

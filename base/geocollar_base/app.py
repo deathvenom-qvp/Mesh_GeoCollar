@@ -56,7 +56,8 @@ class CollarIn(BaseModel):
 
 
 class CollarPatch(BaseModel):
-    name: str
+    name: str | None = None
+    report_s: int | None = None  # how often the collar reports, seconds
 
 
 class ContactIn(BaseModel):
@@ -223,6 +224,25 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
         store.set_collar_info(node_id, "owner_sent", o)
         return True
 
+    def push_config(node_id: str) -> bool:
+        """The collar's report interval, if the owner set one."""
+        c = store.collar(node_id) or {}
+        report_s = c.get("report_s")
+        if not report_s:
+            return False
+        if node_id in sim:
+            sim.update(node_id, {"report_s": min(report_s, 600)})
+        elif link.connected:
+            try:
+                link.send_config(node_id, report_s)
+            except Exception as e:  # noqa: BLE001 - retried on the collar's next report
+                log.warning("could not send the report interval to %s: %s", node_id, e)
+                return False
+        else:
+            return False
+        store.set_collar_info(node_id, "config_sent", report_s)
+        return True
+
     def on_status(node_id: str, status: dict) -> None:
         status = dict(status)
         pki, key = status.pop("pki", False), status.pop("sender_key", "")
@@ -244,6 +264,8 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
         # A collar that has not got the current name and contact yet gets them when it next reports.
         if c and node_id not in sim and c.get("owner_sent") != owner_for(node_id):
             push_owner(node_id)
+        if c and node_id not in sim and c.get("report_s") and c.get("config_sent") != c["report_s"]:
+            push_config(node_id)
 
     def ask_node_info(node_id: str) -> None:
         """The radio can't PKI-encrypt to a collar whose public key it doesn't have (one set up by
@@ -333,6 +355,7 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
         # rather than at its next hello.
         if result.get("locked") or result.get("already_locked") or result.get("checked"):
             push_owner(node_id)
+            push_config(node_id)
 
     def adopt_setup(job, result: dict, name: str | None) -> None:
         """After a USB setup: keep the collar's record if its node ID changed, add it if new."""
@@ -451,16 +474,29 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
         return dict(info, radio_pending=bool(radio_pending)) if info else info
 
     @app.patch("/api/collars/{node_id}")
-    def rename_collar(node_id: str, body: CollarPatch):
-        """The collar's name is the dog's name: it is what the lost beacon says."""
+    def update_collar(node_id: str, body: CollarPatch):
+        """The collar's name is the dog's name: the lost beacon says it, and the collar takes it as
+        its Meshtastic name. report_s is how often the collar reports."""
         require(node_id)
-        name = " ".join(body.name.split())
-        if not name:
-            raise HTTPException(400, "give the dog a name")
-        if len(name.encode()) > protocol.MAX_DOG_NAME:
-            raise HTTPException(400, f"the dog's name is at most {protocol.MAX_DOG_NAME} characters")
-        c = store.upsert_collar(node_id, name)
-        return {**c, "owner_sent": push_owner(node_id)}
+        out: dict = {}
+        if body.report_s is not None:
+            if not protocol.MIN_REPORT_S <= body.report_s <= protocol.MAX_REPORT_S:
+                raise HTTPException(400, f"the report interval is {protocol.MIN_REPORT_S} to "
+                                         f"{protocol.MAX_REPORT_S} seconds")
+        if body.name is not None:
+            name = " ".join(body.name.split())
+            if not name:
+                raise HTTPException(400, "give the dog a name")
+            if len(name.encode()) > protocol.MAX_DOG_NAME:
+                raise HTTPException(400, f"the dog's name is at most {protocol.MAX_DOG_NAME} characters")
+            store.upsert_collar(node_id, name)
+            out["owner_sent"] = push_owner(node_id)
+        if body.report_s is not None:
+            changed = (store.collar(node_id) or {}).get("config_sent") != body.report_s
+            store.set_collar_info(node_id, "report_s", body.report_s)
+            if changed:
+                out["config_sent"] = push_config(node_id)
+        return {**(store.collar(node_id) or {}), **out}
 
     @app.get("/api/contact")
     def get_contact():

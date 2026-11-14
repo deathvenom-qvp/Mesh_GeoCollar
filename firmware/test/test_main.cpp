@@ -518,6 +518,41 @@ static void testBeacon()
     buf[3] = '\n'; // control characters are refused
     CHECK(!decodeOwner(buf, n, back));
     CHECK(!decodeOwner(buf, n - 1, back));
+
+    // Collar settings: how often to report.
+    CollarConfig cfg, cback;
+    cfg.reportS = 300;
+    n = encodeConfig(buf, sizeof(buf), cfg);
+    CHECK(n == kConfigLength && hex(buf, n) == "02072c01");
+    CHECK(messageType(buf, n, t) && t == MsgType::Config);
+    CHECK(decodeConfig(buf, n, cback) && cback.reportS == 300);
+    buf[n] = 9; // a later field: still read
+    CHECK(decodeConfig(buf, n + 1, cback) && cback.reportS == 300);
+    CHECK(!decodeConfig(buf, n - 1, cback));
+    cfg.reportS = 0; // the default
+    n = encodeConfig(buf, sizeof(buf), cfg);
+    CHECK(decodeConfig(buf, n, cback) && cback.reportS == 0);
+    cfg.reportS = kMinReportS - 1; // too often
+    n = encodeConfig(buf, sizeof(buf), cfg);
+    CHECK(!decodeConfig(buf, n, cback));
+    cfg.reportS = kMaxReportS + 1;
+    n = encodeConfig(buf, sizeof(buf), cfg);
+    CHECK(!decodeConfig(buf, n, cback));
+
+    // The collar's Meshtastic names follow the dog's name.
+    char ln[40], sn[5];
+    meshNames("Rex", ln, sizeof(ln), sn, sizeof(sn));
+    CHECK(strcmp(ln, "Rex") == 0 && strcmp(sn, "REX") == 0);
+    meshNames("  Biscuit  ", ln, sizeof(ln), sn, sizeof(sn));
+    CHECK(strcmp(ln, "Biscuit") == 0 && strcmp(sn, "BISC") == 0);
+    meshNames("Old Yeller the Dog Star", ln, sizeof(ln), sn, sizeof(sn));
+    CHECK(strcmp(ln, "Old Yeller the Dog Star") == 0 && strcmp(sn, "OYTD") == 0);
+    meshNames("Zo\xc3\xab", ln, sizeof(ln), sn, sizeof(sn)); // "Zoe" with a diaeresis: 4 bytes
+    CHECK(strcmp(ln, "Zo\xc3\xab") == 0 && strcmp(sn, "ZO\xc3\xab") == 0);
+    meshNames("Chlo\xc3\xa9", ln, sizeof(ln), sn, sizeof(sn)); // the accent doesn't fit whole: cut before it
+    CHECK(strcmp(sn, "CHLO") == 0);
+    meshNames("Bl\xc3\xa9", ln, 4, sn, sizeof(sn)); // a long name cut on a character boundary
+    CHECK(strcmp(ln, "Bl") == 0);
 }
 
 int main()

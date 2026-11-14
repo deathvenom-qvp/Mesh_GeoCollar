@@ -38,6 +38,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
+from . import protocol
+
 log = logging.getLogger(__name__)
 
 DEFAULT_REPO = "deathvenom-qvp/Mesh_GeoCollar"
@@ -611,8 +613,8 @@ def setup_collar(job: Job, port: str, base_iface, name: str = "", open_iface=ope
         if not any(c.role and bytes(c.settings.psk) in (b"", b"\x01") for c in base_chans):
             job.log("Note: no channel with the default public key, so the lost-dog message reaches only your own nodes")
         if name:
-            short = "".join(w[0] for w in name.split()[:4]).upper() or name[:4]
-            node.setOwner(long_name=name[:39], short_name=short[:4])
+            long_name, short_name = protocol.mesh_names(name)  # as the collar names itself later
+            node.setOwner(long_name=long_name, short_name=short_name)
             job.log(f"Named the collar {name}")
 
         # 3. Bluetooth (the lost beacon needs it), with a random PIN when locking: a fixed one instead

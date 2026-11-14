@@ -50,7 +50,8 @@ namespace
 
 constexpr const char *kStateFile = "/prefs/geocollar.bin";
 constexpr uint32_t kStateMagic = 0x47434F4C; // "GCOL"
-constexpr uint16_t kStateFormat = 6; // 2: GPS pacing; 3: per-zone bands; 4: pulse intervals; 5: owner; 6: command seq
+constexpr uint16_t kStateFormat = 7; // 2: GPS pacing; 3: per-zone bands; 4: pulse intervals; 5: owner; 6: command seq;
+                                     // 7: report interval
 constexpr uint32_t kBeaconRefreshMs = 10 * 1000; // re-apply the beacon advertisement this often
 // Until a base adopts the collar it says hello on the primary channel, so the base app can list it:
 // every minute for the first 15 minutes after boot, then every 15 minutes.
@@ -289,7 +290,15 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
                 owner_ = o;
                 saveState();
                 LOG_INFO("GeoCollar: dog's name \"%s\", owner contact set", owner_.dog);
+                applyMeshName();
                 sendStatus(proto::MsgType::Status);
+            }
+        } else if (type == proto::MsgType::Config) {
+            proto::CollarConfig c;
+            if (proto::decodeConfig(buf, len, c)) {
+                reportS_ = c.reportS;
+                saveState();
+                LOG_INFO("GeoCollar: report every %u s", (unsigned)(reportS_ ? reportS_ : GEOCOLLAR_STATUS_INTERVAL_MS / 1000));
             }
         }
         return ProcessMessage::STOP;
@@ -311,8 +320,11 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
         applyGpsPacing();
 
         const uint32_t now = millis();
-        const uint32_t interval =
-            engine_.state() == CollarState::Lost ? GEOCOLLAR_LOST_STATUS_INTERVAL_MS : GEOCOLLAR_STATUS_INTERVAL_MS;
+        // The owner's report interval from the base; while lost, at least every 30 s.
+        const uint32_t normal = reportS_ ? reportS_ * 1000u : GEOCOLLAR_STATUS_INTERVAL_MS;
+        const uint32_t interval = engine_.state() == CollarState::Lost && normal > GEOCOLLAR_LOST_STATUS_INTERVAL_MS
+                                      ? GEOCOLLAR_LOST_STATUS_INTERVAL_MS
+                                      : normal;
         if (!baseNode_ && (lastHelloMs_ == 0 || now - lastHelloMs_ >= (now < kHelloFastForMs ? kHelloFastMs : kHelloSlowMs)))
             sendHello();
         if (baseNode_ && now - lastStatusMs_ >= interval)
@@ -529,7 +541,7 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
     /// when every other module (NodeInfo in particular) exists.
     void nameFreshCollar()
     {
-        if (!nodeDB || !service)
+        if (!nodeDB || !service || applyMeshName())
             return;
         const unsigned suffix = nodeDB->getNodeNum() & 0xffff;
         char stock[sizeof(owner.long_name)];
@@ -540,6 +552,28 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
         service->reloadOwner(false);
         nodeDB->saveToDisk(SEGMENT_DEVICESTATE | SEGMENT_NODEDATABASE);
         LOG_INFO("GeoCollar: named this collar \"%s\"", owner.long_name);
+    }
+
+    /// The collar's Meshtastic name follows the dog's name from the base ("Rex", short name "REX"),
+    /// so it shows as the dog in the Meshtastic app and on other nodes. Returns true if it changed.
+    bool applyMeshName()
+    {
+        if (!owner_.dog[0] || !nodeDB || !service)
+            return false;
+        char longName[sizeof(owner.long_name)], shortName[sizeof(owner.short_name)];
+        proto::meshNames(owner_.dog, longName, sizeof(longName), shortName, sizeof(shortName));
+        if (!longName[0])
+            return false;
+        const bool sameShort = !shortName[0] || strcmp(owner.short_name, shortName) == 0;
+        if (strcmp(owner.long_name, longName) == 0 && sameShort)
+            return false;
+        memcpy(owner.long_name, longName, sizeof(longName));
+        if (shortName[0])
+            memcpy(owner.short_name, shortName, sizeof(shortName));
+        service->reloadOwner(true); // and tell the mesh, so the base and phones show the new name
+        nodeDB->saveToDisk(SEGMENT_DEVICESTATE | SEGMENT_NODEDATABASE);
+        LOG_INFO("GeoCollar: Meshtastic name is now \"%s\" (%s)", owner.long_name, owner.short_name);
+        return true;
     }
 
     void sendHello()
@@ -586,7 +620,7 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
     }
 
     // Persistence: [magic u32][format u16][base node u32][fence version u16][blob len u16][blob][Settings]
-    // [OwnerInfo]
+    // [OwnerInfo][command seq u32][report interval s u16]
     void saveState()
     {
         uint8_t blob[proto::kMaxFenceBlob];
@@ -607,6 +641,7 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
         f.write((const uint8_t *)&engine_.settings(), sizeof(Settings));
         f.write((const uint8_t *)&owner_, sizeof(owner_));
         f.write((const uint8_t *)&lastCmdSeq_, sizeof(lastCmdSeq_));
+        f.write((const uint8_t *)&reportS_, sizeof(reportS_));
         if (!f.close())
             LOG_ERROR("GeoCollar: failed to save %s", kStateFile);
     }
@@ -626,6 +661,7 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
         Settings settings;
         proto::OwnerInfo owner;
         uint32_t seq = 0;
+        uint16_t reportS = 0;
         bool ok = f.read((uint8_t *)&magic, sizeof(magic)) == sizeof(magic) && magic == kStateMagic &&
                   f.read((uint8_t *)&format, sizeof(format)) == sizeof(format) && format >= 4 && format <= kStateFormat &&
                   f.read((uint8_t *)&base, sizeof(base)) == sizeof(base) &&
@@ -633,7 +669,8 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
                   f.read((uint8_t *)&len16, sizeof(len16)) == sizeof(len16) && len16 <= sizeof(blob) &&
                   f.read(blob, len16) == len16 && f.read((uint8_t *)&settings, sizeof(settings)) == sizeof(settings) &&
                   (format < 5 || f.read((uint8_t *)&owner, sizeof(owner)) == sizeof(owner)) && // 4: no owner yet
-                  (format < 6 || f.read((uint8_t *)&seq, sizeof(seq)) == sizeof(seq));
+                  (format < 6 || f.read((uint8_t *)&seq, sizeof(seq)) == sizeof(seq)) &&
+                  (format < 7 || f.read((uint8_t *)&reportS, sizeof(reportS)) == sizeof(reportS));
         f.close();
         FenceSet fences;
         if (ok && proto::decodeFenceSet(blob, len16, version, fences)) {
@@ -643,6 +680,7 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
             owner.dog[sizeof(owner.dog) - 1] = owner.owner[sizeof(owner.owner) - 1] = owner.phone[sizeof(owner.phone) - 1] = 0;
             owner_ = owner;
             lastCmdSeq_ = seq;
+            reportS_ = (reportS == 0 || (reportS >= proto::kMinReportS && reportS <= proto::kMaxReportS)) ? reportS : 0;
         } else {
             LOG_WARN("GeoCollar: saved state unreadable, starting without fences");
         }
@@ -665,6 +703,7 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
     uint32_t lastHelloMs_ = 0;
     bool named_ = false;
     uint32_t lastCmdSeq_ = 0; // newest command accepted; older or repeated ones are replays
+    uint16_t reportS_ = 0;    // report interval from the base, s; 0 = GEOCOLLAR_STATUS_INTERVAL_MS
 };
 
 GeoCollarModule *geoCollarModule = nullptr;

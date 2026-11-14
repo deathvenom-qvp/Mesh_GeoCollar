@@ -113,8 +113,10 @@
   .events .k-shock, .events .k-lost { color: var(--bad); font-weight: 600; }
   .events .k-vibrate { color: var(--warn); font-weight: 600; }
   .events .k-ble, .events .k-mesh { color: var(--accent); }
-  .rename { display: flex; gap: 6px; align-items: center; }
-  .rename input { width: 12em; }
+  .rename { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; max-width: 24em; }
+  .rename > input { flex: 1 1 6em; min-width: 6em; width: auto; }
+  .rename label.field { flex-basis: 100%; }
+  .rename label.field input { width: 100%; }
   .rename[hidden], .row[hidden] { display: none; }
   #radioBox summary { cursor: pointer; font-size: 12px; margin-top: 6px; }
   button.pill { cursor: pointer; font-family: inherit; background: none; }
@@ -314,6 +316,9 @@
           <form class="rename" id="renameForm" hidden>
             <input id="renameInput" maxlength="24" required aria-label="Dog's name">
             <button class="primary">Save</button><button type="button" class="link" id="renameCancel">Cancel</button>
+            <label class="field">Reports its position every <b id="reportVal"></b>
+              <input type="range" id="reportRate" min="0" max="7" step="1" aria-label="How often the collar reports"></label>
+            <div class="muted" style="font-size:12px">More often uses more battery and airtime. While lost, it reports every 30 s anyway. The collar also takes the dog's name as its Meshtastic name.</div>
           </form>
           <div class="muted" id="selId"></div>
         </div>
@@ -526,6 +531,9 @@ const el = (tag, attrs = {}, ...kids) => {
 const api = (path, opts = {}) => fetch('api/' + path, { headers: { 'Content-Type': 'application/json' }, ...opts })
   .then(async r => { const b = await r.json().catch(() => ({})); if (!r.ok) throw new Error(b.detail || r.statusText); return b; });
 const say = t => { $('msg').textContent = t; };
+// How often a collar reports. 10 min is the firmware's default.
+const REPORT_CHOICES = [30, 60, 120, 300, 600, 900, 1800, 3600];
+const reportLabel = s => s < 60 ? `${s} s` : s < 3600 ? `${s / 60} min` : `${s / 3600} h`;
 const ago = secs => secs < 90 ? `${Math.round(secs)} s ago` : secs < 5400 ? `${Math.round(secs / 60)} min ago`
   : secs < 172800 ? `${Math.round(secs / 3600)} h ago` : `${Math.round(secs / 86400)} days ago`;
 const stateLabel = s => ({ NO_FENCE: 'No fence', INSIDE: 'Inside', WARNING: 'Near the line', OUTSIDE: 'Outside', LOST: 'Lost' })[s] || 'No report yet';
@@ -1099,6 +1107,8 @@ function renderSelected() {
     rows.push(['State', 'Not reporting yet'], ['Last heard', `${ago(Date.now() / 1000 - c.hello.seen)} (saying hello)`]);
     if (c.hello.battery_pct != null) rows.push(['Battery', `${c.hello.battery_pct}%`]);
   } else rows.push(['State', 'No report yet']);
+  if (!c.sim) rows.push(['Reports every', reportLabel(c.report_s || 600)
+    + (c.report_s && c.config_sent !== c.report_s ? ' (not sent yet)' : '')]);
   if (!c.sim) rows.push(['Locked to this base', c.locked ? 'Yes' : 'Not set up from this base']);
   if (c.ble_pin) rows.push(['Bluetooth PIN', String(c.ble_pin)]);
   if (c.update_mode) rows.push(['Firmware', 'Waiting in update mode']);
@@ -1431,9 +1441,17 @@ $('contactForm').onsubmit = async e => {
   refresh();
 };
 
+const showReportRate = () => {
+  const s = REPORT_CHOICES[+$('reportRate').value];
+  $('reportVal').textContent = reportLabel(s) + (s === 600 ? ' (default)' : '');
+};
+$('reportRate').oninput = showReportRate;
 $('renameBtn').onclick = () => {
   const c = collars[selected];
   $('renameInput').value = unnamed(c, selected) ? '' : c.name;
+  const i = REPORT_CHOICES.indexOf(c.report_s || 600);
+  $('reportRate').value = i < 0 ? 4 : i;
+  showReportRate();
   $('selNameRow').hidden = true; $('renameForm').hidden = false;
   $('renameInput').focus();
 };
@@ -1443,9 +1461,12 @@ $('renameForm').onsubmit = async e => {
   e.preventDefault();
   const name = $('renameInput').value.trim();
   if (utf8Len(name) > 24) { say('The dog\'s name is at most 24 characters.'); return; }
+  const report_s = REPORT_CHOICES[+$('reportRate').value];
   try {
-    const r = await api(`collars/${encodeURIComponent(selected)}`, { method: 'PATCH', body: JSON.stringify({ name }) });
-    say(r.owner_sent ? `Renamed to ${r.name}.` : `Renamed to ${r.name}. The collar gets the new name when it next reports.`);
+    const r = await api(`collars/${encodeURIComponent(selected)}`, { method: 'PATCH', body: JSON.stringify({ name, report_s }) });
+    const pending = !r.owner_sent || r.config_sent === false;
+    say(`Saved ${r.name}, reporting every ${reportLabel(report_s)}.`
+      + (pending ? ' The collar gets the changes when it next reports.' : ''));
     endRename();
   } catch (err) { say(err.message); }
   await refresh();
