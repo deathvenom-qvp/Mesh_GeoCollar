@@ -99,8 +99,25 @@ settings and channels to it.
 collar into this computer, pick **USB on this computer**, and press **Connect and flash** (with
 **Then set it up for this base** ticked) or **Set up only**. The setup is the same as on the
 base's USB: the page passes the collar's serial port through to the base app, which does the
-work. After flashing, the page finds the collar again when it restarts; if it can't, press **Set
-up only** and pick the collar.
+work.
+
+**After flashing from the browser, the collar has to restart**, and often it does not do so by
+itself: a collar that was put into download mode with its buttons stays there until someone
+presses **RST**. The page does not assume either way. It shows a panel and waits until the collar
+really answers, then starts the setup by itself. If nothing happens within about 10 seconds,
+press the collar's RST button once (or unplug it and plug it back in). Some browsers then treat
+the restarted collar as a new device that the page may not use: press **Continue setup** and
+pick the collar in the browser's list. The same can happen when the collar restarts during the
+setup; the page then shows a **Reconnect** button. **Skip the setup** leaves the collar flashed
+but not set up; press **Set up only** later.
+
+On the base's own USB the app waits for the collar the same way and, if the flashing tool could
+not restart it, asks you to press RST. A collar that comes back under another port name is
+followed there.
+
+Plug in one collar at a time. The page leaves alone every other device it was allowed to use
+before, and the base stops the setup if a different device answers after a restart, but with two
+blank collars on one computer neither can tell which is which.
 
 A collar running GeoCollar that no base has adopted says hello on the mesh every minute for 15
 minutes after it starts, then every 15 minutes. If the base hears it (same LoRa settings and
@@ -282,28 +299,26 @@ Open the **Settings** tab; **Collar firmware** is its last section.
    GitHub Actions publishes as the `firmware-latest` release. *Build from source here* compiles
    it on this machine instead: the first build downloads about 1.5 GB of tools and can take
    30 minutes or more on a Raspberry Pi. The last three builds are kept.
-2. **Flash it** one of three ways:
+2. **Flash it** over USB, one of two ways:
    - **USB on base**: plug the collar into the Home Assistant machine and pick its port. The
      base station's own radio port is greyed out. If the collar's port is missing, restart the app
      after plugging it in.
    - **USB on this computer**: plug the collar into the computer you are browsing from. Needs
-     Chrome or Edge, and Home Assistant opened over `https://`.
-   - **Wi-Fi**: pick the collar under **Collar to update** (it starts on the collar selected on
-     the Collars tab), save your Wi-Fi network once, and press *Update over Wi-Fi*.
-     The base sends the Wi-Fi details to the collar over the mesh (they stay saved, with the
-     collar's own Wi-Fi left off to save battery), restarts it into Meshtastic's update loader,
-     finds it on your network and sends the firmware. Put the collar on its charger in Wi-Fi
-     range first: **it does not enforce fences while it updates**, usually 2 to 5 minutes.
+     Chrome or Edge, and Home Assistant opened over `https://`. See
+     [Pairing a collar](#pairing-a-collar) for what happens when the collar has to be reset by hand.
 
-The first install on a new collar must be over USB, as a **Full install**: that also puts
-Meshtastic's update loader on the collar, which Wi-Fi updates need. *Update, keep settings* keeps
-the collar's keys and fences; a full install erases them, so pair the collar again afterwards.
+The first install on a new collar is a **Full install**. *Update, keep settings* keeps the
+collar's keys and fences; a full install erases them, so pair the collar again afterwards.
 
-If a Wi-Fi update fails partway, the collar waits in update mode, and the page says so. Press
-*Retry upload*, or flash it over USB, which also brings it out of update mode. If the base can't
-find the collar on the network, enter the collar's address (from your router's device list), or
-set **Network to search for collars being updated** on the Configuration tab, such as
-`192.168.1.0/24`.
+**There are no updates over Wi-Fi.** Versions before 0.17.0 had them, and kept your Wi-Fi
+password on every collar updated that way.
+The app no longer writes Meshtastic's update loader to a collar: a full install erases one left
+by an older version, and after an update it stays on the collar but nothing starts it. If an
+older version had saved your Wi-Fi network, the app forgets it when it starts (data file and
+backup), and **Collar firmware** offers **Remove it from the collars** once: the base asks each
+collar over the mesh and blanks the network on those that still hold it. Such a collar restarts
+once. A collar that was out of range is asked again the next time you press the button. A collar
+that an older version left in update mode says so in its panel; flash it over USB.
 
 ## Security: who can control a collar
 
@@ -330,8 +345,10 @@ set **Network to search for collars being updated** on the Configuration tab, su
   public key it first saw from that collar. A report signed with another key is ignored and
   flagged in the collar's panel. After a full install of a collar, set it up again (or remove and
   re-add it) so the base learns its new key.
-- During a Wi-Fi update, Meshtastic's update loader waits on your home network for the new image
-  for a few minutes. Update collars on a network you trust.
+- Collar firmware can only be changed over USB, with the collar in your hand. The app has no
+  over-the-air update and no longer needs to know your Wi-Fi password.
+- When a collar is set up from the browser, the base refuses its own radio, and stops if a
+  different device answers after the collar restarts, so the lock never lands on the wrong one.
 
 ## Data and access
 

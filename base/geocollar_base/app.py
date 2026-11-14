@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import ipaddress
 import json
 import logging
 import os
@@ -41,7 +40,6 @@ def load_settings() -> dict:
         "mesh_serial": os.environ.get("GEOCOLLAR_MESH_SERIAL", ""),
         "mesh_host": os.environ.get("GEOCOLLAR_MESH_HOST", ""),
         "firmware_repo": os.environ.get("GEOCOLLAR_FIRMWARE_REPO", fw.DEFAULT_REPO),
-        "ota_subnet": os.environ.get("GEOCOLLAR_OTA_SUBNET", ""),
         "home": os.environ.get("GEOCOLLAR_HOME", ""),  # "lat, lon"; else Home Assistant's home
     }
     options = Path(settings["data_dir"]) / "options.json"
@@ -84,11 +82,6 @@ class SimIn(BaseModel):
     lon: float
 
 
-class WifiIn(BaseModel):
-    ssid: str
-    psk: str | None = None  # None keeps the saved password
-
-
 class BuildIn(BaseModel):
     ref: str = "main"
 
@@ -115,13 +108,6 @@ class DeviceFlashedIn(BaseModel):
     via: str = "browser"
     name: str | None = None
     mode: str = "update"
-
-
-class OtaIn(BaseModel):
-    build: str
-    ip: str | None = None  # the collar's address in update mode, if known
-    send_wifi: bool = True
-    resume: bool = False
 
 
 class FlashedIn(BaseModel):
@@ -212,6 +198,24 @@ def clean_parcels(fc: dict) -> dict:
 def create_app(settings: dict | None = None, link: MeshLink | None = None) -> FastAPI:
     settings = settings or load_settings()
     store = Store(settings["data_dir"])
+    # Wi-Fi updates were removed in 0.17. The home Wi-Fi password an older version kept here for
+    # them is forgotten; the network's name is kept until the collars have been told to forget
+    # it too (see forget-wifi).
+    old_wifi = store.setting("ota_wifi")
+    if old_wifi is not None:
+        store.set_setting("ota_wifi", None)
+        if isinstance(old_wifi, dict) and old_wifi.get("ssid"):
+            store.set_setting("wifi_leftover", {"ssid": old_wifi["ssid"]})
+        store.refresh_backup()  # the hourly backup would otherwise keep the password
+
+    def wifi_leftover() -> str | None:
+        """The Wi-Fi network real collars may still hold, or None once every one has been asked."""
+        left = store.setting("wifi_leftover") or {}
+        if not left.get("ssid"):
+            return None
+        if not any(not c.get("sim") and not c.get("wifi_forgotten") for c in store.collars().values()):
+            return None
+        return left["ssid"]
 
     if link is None:
         link = MeshLink(lambda n, s: on_status(n, s), settings.get("mesh_serial", ""), settings.get("mesh_host", ""),
@@ -658,11 +662,6 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
     app.state.builds, app.state.jobs = builds, jobs
     repo = settings.get("firmware_repo") or fw.DEFAULT_REPO
 
-    def subnets() -> list[str]:
-        if settings.get("ota_subnet"):
-            return [s.strip() for s in str(settings["ota_subnet"]).split(",") if s.strip()]
-        return fw.supervisor_subnets() or fw.local_subnets()
-
     def start(kind: str, title: str, fn) -> dict:
         try:
             return jobs.start(kind, title, fn).view()
@@ -685,7 +684,6 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
 
     @app.get("/api/firmware")
     def firmware_overview():
-        wifi = store.setting("ota_wifi") or {}
         try:
             ports = fw.serial_ports(settings.get("mesh_serial", ""))
         except Exception as e:  # noqa: BLE001 - pyserial missing or no /dev access
@@ -696,9 +694,9 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
             "builds": builds.list(),
             "job": jobs.current.view() if jobs.current else None,
             "ports": ports,
-            "wifi": {"ssid": wifi.get("ssid", ""), "has_psk": bool(wifi.get("psk"))},
-            "subnets": subnets(),
             "can_build": bool(shutil.which("git")),
+            # The network that collars may still hold from Wi-Fi updates (see forget-wifi), or None.
+            "wifi_leftover": wifi_leftover(),
         }
 
     @app.post("/api/firmware/download")
@@ -724,17 +722,43 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
         except fw.FirmwareError as e:
             raise HTTPException(404, str(e)) from e
 
-    @app.put("/api/firmware/wifi")
-    def firmware_wifi(body: WifiIn):
-        old = store.setting("ota_wifi") or {}
-        psk = old.get("psk", "") if body.psk is None else body.psk
-        if not body.ssid.strip():
-            store.set_setting("ota_wifi", None)
-            return {"ssid": "", "has_psk": False}
-        if len(body.ssid.encode()) > 32 or len(psk.encode()) > 63:
-            raise HTTPException(400, "Wi-Fi name is at most 32 bytes and password at most 63")
-        store.set_setting("ota_wifi", {"ssid": body.ssid, "psk": psk})
-        return {"ssid": body.ssid, "has_psk": bool(psk)}
+    @app.post("/api/firmware/forget-wifi")
+    def firmware_forget_wifi():
+        """Wi-Fi updates are gone, but an older version of this app saved the home Wi-Fi name and
+        password on every collar it updated that way, and they are still there. This asks each
+        collar for its network settings over the mesh and blanks that network where it finds it.
+        A collar that had it restarts once. Collars out of reach are left for another run."""
+        left = store.setting("wifi_leftover") or {}
+        ssid = left.get("ssid")
+        if not ssid:
+            raise HTTPException(409, "there is no saved Wi-Fi network to remove")
+        if not link.connected:
+            raise HTTPException(409, "the base station's radio is not connected")
+
+        def run(job):
+            todo = {k: c for k, c in store.collars().items() if not c.get("sim") and not c.get("wifi_forgotten")}
+            removed, missed = [], []
+            for n, (node_id, c) in enumerate(todo.items()):
+                job.check_cancel()
+                job.set_step(f"Asking {c['name']} for its network settings (over the mesh, can take a minute)",
+                             n / max(1, len(todo)))
+                try:
+                    had = link.forget_wifi(node_id, ssid)
+                except Exception as e:  # noqa: BLE001 - out of range, asleep, or the radio dropped out
+                    job.log(f"{c['name']}: no answer ({e})")
+                    missed.append(c["name"])
+                    continue
+                store.set_collar_info(node_id, "wifi_forgotten", True)
+                job.log(f"{c['name']}: " + ("removed, it is restarting" if had else "did not have it"))
+                if had:
+                    removed.append(c["name"])
+            if not missed:
+                store.set_setting("wifi_leftover", None)
+            job.set_step((f"Removed from {', '.join(removed)}. " if removed else "No collar had it. ")
+                         + (f"No answer from {', '.join(missed)}: try again when in range." if missed else ""), 1.0)
+            return {"removed": removed, "missed": missed}
+
+        return start("wifi", f"Remove the Wi-Fi network \"{ssid}\" from the collars", run)
 
     @app.post("/api/firmware/flash-usb")
     def firmware_flash_usb(body: UsbFlashIn):
@@ -756,7 +780,10 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
             if body.setup:
                 c = store.collar(node_id) if node_id else None
                 name = c["name"] if c and c["name"] != node_id else (body.name or "")
-                result.update(fw.setup_collar(job, body.port, getattr(link, "iface", None), name, lock=body.lock))
+                # A collar that esptool could not restart waits for someone to press RST: allow for that.
+                manual = bool(result.get("manual_reset"))
+                result.update(fw.setup_collar(job, body.port, getattr(link, "iface", None), name, lock=body.lock,
+                                              boot_wait_s=180 if manual else 60, press_reset=manual))
                 if node_id and node_id != result.get("previous_node_id") and store.collar(node_id) is not None:
                     result.setdefault("previous_node_id", node_id)
                 adopt_setup(job, result, body.name)
@@ -808,8 +835,8 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
         def run(job):
             try:
                 result = fw.setup_collar(job, "this computer's USB", getattr(link, "iface", None), dog,
-                                         open_iface=lambda _port: fw.open_socket_node(stream), boot_wait_s=90,
-                                         lock=lock)
+                                         open_iface=lambda _port: fw.open_socket_node(stream), boot_wait_s=180,
+                                         lock=lock)  # 180 s: the page may have to ask for the collar again
             finally:
                 asyncio.run_coroutine_threadsafe(ws.send_json({"done": True}), loop)
             adopt_setup(job, result, dog or None)
@@ -986,54 +1013,6 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
         require(node_id)
         record_flash(node_id, build_or_404(body.build), body.via)
         return store.collar(node_id).get("firmware")
-
-    @app.post("/api/collars/{node_id}/firmware/ota")
-    def firmware_ota(node_id: str, body: OtaIn):
-        c = require(node_id)
-        m = build_or_404(body.build)
-        if body.ip:
-            try:
-                ipaddress.ip_address(body.ip)
-            except ValueError as e:
-                raise HTTPException(400, "not an IP address") from e
-        pending = c.get("update_mode")
-        if body.resume and (not pending or pending.get("build") != body.build):
-            raise HTTPException(409, "this collar is not waiting for that build")
-        if node_id in sim:
-            return start("ota", f"Wi-Fi update of {c['name']} (simulated)",
-                         lambda job: sim_ota(job, node_id, m))
-        wifi = store.setting("ota_wifi") if body.send_wifi else None
-        if body.send_wifi and not (wifi and wifi.get("ssid")):
-            raise HTTPException(400, "save the Wi-Fi network for updates first")
-
-        def run(job):
-            result = fw.wifi_ota(job, builds, body.build, link, node_id, wifi, subnets(), body.ip or "", body.resume,
-                                 on_update_mode=lambda b: store.set_collar_info(
-                                     node_id, "update_mode", {"build": b, "since": time.time()}))
-            record_flash(node_id, m, "wifi")
-            return result
-
-        return start("ota", f"Wi-Fi update of {c['name']}", run)
-
-    def sim_ota(job, node_id: str, m: dict) -> dict:
-        """Walk through the Wi-Fi update steps without a radio, so the page can be tried out."""
-        steps = ["Asking the collar for its firmware details", "Sending the collar into update mode",
-                 "Looking for the collar on Wi-Fi"]
-        for step in steps:
-            job.set_step(step)
-            for _ in range(10):
-                job.check_cancel()
-                time.sleep(0.1)
-        store.set_collar_info(node_id, "update_mode", {"build": m["id"], "since": time.time()})
-        size = m["files"]["app"]["size"]
-        job.set_step(f"Sending {size // 1024} KB", 0.0)
-        for i in range(20):
-            job.check_cancel()
-            job.progress = (i + 1) / 20
-            time.sleep(0.1)
-        job.set_step("Image accepted. The collar is restarting into the new firmware.", 1.0)
-        record_flash(node_id, m, "wifi")
-        return {"build": m["id"], "commit": m.get("geocollar_commit"), "ip": "simulated"}
 
     @app.get("/api/firmware/jobs/{job_id}")
     def firmware_job(job_id: str, since: int = 0):

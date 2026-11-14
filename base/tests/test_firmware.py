@@ -2,7 +2,6 @@
 import hashlib
 import importlib.util
 import json
-import socket
 import struct
 import threading
 import time
@@ -118,111 +117,37 @@ def test_flash_usb_command(tmp_path, monkeypatch):
     cmd = ran[-1]
     i = cmd.index("write_flash")
     assert cmd[cmd.index("--port") + 1] == "/dev/ttyACM0"
-    assert cmd[i + 1::2] == ["0xe000", "0x10000", "0x340000"]
+    assert cmd[i + 1::2] == ["0xe000", "0x10000"]  # otadata and the app; never the update loader
     blank = Path(cmd[i + 2])
     assert blank.read_bytes() == b"\xff" * 0x2000  # clears otadata so the new app boots
 
     fw.flash_usb(fw.Job("usb", "t"), store, m["id"], "/dev/ttyACM0", "full")
     cmd = ran[-1]
     i = cmd.index("write_flash")
-    assert cmd[i + 1] == "--erase-all" and cmd[i + 2::2] == ["0x0", "0x340000"]
+    assert cmd[i + 1] == "--erase-all" and cmd[i + 2::2] == ["0x0"]
+    assert not any("mt-esp32s3-ota" in part for part in cmd)
+
+    # esptool cannot restart an ESP32-S3 that was put into download mode with its buttons. The
+    # result says so, and the last step tells the owner to press RST.
+    def stuck(job, cmd, on_line=None, **kw):
+        for line in ("Wrote 3000 bytes at 0x00010000", "Hard resetting via RTS pin...",
+                     "WARNING: ESP32-S3 chip was placed into download mode using GPIO0.",
+                     "esptool.py can not exit the download mode over USB. To run the app, reset the chip manually."):
+            on_line(line)
+
+    monkeypatch.setattr(fw, "_run", stuck)
+    job = fw.Job("usb", "t")
+    assert fw.flash_usb(job, store, m["id"], "/dev/ttyACM0", "update")["manual_reset"] is True
+    assert "RST" in job.step
+    monkeypatch.setattr(fw, "_run", lambda job, cmd, **kw: ran.append(cmd))
+    job = fw.Job("usb", "t")
+    assert "manual_reset" not in fw.flash_usb(job, store, m["id"], "/dev/ttyACM0", "update")
+    assert "restarting" in job.step
 
     with pytest.raises(fw.FirmwareError, match="base station"):
         fw.flash_usb(fw.Job("usb", "t"), store, m["id"], "/dev/ttyUSB0", "update", base_radio="/dev/ttyUSB0")
     with pytest.raises(fw.FirmwareError, match="not a serial port"):
         fw.flash_usb(fw.Job("usb", "t"), store, m["id"], "/dev/nope", "update")
-
-
-class FakeLoader:
-    """A stand-in for the esp32-unified-ota loader's TCP side."""
-
-    def __init__(self, nvs_hash: str):
-        self.nvs_hash = nvs_hash
-        self.received = b""
-        self.sock = socket.socket()
-        self.sock.bind(("127.0.0.1", 0))
-        self.sock.listen(4)
-        self.port = self.sock.getsockname()[1]
-        threading.Thread(target=self.serve, daemon=True).start()
-
-    def serve(self):
-        while True:
-            try:
-                conn, _ = self.sock.accept()
-            except OSError:
-                return
-            with conn:
-                f = conn.makefile("rb")
-                line = f.readline().decode().strip()
-                if line == "VERSION":
-                    conn.sendall(b"OK 0 2.8.2 3 v1.0.1\n")
-                    continue
-                _, size, sha = line.split()
-                if sha != self.nvs_hash:
-                    conn.sendall(b"ERR Hash Rejected (NVS Mismatch)\n")
-                    continue
-                conn.sendall(b"ERASING\nOK\n")
-                data = f.read(int(size))
-                self.received = data
-                ok = hashlib.sha256(data).hexdigest() == sha
-                conn.sendall(b"OK\n" if ok else b"ERR Hash Mismatch\n")
-
-    def close(self):
-        self.sock.close()
-
-
-def test_upload_and_probe(monkeypatch):
-    image = bytes(range(256)) * 50
-    sha = hashlib.sha256(image).hexdigest()
-    loader = FakeLoader(sha)
-    monkeypatch.setattr(fw, "OTA_PORT", loader.port)
-    try:
-        assert fw.probe_loader("127.0.0.1") == "OK 0 2.8.2 3 v1.0.1"
-        job = fw.Job("ota", "t")
-        fw.upload(job, "127.0.0.1", image, sha)
-        assert loader.received == image and job.step == "Collar is checking the image"
-        loader.nvs_hash = "0" * 64
-        with pytest.raises(fw.FirmwareError, match="Hash Rejected"):
-            fw.upload(fw.Job("ota", "t"), "127.0.0.1", image, sha)
-    finally:
-        loader.close()
-
-
-class FakeLink:
-    connected = True
-
-    def __init__(self):
-        self.calls = []
-
-    def get_metadata(self, node_id, timeout=90):
-        self.calls.append("metadata")
-        return type("Meta", (), {"firmware_version": "2.8.2.d5f1619", "hasWifi": True})()
-
-    def set_wifi(self, node_id, ssid, psk, timeout=90):
-        self.calls.append(("wifi", ssid, psk))
-
-    def request_ota(self, node_id, sha256, timeout=90):
-        self.calls.append(("ota", sha256.hex()))
-
-
-def test_wifi_ota_end_to_end(tmp_path, monkeypatch):
-    store = fw.BuildStore(tmp_path)
-    make_build(tmp_path / "in")
-    m = store.add(tmp_path / "in", "release")
-    loader = FakeLoader(m["files"]["app"]["sha256"])
-    monkeypatch.setattr(fw, "OTA_PORT", loader.port)
-    monkeypatch.setattr(fw.time, "sleep", lambda s: None)
-    link = FakeLink()
-    entered = []
-    try:
-        result = fw.wifi_ota(fw.Job("ota", "t"), store, m["id"], link, "!12345678", {"ssid": "home", "psk": "pw"},
-                             [], manual_ip="127.0.0.1", on_update_mode=entered.append)
-    finally:
-        loader.close()
-    assert result["ip"] == "127.0.0.1"
-    assert link.calls == ["metadata", ("wifi", "home", "pw"), "metadata", ("ota", m["files"]["app"]["sha256"])]
-    assert entered == [m["id"]]
-    assert loader.received == b"APP" * 1000
 
 
 @pytest.fixture
@@ -237,7 +162,7 @@ def client(tmp_path):
         def close(self):
             pass
 
-    app = create_app({"data_dir": str(tmp_path), "mesh_serial": "/dev/ttyUSB0", "ota_subnet": "192.168.5.0/24"}, link=NoLink())
+    app = create_app({"data_dir": str(tmp_path), "mesh_serial": "/dev/ttyUSB0"}, link=NoLink())
     with TestClient(app) as c:
         yield c, app
 
@@ -254,30 +179,21 @@ def wait_job(c, job_id):
 def test_firmware_api(client, tmp_path):
     c, app = client
     r = c.get("/api/firmware").json()
-    assert r["builds"] == [] and r["subnets"] == ["192.168.5.0/24"] and r["wifi"] == {"ssid": "", "has_psk": False}
-
-    assert c.put("/api/firmware/wifi", json={"ssid": "home", "psk": "secret"}).json() == {"ssid": "home", "has_psk": True}
-    assert c.put("/api/firmware/wifi", json={"ssid": "home2"}).json() == {"ssid": "home2", "has_psk": True}  # keeps password
-    assert "secret" not in json.dumps(c.get("/api/firmware").json())
+    assert r["builds"] == [] and r["wifi_leftover"] is None
+    assert "wifi" not in r and "subnets" not in r  # no Wi-Fi updates
 
     make_build(tmp_path / "in")
     m = app.state.builds.add(tmp_path / "in", "release")
     assert c.get(f"/api/firmware/builds/{m['id']}/app").content == b"APP" * 1000
     assert c.get("/api/firmware/builds/nope/app").status_code == 404
 
-    # Wi-Fi update of a simulated collar walks through the steps and records the build.
+    # There is no way to update over Wi-Fi: the old endpoints are gone.
     sim_id = c.post("/api/sim", json={"lat": 40, "lon": -75}).json()["node_id"]
-    job = c.post(f"/api/collars/{sim_id}/firmware/ota", json={"build": m["id"]}).json()
-    assert wait_job(c, job["id"])["state"] == "done"
-    collar = c.get("/api/collars").json()[sim_id]
-    assert collar["firmware"]["commit"] == "a" * 40 and "update_mode" not in collar
+    assert c.post(f"/api/collars/{sim_id}/firmware/ota", json={"build": m["id"]}).status_code in (404, 405)
+    assert c.put("/api/firmware/wifi", json={"ssid": "home", "psk": "secret"}).status_code in (404, 405)
 
-    # A real collar needs the radio; USB flashing refuses the base radio's own port.
+    # USB flashing refuses the base radio's own port.
     c.post("/api/collars", json={"node_id": "!0000abcd"})
-    j = c.post("/api/collars/!0000abcd/firmware/ota", json={"build": m["id"]}).json()
-    assert wait_job(c, j["id"])["error"] == "the base station's radio is not connected"
-    assert c.post("/api/collars/!0000abcd/firmware/ota", json={"build": m["id"], "resume": True}).status_code == 409
-    assert c.post("/api/collars/!0000abcd/firmware/ota", json={"build": m["id"], "ip": "nope"}).status_code == 400
     j = c.post("/api/firmware/flash-usb", json={"build": m["id"], "port": "/dev/ttyUSB0"}).json()
     assert "base station" in wait_job(c, j["id"])["error"]
 
@@ -572,6 +488,85 @@ def test_fixed_pin_matches_meshtastic():
 
     with pytest.raises(fw.FirmwareError, match="not connected"):
         fw.setup_collar(fw.Job("usb", "t"), "/dev/ttyACM0", None)
+
+
+def test_setup_refuses_the_base_radio_and_a_device_that_swapped_in():
+    # The base's own radio, picked by mistake in the browser's list: its key is the base's key.
+    radio = FakeMeshtasticDevice(region=1)
+    radio.saved.security.public_key = b"B" * 32
+    with pytest.raises(fw.FirmwareError, match="base station's own radio"):
+        fw.setup_collar(fw.Job("usb", "t"), "this computer's USB", fake_base(), "", open_iface=radio.open, boot_wait_s=5)
+    assert radio.ignored == [] and not radio.saved.security.admin_key and not radio.saved.bluetooth.enabled
+
+    # Two collars on one computer. The setup starts on the first; after its restart the reconnect
+    # finds the second, which has another key. Nothing is written to it, above all not the lock.
+    first, second = FakeMeshtasticDevice(region=1), FakeMeshtasticDevice(num=0x22222222, region=1)
+    second.saved.security.public_key = b"Q" * 32
+    opens = []
+
+    def open_iface(port):
+        opens.append(port)
+        return (first if len(opens) <= 2 else second).open(port)
+
+    with pytest.raises(fw.FirmwareError, match="different device answered"):
+        fw.setup_collar(fw.Job("usb", "t"), "this computer's USB", fake_base(), "Rex", open_iface=open_iface,
+                        boot_wait_s=5, restart_s=0)
+    assert len(opens) == 3 and first.saved.bluetooth.enabled  # Bluetooth went to the first one
+    sec = second.saved.security
+    assert not sec.is_managed and not sec.admin_key and not second.saved.bluetooth.enabled
+    assert second.long_name == "GeoCollar a4e5" and second.restarts == 0
+
+    # A blank device (fresh install, no region, no key) in its place is refused as well.
+    first, blank = FakeMeshtasticDevice(region=1), FakeMeshtasticDevice(num=0x33333333)
+    opens.clear()
+
+    def open_blank(port):
+        opens.append(port)
+        return (first if len(opens) <= 2 else blank).open(port)
+
+    with pytest.raises(fw.FirmwareError, match="different device answered"):
+        fw.setup_collar(fw.Job("usb", "t"), "this computer's USB", fake_base(), "", open_iface=open_blank,
+                        boot_wait_s=5, restart_s=0)
+    assert not blank.saved.lora.region and not blank.saved.security.admin_key
+
+
+def test_setup_follows_a_collar_to_another_port_name(monkeypatch):
+    """Reset by hand while its port is open, a collar comes back as ttyACM1: found by its USB
+    serial number. The base's own radio (another serial number) is never opened."""
+    monkeypatch.setattr(fw.time, "sleep", lambda s: None)
+    dev = FakeMeshtasticDevice(region=1)
+    radio = {"device": "/dev/ttyUSB0", "description": "", "vid": 0x303A, "pid": 0x1001, "serial_number": "BASE", "in_use": True}
+
+    def port(name):
+        return {"device": name, "description": "", "vid": 0x303A, "pid": 0x1001, "serial_number": "AA:BB:CC", "in_use": False}
+
+    listing = [[port("/dev/ttyACM0"), radio]]
+    monkeypatch.setattr(fw, "serial_ports", lambda exclude="": listing[0])
+    tries = []
+
+    def open_iface(p):
+        tries.append(p)
+        if len(tries) == 1:  # in download mode: no answer; then someone presses RST
+            listing[0] = [radio, port("/dev/ttyACM1")]
+            raise OSError("timed out")
+        if p != "/dev/ttyACM1":
+            raise OSError("no such port")
+        return dev.open(p)
+
+    job = fw.Job("usb", "t")
+    r = fw.setup_collar(job, "/dev/ttyACM0", fake_base(), "", open_iface=open_iface, boot_wait_s=5, restart_s=0,
+                        press_reset=True)
+    view = job.view()
+    assert r["checked"] and tries[0] == "/dev/ttyACM0" and set(tries[1:]) == {"/dev/ttyACM1"}
+    assert any("The collar is on /dev/ttyACM1 now" in line for line in view["log"])
+    assert fw.usb_identity("/dev/ttyUSB1") is None and fw.port_now("/dev/ttyUSB0", None) == "/dev/ttyUSB0"
+
+    # The first wait says to press RST when the flash could not restart the collar.
+    steps = []
+    monkeypatch.setattr(fw.Job, "set_step", lambda self, step, progress=None: steps.append(step))
+    listing[0] = [port("/dev/ttyACM1")]
+    fw.setup_collar(fw.Job("usb", "t"), "/dev/ttyACM1", fake_base(), "", open_iface=dev.open, boot_wait_s=5, press_reset=True)
+    assert steps[0] == "Waiting for the collar on /dev/ttyACM1 to start: press its RST button once now"
 
 
 def test_setup_retries_while_the_collar_boots(monkeypatch):

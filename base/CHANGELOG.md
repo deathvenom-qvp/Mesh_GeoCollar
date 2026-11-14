@@ -1,5 +1,48 @@
 # Changelog
 
+## 0.17.0
+
+Updates over Wi-Fi are gone, and flashing from the browser now copes with a collar that has to be
+reset by hand. Only the base app changed; the collar firmware is the same as in 0.16.0. Tested
+with the app's own tests and in a browser against a simulated collar, not on a real one.
+
+**Wi-Fi updates removed**
+
+- Collar firmware is flashed over USB only: on the base, or from the computer you are using. The
+  Wi-Fi button, the **Collar to update** picker, the saved network and the add-on option
+  **Network to search for collars being updated** are gone. The app no longer asks Home Assistant
+  for network details, so the add-on needs one permission fewer.
+- The app no longer writes Meshtastic's update loader to a collar. A full install erases one left
+  by an older version; after an update it stays, unused.
+- A Wi-Fi network saved by an older version is forgotten when the app starts, in the data file
+  and in its backup. Collars that were updated over Wi-Fi still hold that network's name and
+  password, so **Collar firmware** offers **Remove it from the collars** once: the base asks each
+  collar over the mesh and blanks the network where it is still there. Such a collar restarts
+  once. A collar out of range is asked again next time.
+
+**Flashing from the browser**
+
+- After a flash the page no longer assumes that the collar restarted. It waits until the collar
+  answers and then starts the setup by itself. A panel says what to do meanwhile: press the
+  collar's RST button if it has not started, and press **Continue setup** to pick the collar
+  again if the browser treats it as a new device.
+- If the browser loses the collar when it restarts during the setup, a **Reconnect** button asks
+  for it again and the setup carries on.
+- **Set up only** checks that the collar answers first, and shows the same panel if it does not.
+- Fixed: with two Meshtastic devices on the same computer, the page could reconnect to the other
+  one after the collar restarted, and the rest of the setup, lock included, would have gone to
+  it. The page now leaves alone every device it could already use, and the base stops when the
+  device that answers has a different key. The base also refuses to set up its own radio.
+- Fixed: skipping the setup and flashing again straight away could fail because the port was
+  still closing.
+
+**Flashing on the base**
+
+- When the flashing tool could not restart the collar, the setup says to press RST and waits up
+  to three minutes instead of one.
+- A collar that comes back under another port name after a reset (ttyACM1 instead of ttyACM0) is
+  found by its USB serial number.
+
 ## 0.16.0
 
 A line-by-line review of the collar firmware, the base app and the page, and a new layout. Update

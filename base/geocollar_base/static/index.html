@@ -474,38 +474,24 @@
     <h2>Collar firmware</h2>
     <div class="fwcols">
     <div>
-      <div class="muted">Get a firmware build, then flash it to a collar. The first install has to be over USB;
-        after that a collar can be updated over Wi-Fi while it sits on its charger.</div>
+      <div class="muted">Get a firmware build, then flash it to a collar over USB: from the machine running this app, or
+        from the computer you are using now.</div>
       <ul class="builds" id="fwBuilds"></ul>
       <div class="actions">
         <button id="fwDownload" title="The newest build of the main branch, made by GitHub Actions">Download latest build</button>
         <button id="fwBuild" title="Compile on this machine. Slow, and needs about 3 GB of disk">Build from source here</button>
       </div>
       <div id="fwJob"></div>
+      <div id="fwLeftover"></div>
     </div>
     <div>
       <h2>Flash a collar</h2>
       <div class="segmented" id="fwMethod" role="group" aria-label="How to flash">
-        <button type="button" data-m="wifi">Wi-Fi</button>
         <button type="button" data-m="usb">USB on base</button>
         <button type="button" data-m="web">USB on this computer</button>
       </div>
 
-      <div id="fwWifi" class="fwgrid">
-        <label class="field wide">Collar to update <select id="fwOtaCollar"></select></label>
-        <div class="wide muted">Updates the collar over your home Wi-Fi. The base asks the collar over the mesh to restart into
-          Meshtastic's update loader, which joins the Wi-Fi network below and takes the new firmware. Put the collar on its charger
-          within Wi-Fi range first: it does not enforce fences while it updates (usually 2 to 5 minutes).</div>
-        <label class="field">Wi-Fi network <input id="fwSsid" autocomplete="off" maxlength="32"></label>
-        <label class="field">Password <input id="fwPsk" type="password" autocomplete="new-password" maxlength="63"></label>
-        <div class="wide row spread"><span class="muted" id="fwWifiState"></span><button id="fwWifiSave">Save network</button></div>
-        <label class="field wide">Collar's address in update mode (optional) <input id="fwIp" placeholder="Found automatically" inputmode="decimal"></label>
-        <div class="wide muted" id="fwSubnets"></div>
-        <div class="wide" id="fwPending"></div>
-        <div class="wide actions"><button class="primary" id="fwOta">Update over Wi-Fi</button></div>
-      </div>
-
-      <div id="fwUsb" class="fwgrid" hidden>
+      <div id="fwUsb" class="fwgrid">
         <div class="wide muted">For a collar plugged into the machine running this app (the Home Assistant machine).</div>
         <label class="field wide">Port <select id="fwPort"></select></label>
         <div class="wide actions"><button class="primary" id="fwUsbGo">Flash</button>
@@ -517,6 +503,7 @@
         <div class="wide muted">For a collar plugged into the computer you are using now. Needs Chrome or Edge, and this page opened
           over HTTPS (or on localhost).</div>
         <div class="wide" id="fwWebState"></div>
+        <div class="wide" id="fwWebNext" hidden></div>
         <div class="wide actions"><button class="primary" id="fwWebGo">Connect and flash</button>
           <button id="fwWebSetup" title="For a collar that already runs GeoCollar firmware">Set up only</button></div>
       </div>
@@ -541,7 +528,7 @@
 
   <section class="muted wide credits">Built on <a href="https://meshtastic.org">Meshtastic</a>. Collar protocol by <a href="https://openshock.org">OpenShock</a>.
     Maps by <a href="https://leafletjs.com">Leaflet</a> and <a href="https://geoman.io">Geoman</a>.
-    Flashing by <a href="https://github.com/espressif/esptool">esptool</a> and Meshtastic's <a href="https://github.com/meshtastic/esp32-unified-ota">OTA loader</a>.</section>
+    Flashing by <a href="https://github.com/espressif/esptool">esptool</a>.</section>
   </div>
 </div>
 
@@ -1169,7 +1156,8 @@ function renderSelected() {
     + (c.report_s && c.config_sent !== c.report_s ? ' (not sent yet)' : '')]);
   if (!c.sim) rows.push(['Locked to this base', c.locked ? 'Yes' : 'Not set up from this base']);
   if (c.ble_pin) rows.push(['Bluetooth PIN', String(c.ble_pin)]);
-  if (c.update_mode) rows.push(['Firmware', 'Waiting in update mode']);
+  // update_mode: left by a Wi-Fi update that an older version of this app started and never finished
+  if (c.update_mode) rows.push(['Firmware', 'Stuck in update mode: flash it over USB']);
   else if (c.firmware) rows.push(['Firmware', `${shortCommit(c.firmware.commit)}, ${c.firmware.via === 'wifi' ? 'Wi-Fi' : 'USB'} ${ago(Date.now() / 1000 - c.firmware.flashed_at)}`]);
   $('selStats').replaceChildren(...rows.flatMap(([k, v]) => [el('span', {}, k), el('span', {}, v)]));
   $('zoomDog').disabled = !(s && (s.lat || s.lon));
@@ -1717,10 +1705,9 @@ async function sendCmd(action, label, intensity = 0) {
 document.querySelectorAll('[data-cmd]').forEach(b => b.onclick = () => sendCmd(b.dataset.cmd, b.textContent, +(b.dataset.intensity || 0)));
 
 // ---------------------------------------------------------------------------------------------
-// Collar firmware: builds, a background job with a log, and three ways to flash.
+// Collar firmware: builds, a background job with a log, and two ways to flash, both over USB.
 // ---------------------------------------------------------------------------------------------
-let fw = null, fwSel = null, fwMethod = 'wifi', fwJobId = null, fwJobLog = [], fwJobTimer = null, fwWebBusy = false;
-let fwOtaId = null; // the collar to update over Wi-Fi: the one selected on the Collars tab, unless another is picked here
+let fw = null, fwSel = null, fwMethod = 'usb', fwJobId = null, fwJobLog = [], fwJobTimer = null, fwWebBusy = false;
 const shortCommit = c => c ? c.slice(0, 7) : 'unknown';
 const fwSay = t => { $('fwMsg').textContent = t; };
 const webSerialOk = () => 'serial' in navigator && window.isSecureContext;
@@ -1752,32 +1739,15 @@ function renderFw() {
   $('fwBuild').title = fw.can_build ? 'Compile on this machine. Slow, and needs about 3 GB of disk' : 'git is not installed in this image';
 
   for (const b of $('fwMethod').children) b.setAttribute('aria-pressed', String(b.dataset.m === fwMethod));
-  $('fwWifi').hidden = fwMethod !== 'wifi';
   $('fwUsb').hidden = fwMethod !== 'usb';
   $('fwWeb').hidden = fwMethod !== 'web';
-  $('fwUsbOpts').hidden = fwMethod === 'wifi';
 
-  // Wi-Fi
-  if (document.activeElement !== $('fwSsid') && !$('fwSsid').dataset.edited) $('fwSsid').value = fw.wifi.ssid;
-  $('fwPsk').placeholder = fw.wifi.has_psk ? 'Saved (leave empty to keep)' : '';
-  $('fwWifiState').textContent = fw.wifi.ssid ? `Saved: ${fw.wifi.ssid}` : 'No network saved yet';
-  $('fwSubnets').textContent = fw.subnets.length ? `Searches ${fw.subnets.join(', ')} for the collar.`
-    : 'Could not tell which network to search. Enter the collar\'s address, or set "ota_subnet" in the app settings.';
-  if (!collars[fwOtaId]) fwOtaId = collars[selected] ? selected : Object.keys(collars)[0] || null;
-  if (document.activeElement !== $('fwOtaCollar')) { // not while its list is open
-    $('fwOtaCollar').replaceChildren(...(fwOtaId ? Object.entries(collars).map(([id, x]) => el('option', { value: id }, x.name))
-      : [el('option', { value: '' }, 'No collars yet')]));
-    $('fwOtaCollar').value = fwOtaId || '';
-  }
-  const c = collars[fwOtaId];
-  const pending = c && c.update_mode;
-  $('fwPending').replaceChildren(...(pending ? [el('div', { class: 'callout bad' },
-    `${c.name} is waiting in update mode for build ${shortCommit((fw.builds.find(b => b.id === pending.build) || {}).geocollar_commit)} and is not enforcing fences. `,
-    'Retry the upload, or flash it over USB, which also brings it out of update mode.',
-    el('div', { class: 'actions', style: 'margin-top:6px' }, el('button', { disabled: busy || !fw.builds.some(b => b.id === pending.build),
-      onclick: () => startOta(true) }, 'Retry upload')))] : []));
-  $('fwOta').disabled = busy || !fwSel || !c || !!pending;
-  $('fwOta').textContent = c ? `Update ${c.name} over Wi-Fi` : 'Add a collar first';
+  // Wi-Fi updates are gone (0.17), but collars updated that way still hold the Wi-Fi password.
+  $('fwLeftover').replaceChildren(...(fw.wifi_leftover ? [el('div', { class: 'callout' },
+    `Updates over Wi-Fi have been removed. Collars that were updated that way still hold the name and password of your Wi-Fi network "${fw.wifi_leftover}". `,
+    'The base can ask each collar over the mesh and remove it. A collar that had it restarts once, and is without its fences for up to a minute.',
+    el('div', { class: 'actions', style: 'margin-top:6px' }, el('button', { disabled: busy,
+      onclick: () => startJob('firmware/forget-wifi') }, 'Remove it from the collars')))] : []));
 
   // USB on base
   const ports = fw.ports.map(p => el('option', { value: p.device, disabled: p.in_use },
@@ -1804,7 +1774,7 @@ function renderFw() {
   $('fwSetupOnly').disabled = busy || !fw.ports.some(p => p.device === $('fwPort').value && !p.in_use);
   $('fwModeNote').textContent = $('fwMode').value === 'full'
     ? 'Erases the collar, including its settings, keys and fences. Use this for a new collar; set it up again afterwards.'
-    : 'Keeps the collar\'s Meshtastic settings, keys and fences. Also brings a collar out of update mode.';
+    : 'Keeps the collar\'s Meshtastic settings, keys and fences.';
 }
 
 function renderJob(j, box = $('fwJob'), lines = fwJobLog) {
@@ -1843,36 +1813,16 @@ async function startJob(path, body) {
   catch (e) { fwSay(e.message); }
 }
 
-function startOta(resume) {
-  const id = fwOtaId, c = collars[id];
-  if (!c) return;
-  const build = resume ? c.update_mode.build : fwSel;
-  if (!resume && !confirm(`Update ${c.name} over Wi-Fi?\n\nThe collar restarts into update mode and does not enforce fences until the update finishes, usually 2 to 5 minutes. Make sure it is on its charger and in Wi-Fi range.`)) return;
-  startJob(`collars/${encodeURIComponent(id)}/firmware/ota`, { build, ip: $('fwIp').value.trim() || null, send_wifi: !resume && !c.sim, resume });
-}
-
-$('fwOtaCollar').onchange = () => { fwOtaId = $('fwOtaCollar').value || null; renderFw(); };
 $('fwMethod').onclick = e => { const b = e.target.closest('button'); if (b) { fwMethod = b.dataset.m; renderFw(); } };
 $('fwMode').onchange = renderFw;
 $('fwCollar').onchange = renderFw;
 $('fwPort').onchange = renderFw;
 $('fwRescan').onclick = fwRefresh;
-$('fwSsid').oninput = () => { $('fwSsid').dataset.edited = '1'; };
 $('fwDownload').onclick = () => startJob('firmware/download');
 $('fwBuild').onclick = () => {
   if (confirm('Build the collar firmware on this machine?\n\nThe first build downloads about 1.5 GB of tools and can take 30 minutes or more on a Raspberry Pi. Later builds are quicker.'))
     startJob('firmware/build', { ref: 'main' });
 };
-$('fwWifiSave').onclick = async () => {
-  const psk = $('fwPsk').value;
-  try {
-    await api('firmware/wifi', { method: 'PUT', body: JSON.stringify({ ssid: $('fwSsid').value.trim(), psk: psk ? psk : null }) });
-    $('fwPsk').value = ''; delete $('fwSsid').dataset.edited;
-    fwSay('Wi-Fi network saved. It is sent to the collar at the start of each Wi-Fi update.');
-    fwRefresh();
-  } catch (e) { fwSay(e.message); }
-};
-$('fwOta').onclick = () => startOta(false);
 $('fwUsbGo').onclick = () => {
   const full = $('fwMode').value === 'full';
   if (full && !confirm('Full install erases everything on the collar, including its keys and fences. Continue?')) return;
@@ -1891,6 +1841,9 @@ $('fwWebGo').onclick = async () => {
   if (mode === 'full' && !confirm('Full install erases everything on the collar, including its keys and fences. Continue?')) return;
   let port;
   try { port = await navigator.serial.requestPort(); } catch { return; } // the user closed the chooser
+  if (fwWait) fwWait.stop();
+  await fwLetGo; // an earlier wait for the collar has closed the port it was listening on
+  const others = (await navigator.serial.getPorts()).filter(p => p !== port); // not the collar: left alone afterwards
   fwWebBusy = true; fwJobLog = [];
   const job = { id: 'web', title: 'Flash over USB from this computer', state: 'running', step: 'Connecting', progress: null, error: '' };
   const logLine = t => { if (t && t.trim()) fwJobLog.push(t.trimEnd()); renderJob(job); };
@@ -1899,7 +1852,7 @@ $('fwWebGo').onclick = async () => {
   try {
     const { ESPLoader, Transport } = await import('./static/vendor/esptool-js/esptool-js.js');
     const files = [];
-    for (const kind of mode === 'full' ? ['factory', 'loader'] : ['app', 'loader']) {
+    for (const kind of mode === 'full' ? ['factory'] : ['app']) { // never Meshtastic's update loader: no over-the-air updates
       job.step = `Fetching ${m.files[kind].name}`; logLine(job.step);
       const r = await fetch(`api/firmware/builds/${m.id}/${kind}`);
       if (!r.ok) throw new Error(`could not fetch ${m.files[kind].name}`);
@@ -1929,12 +1882,12 @@ $('fwWebGo').onclick = async () => {
       reportProgress: (i, written, total) => { job.progress = (i + written / total) / files.length; renderJob(job); },
     });
     await loader.after('hard_reset');
-    job.state = 'done'; job.progress = 1; job.step = 'Done. The collar is restarting.'; logLine(job.step);
+    job.state = 'done'; job.progress = 1; job.step = 'Flashed.'; logLine(job.step);
     if (foundId && (!nodeId || nodeId === foundId)) {
       const r = await api('firmware/flashed', { method: 'POST', body: JSON.stringify({ node_id: foundId, build: m.id, via: 'usb', name: $('fwNewName').value.trim() || null, mode }) }).catch(() => null);
       if (r && r.new_collar) {
         logLine(`Added ${r.collar.name} (${foundId}) to the base.`);
-        job.step = `Done. Added ${r.collar.name} as a new collar.` + ($('fwSetup').checked ? '' : ' It still needs setting up for this base: press "Set up only".');
+        job.step = `Flashed. Added ${r.collar.name} as a new collar.` + ($('fwSetup').checked ? '' : ' It still needs setting up for this base: press "Set up only".');
       }
     } else if (nodeId) {
       if (foundId && nodeId !== foundId) logLine(`Note: this is node ${foundId}, not ${collars[nodeId].name} (${nodeId}).`);
@@ -1946,36 +1899,186 @@ $('fwWebGo').onclick = async () => {
     try { if (transport) await transport.disconnect(); } catch { /* already closed */ }
     fwWebBusy = false; renderJob(job); renderFw(); refresh();
   }
-  if (job.state === 'done' && $('fwSetup').checked) {
+  if (job.state !== 'done') return;
+  if ($('fwSetup').checked) {
     const name = nodeId ? collars[nodeId]?.name : $('fwNewName').value.trim();
-    fwSay('Waiting for the collar to restart, then setting it up…');
-    const again = await findPortAgain(port);
-    if (!again) { fwSay('Could not reopen the collar after it restarted. Press "Set up only" and pick it again.'); return; }
-    webSetup(again, name, $('fwLock').checked).catch(e => fwSay(e.message));
-  }
+    waitForCollar(others, name, $('fwLock').checked, 'Flashed. Now the collar has to restart.');
+  } else fwSay('Flashed. If the collar does not start by itself, press its RST button once.');
 };
 
-// When the collar restarts, its USB port goes away and comes back, sometimes as a new port
-// object; the browser keeps the permission, so find it again without asking. Returns it opened.
-async function findPortAgain(old, stopped = () => false) {
-  const want = old.getInfo();
-  for (let i = 0; i < 40 && !stopped(); i++) {
-    await new Promise(r => setTimeout(r, 1500));
-    const ports = (await navigator.serial.getPorts()).filter(p => {
-      const info = p.getInfo();
-      return info.usbVendorId === want.usbVendorId && info.usbProductId === want.usbProductId;
-    });
-    const p = ports.includes(old) ? old : ports[0];
-    if (!p) continue;
-    try { if (!p.readable) await p.open({ baudRate: 115200 }); return p; } catch { /* still restarting */ }
+// --- Finding the collar again -----------------------------------------------------------------
+// After flashing, the collar should restart into the new firmware. Often it does not: an
+// ESP32-S3 that was put into download mode with its buttons cannot be restarted over USB, so
+// someone has to press RST. And when it does restart, its USB port can come back as a device
+// this page has no permission for, and the browser only shows its device list after a click.
+// So nothing is assumed: the setup starts once a Meshtastic node really answers on a port. The
+// page keeps looking by itself and offers a button for the click.
+
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+// Listens on a port until a Meshtastic node answers there (true), or until `ms` have passed,
+// the port goes away or `stopped()` (false). It asks the way any Meshtastic client starts: a few
+// wake-up bytes, then a request for the node's settings, again every two seconds. A running node
+// replies with frames that start 0x94 0xC3; a chip in download mode, or one still starting, does
+// not. The port is left open unless it went away: opening and closing a collar's USB port more
+// often than needed can restart the collar.
+async function listenForNode(port, ms, stopped = () => false) {
+  let reader = null, writer = null, found = false, lost = false;
+  try {
+    if (!port.readable) await port.open({ baudRate: 115200 });
+    writer = port.writable.getWriter();
+    reader = port.readable.getReader();
+    const until = Date.now() + ms;
+    let last = 0, asked = 0, pending = null;
+    while (!found && !stopped() && Date.now() < until) {
+      if (Date.now() - asked >= 2000) { // not awaited: a chip that reads nothing must not hang this
+        asked = Date.now();
+        writer.write(new Uint8Array(32).fill(0xc3)).catch(() => {});
+        await sleep(100);
+        writer.write(new Uint8Array([0x94, 0xc3, 0x00, 0x02, 0x18, 0x2a])).catch(() => {}); // ToRadio { want_config_id: 42 }
+      }
+      if (!pending) { pending = reader.read(); pending.catch(() => {}); }
+      const r = await Promise.race([pending, sleep(400).then(() => null)]);
+      if (!r) continue; // nothing yet
+      pending = null;
+      if (r.done) { lost = true; break; }
+      for (const b of r.value) { if (last === 0x94 && b === 0xc3) { found = true; break; } last = b; }
+    }
+  } catch { lost = true; } // cannot be opened, or it went away
+  if (reader) {
+    try { await reader.cancel(); } catch { /* gone */ }
+    try { reader.releaseLock(); } catch { /* released */ }
   }
-  return null;
+  try { if (writer) writer.releaseLock(); } catch { /* released */ }
+  if (lost) { try { await port.close(); } catch { /* gone */ } }
+  return found;
 }
 
-// "Set up only" for a collar on this computer: the base does the setup (the same as on its own
-// USB) and this page relays the collar's serial port to it over a WebSocket. The collar restarts
-// near the end and the base reconnects to check its settings, so the relay finds the port again.
-function webSetup(port, name, lock) {
+// Waits for a collar to be running, then sets it up. `others` are the ports this page could
+// already use that are not the collar (another collar, the base's radio): they are never
+// touched. Any other port the page may use is tried, which covers both the port that was
+// flashed and a collar that came back as a new port with the permission kept. After `showAfter`
+// ms a panel says what to do: wait, press RST, or press Continue setup, which opens the
+// browser's device list for a collar the page may no longer use.
+let fwWait = null, fwLetGo = Promise.resolve(); // fwLetGo: settles once a wait that was stopped has closed its ports
+function waitForCollar(others, name, lock, title, showAfter = 0) {
+  let over = false, paused = false, watching = Promise.resolve(false), tried = null;
+  const held = new Set(); // ports opened here, to close again unless the setup takes one over
+  const text = el('div', {}, 'Waiting for it to answer. If it has not started within about 10 seconds, press its RST button once '
+    + '(or unplug it and plug it back in). The setup starts by itself when the collar answers. '
+    + 'If it does not, press Continue setup and pick the collar in the browser\'s list.');
+  const cont = el('button', { class: 'primary' }, 'Continue setup');
+  const anyway = el('button', { class: 'link', hidden: true }, 'Try the setup anyway');
+  const stop = keep => {
+    if (!over) {
+      over = true; fwWait = null;
+      $('fwWebNext').hidden = true; $('fwWebNext').replaceChildren(); renderFw();
+      fwLetGo = (async () => {
+        await watching; // lets go of its port within half a second
+        for (const p of held) if (p !== keep) { try { await p.close(); } catch { /* not open */ } }
+      })();
+    }
+    return fwLetGo;
+  };
+  const go = async p => { await stop(p); fwSay(''); webSetup(p, name, lock, others).catch(e => fwSay(e.message)); };
+  const listen = (p, ms, stopped) => { held.add(p); watching = listenForNode(p, ms, stopped); return watching; };
+  cont.onclick = async () => {
+    paused = true; cont.disabled = true; // the automatic check must not hold a port while the list is open
+    let chosen = null;
+    try { chosen = await navigator.serial.requestPort(); } catch { /* closed the list */ }
+    await watching;
+    if (over) return;
+    if (chosen) {
+      $('fwWebNext').hidden = false;
+      text.textContent = 'Checking that the collar answers…';
+      const ok = await listen(chosen, 15000, () => over);
+      if (over) return;
+      if (ok) { go(chosen); return; }
+      tried = chosen; anyway.hidden = false;
+      text.textContent = 'That device is not answering as a collar. If the collar has not restarted, press its RST button once, '
+        + 'wait about 10 seconds, and press Continue setup again.';
+    }
+    paused = false; cont.disabled = false;
+  };
+  anyway.onclick = () => go(tried);
+  $('fwWebNext').replaceChildren(el('div', { class: 'callout' }, el('b', {}, title), text,
+    el('div', { class: 'actions', style: 'margin-top:6px' }, cont,
+      el('button', { onclick: () => { stop(); fwSay('Not set up. Press "Set up only" when the collar is running.'); } }, 'Skip the setup'),
+      anyway)));
+  $('fwWebNext').hidden = showAfter > 0;
+  if (showAfter > 0) setTimeout(() => { if (!over) $('fwWebNext').hidden = false; }, showAfter);
+  fwWait = { stop: () => stop() };
+  renderFw();
+  (async () => {
+    const until = Date.now() + 5 * 60e3;
+    while (!over && Date.now() < until) {
+      if (!paused) {
+        let ports = [];
+        try { ports = (await navigator.serial.getPorts()).filter(p => !others.includes(p)); } catch { /* none */ }
+        for (const p of ports) {
+          if (over || paused) break;
+          const ok = await listen(p, ports.length > 1 ? 5000 : 20000, () => over || paused);
+          if (over) return;
+          if (ok && !paused) { go(p); return; }
+        }
+      }
+      await sleep(1000);
+    }
+    if (!over && !paused) {
+      $('fwWebNext').hidden = false;
+      text.textContent = 'The collar has not answered. Press its RST button once, then press Continue setup and pick it in the browser\'s list.';
+    }
+  })();
+}
+
+// When the collar restarts during the setup (it does, up to three times), its USB port goes away
+// and comes back, sometimes as a new port object. Usually the browser keeps the permission, so
+// the port is found again without asking. If no port this page may use shows up for about ten
+// seconds, the browser has dropped the permission: a Reconnect button then asks for the collar
+// again (the browser's device list needs a click). `others` are ports known not to be the
+// collar: with two collars on one computer, the wrong one must not get the rest of the setup
+// (the base also checks the key of whatever answers). Returns the port opened, or null when
+// `stopped()` or after five minutes; the base gives up before that.
+async function findPortAgain(old, stopped = () => false, others = []) {
+  const want = old.getInfo();
+  let picked = null, missing = 0, asking = false;
+  const ask = () => {
+    asking = true;
+    $('fwWebNext').replaceChildren(el('div', { class: 'callout' },
+      el('b', {}, 'The collar restarted and this page can no longer reach it.'),
+      el('div', {}, 'Press Reconnect and pick the collar in the browser\'s list. The setup then carries on where it was.'),
+      el('div', { class: 'actions', style: 'margin-top:6px' }, el('button', { class: 'primary', onclick: async () => {
+        try { picked = await navigator.serial.requestPort(); } catch { /* closed the list */ }
+      } }, 'Reconnect'))));
+    $('fwWebNext').hidden = false;
+  };
+  try {
+    for (let i = 0; i < 200 && !stopped(); i++) {
+      await sleep(1500);
+      let p = picked;
+      if (!p) {
+        const ports = (await navigator.serial.getPorts()).filter(q => {
+          const info = q.getInfo();
+          return !others.includes(q) && info.usbVendorId === want.usbVendorId && info.usbProductId === want.usbProductId;
+        });
+        p = ports.includes(old) ? old : ports[0];
+      }
+      if (p) {
+        missing = 0;
+        try { if (!p.readable) await p.open({ baudRate: 115200 }); return p; }
+        catch { try { await p.close(); } catch { /* not open */ } } // still restarting
+      } else if (++missing >= 6 && !asking) ask();
+    }
+    return null;
+  } finally {
+    if (asking) { $('fwWebNext').hidden = true; $('fwWebNext').replaceChildren(); }
+  }
+}
+
+// The setup of a collar on this computer: the base does it (the same as on its own USB) and this
+// page relays the collar's serial port to it over a WebSocket. The collar restarts along the way
+// and the base reconnects each time, so the relay finds the port again.
+function webSetup(port, name, lock, others = []) {
   const url = new URL('api/firmware/setup-web', location.href);
   url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
   url.searchParams.set('name', name || '');
@@ -2015,7 +2118,7 @@ function webSetup(port, name, lock) {
       } catch { /* the port went away: the collar is restarting */ }
       if (!open) return;
       await release();
-      const again = await findPortAgain(cur, () => !open);
+      const again = await findPortAgain(cur, () => !open, others);
       if (!again || !open) { finish(); return; }
       cur = again;
       pump();
@@ -2034,8 +2137,14 @@ function webSetup(port, name, lock) {
 $('fwWebSetup').onclick = async () => {
   let port;
   try { port = await navigator.serial.requestPort(); } catch { return; } // the user closed the chooser
+  if (fwWait) fwWait.stop();
+  await fwLetGo;
   const id = $('fwCollar').value, name = id ? collars[id].name : $('fwNewName').value.trim();
-  webSetup(port, name, $('fwLock').checked).catch(e => fwSay(e.message));
+  const others = (await navigator.serial.getPorts()).filter(p => p !== port);
+  fwSay('Checking that the collar answers…');
+  // The setup starts as soon as it does. If it does not (it is in download mode, or still
+  // starting), a panel says what to do after a few seconds.
+  waitForCollar(others, name, $('fwLock').checked, 'The collar is not answering yet.', 4000);
 };
 
 // ---------------------------------------------------------------------------------------------
@@ -2482,10 +2591,7 @@ function showTab(name, scrollTo) {
   $('viewCollars').hidden = tab !== 'collars';
   $('viewSettings').hidden = tab !== 'settings';
   if (tab === 'collars') map.invalidateSize(); // the map was hidden: let Leaflet measure it again
-  else {
-    if (collars[selected]) fwOtaId = selected; // "select a collar, then update it" keeps working
-    fwRefresh();
-  }
+  else fwRefresh();
   const target = scrollTo && $(scrollTo);
   if (target) target.scrollIntoView({ block: 'start' });
   else (tab === 'settings' ? $('viewSettings') : $('viewCollars')).scrollTop = 0;

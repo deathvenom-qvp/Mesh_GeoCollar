@@ -52,6 +52,14 @@ class FakeLink:
             return True
         return False
 
+    def forget_wifi(self, node_id, ssid, timeout=90):
+        """self.wifi: node ID -> whether that collar holds the network; a collar not in it does
+        not answer."""
+        self.forgot = getattr(self, "forgot", []) + [(node_id, ssid)]
+        if node_id not in getattr(self, "wifi", {}):
+            raise TimeoutError("no reply")
+        return self.wifi[node_id]
+
     def send_fences(self, node_id, zones, version, pulses=None):
         chunks = protocol.fence_chunks(zones, version, pulses)
         self.sent += [(node_id, c) for c in chunks]
@@ -533,3 +541,57 @@ def test_a_damaged_data_file_falls_back_to_the_backup(tmp_path, monkeypatch):
     old = store_mod.Store(other)
     old.record_status("!a1b2c3d4", {"lat": 40.0, "lon": -75.0})
     assert len(old.collar("!a1b2c3d4")["track"]) == 1
+
+
+def test_wifi_updates_are_gone_and_the_saved_network_is_forgotten(tmp_path, monkeypatch):
+    from geocollar_base import store as store_mod
+
+    def wait(client, job_id):
+        for _ in range(200):
+            j = client.get(f"/api/firmware/jobs/{job_id}").json()
+            if j["state"] != "running":
+                return j
+            time.sleep(0.02)
+        raise AssertionError("job did not finish")
+
+    # An older version kept the home Wi-Fi name and password for Wi-Fi updates, and its hourly
+    # backup has them too.
+    monkeypatch.setattr(store_mod, "BACKUP_EVERY_S", 0)
+    old = store_mod.Store(tmp_path)
+    old.upsert_collar("!a1b2c3d4", "Rex")
+    old.upsert_collar("!0000beef", "Biscuit")
+    old.set_setting("ota_wifi", {"ssid": "home", "psk": "hunter2-secret"})
+    old.set_setting("home", [40.0, -75.0])
+    assert "hunter2-secret" in (tmp_path / "geocollar.json.bak").read_text()
+    monkeypatch.setattr(store_mod, "BACKUP_EVERY_S", 3600)
+
+    client, link = make(tmp_path)
+    # The password is gone from the data file and from its backup. Only the network's name is
+    # kept, until the collars have been asked to forget it as well.
+    files = list(tmp_path.glob("geocollar.json*"))
+    assert len(files) >= 2
+    for f in files:
+        assert "hunter2-secret" not in f.read_text(), f
+    assert client.get("/api/firmware").json()["wifi_leftover"] == "home"
+
+    # The collars are asked over the mesh. Rex had the network; Biscuit does not answer.
+    link.wifi = {"!a1b2c3d4": True}
+    done = wait(client, client.post("/api/firmware/forget-wifi").json()["id"])
+    assert done["state"] == "done" and "Removed from Rex" in done["step"] and "No answer from Biscuit" in done["step"]
+    assert link.forgot == [("!a1b2c3d4", "home"), ("!0000beef", "home")]
+    assert client.get("/api/firmware").json()["wifi_leftover"] == "home"  # Biscuit is still to do
+
+    # A second run asks only Biscuit, which never had the network. Then nothing is left to do.
+    link.wifi = {"!0000beef": False}
+    link.forgot = []
+    done = wait(client, client.post("/api/firmware/forget-wifi").json()["id"])
+    assert done["state"] == "done" and "No collar had it" in done["step"]
+    assert link.forgot == [("!0000beef", "home")]
+    assert client.get("/api/firmware").json()["wifi_leftover"] is None
+    assert client.post("/api/firmware/forget-wifi").status_code == 409
+
+    # A base that never saved a network has nothing to offer.
+    other, _ = make(tmp_path / "fresh")
+    other.post("/api/collars", json={"node_id": "!a1b2c3d4", "name": "Rex"})
+    assert other.get("/api/firmware").json()["wifi_leftover"] is None
+    assert other.post("/api/firmware/forget-wifi").status_code == 409

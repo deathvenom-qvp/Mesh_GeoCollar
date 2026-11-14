@@ -35,10 +35,11 @@ def test_link_retries_until_the_node_answers():
     link.close()
 
 
-def test_remote_admin_for_ota():
+def test_remote_admin_reads_metadata_and_forgets_wifi():
     from meshtastic.protobuf import admin_pb2, portnums_pb2
 
     sent = []
+    saved = {"ssid": "home", "psk": "secret"}
 
     class Iface:
         nodes = {0x12345678: {"adminSessionPassKey": b"k" * 8}}
@@ -50,21 +51,35 @@ def test_remote_admin_for_ota():
             sent.append((data, destinationId, portNum, wantResponse, pkiEncrypted))
             if wantResponse:
                 reply = admin_pb2.AdminMessage()
-                reply.get_device_metadata_response.firmware_version = "2.8.2.d5f1619"
-                reply.get_device_metadata_response.hasWifi = True
+                if data.WhichOneof("payload_variant") == "get_config_request":
+                    reply.get_config_response.network.wifi_ssid = saved["ssid"]
+                    reply.get_config_response.network.wifi_psk = saved["psk"]
+                    reply.get_config_response.network.ntp_server = "pool.ntp.org"
+                else:
+                    reply.get_device_metadata_response.firmware_version = "2.8.2.d5f1619"
                 onResponse({"decoded": {"admin": {"raw": reply}}})
             else:
                 onResponse({"decoded": {"routing": {"errorReason": "NONE"}}})
 
     link = MeshLink(lambda *_: None)
     link.iface = Iface()
-    meta = link.get_metadata("!12345678")
-    assert meta.firmware_version == "2.8.2.d5f1619" and meta.hasWifi
-    link.request_ota("!12345678", b"\x01" * 32)
+    assert link.get_metadata("!12345678").firmware_version == "2.8.2.d5f1619"
+
+    # The network an older version of this app saved for Wi-Fi updates is removed, and the rest
+    # of the collar's network settings are kept.
+    assert link.forget_wifi("!12345678", "home") is True
     msg, dest, port, want_response, pki = sent[-1]
     assert dest == 0x12345678 and port == portnums_pb2.PortNum.ADMIN_APP and pki and not want_response
-    assert msg.ota_request.reboot_ota_mode == admin_pb2.OTAMode.OTA_WIFI and msg.ota_request.ota_hash == b"\x01" * 32
+    net = msg.set_config.network
+    assert net.wifi_ssid == "" and net.wifi_psk == "" and not net.wifi_enabled and net.ntp_server == "pool.ntp.org"
     assert msg.session_passkey == b"k" * 8
+
+    # A network the owner set up themselves, or none at all: nothing is written.
+    count = len(sent)
+    assert link.forget_wifi("!12345678", "another network") is False
+    saved.update(ssid="", psk="")
+    assert link.forget_wifi("!12345678", "home") is False
+    assert all(want for _, _, _, want, _ in sent[count:])  # only the two reads
 
 
 def test_hello_from_a_new_collar_is_passed_on():

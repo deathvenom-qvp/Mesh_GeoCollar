@@ -14,11 +14,6 @@ configuration:
     description: >-
       GitHub repository (owner/name) to download collar firmware from and build it from.
       Leave empty for the official one.
-  ota_subnet:
-    name: Network to search for collars being updated
-    description: >-
-      For Wi-Fi updates, the network the collar joins, such as 192.168.1.0/24. Leave empty to
-      use this machine's own network.
   home:
     name: Home location
     description: >-

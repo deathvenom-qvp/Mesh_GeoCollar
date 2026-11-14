@@ -191,6 +191,14 @@ class Store:
         with self._lock:
             return json.loads(json.dumps(self._data.get("settings", {}).get(key, default)))
 
+    def refresh_backup(self) -> None:
+        """Make the backup a copy of the data as it is now. For when something was removed that
+        must not live on in the older copy, such as a password."""
+        with self._lock:
+            self._save()  # the file on disk is current
+            self._backup_time = 0.0
+            self._save()  # copies it to the backup
+
     def set_setting(self, key: str, value) -> None:
         with self._lock:
             s = self._data.setdefault("settings", {})

@@ -5,26 +5,23 @@ Builds come from the "firmware-latest" release that CI publishes from main, or a
 this machine from the repository's source (slow, and needs a few GB of disk). Each build is a
 folder with manifest.json, written by firmware/package.py.
 
-Flashing:
+Flashing is over USB only:
 - USB on this machine: esptool, through the app's serial access.
-- Wi-Fi OTA: Meshtastic 2.7.18+ reboots into its OTA loader (meshtastic/esp32-unified-ota) when
-  an admin ota_request with the image's SHA-256 arrives. The loader joins the Wi-Fi network saved
-  on the collar, announces itself by UDP broadcast on port 3232, and takes the image over TCP 3232:
-  "OTA <size> <sha256>\\n", "ERASING", "OK", raw bytes, "OK". It stays in the loader until it gets
-  a good image, so a collar in update mode does not enforce fences.
 - USB from the browser: done in the page with esptool-js; the page fetches the files from here.
+
+There are no updates over Wi-Fi. A build still carries Meshtastic's update loader (older versions
+of this app expect the file), but nothing here writes it to a collar: a full install erases it,
+and without it a collar cannot be sent into an over-the-air update at all.
 """
 
 from __future__ import annotations
 
 import hashlib
-import ipaddress
 import json
 import logging
 import os
 import re
 import shutil
-import socket
 import subprocess
 import sys
 import tempfile
@@ -33,7 +30,6 @@ import time
 import urllib.request
 import uuid
 from collections import deque
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -44,7 +40,6 @@ log = logging.getLogger(__name__)
 
 DEFAULT_REPO = "deathvenom-qvp/Mesh_GeoCollar"
 RELEASE_TAG = "firmware-latest"
-OTA_PORT = 3232
 KEEP_BUILDS = 3
 USER_AGENT = "geocollar-base"
 FIXED_PIN = 1  # meshtastic Config.BluetoothConfig.PairingMode.FIXED_PIN (checked in tests)
@@ -380,6 +375,28 @@ def serial_ports(exclude: str = "") -> list[dict]:
     return out
 
 
+def usb_identity(port: str) -> tuple | None:
+    """What stays the same when a USB serial device comes back under another name. A collar that
+    is reset by hand while this app has its port open returns as, say, ttyACM1 instead of ttyACM0."""
+    for p in serial_ports():
+        if p["device"] == port and p["vid"] is not None and p["serial_number"]:
+            return (p["vid"], p["pid"], p["serial_number"])
+    return None
+
+
+def port_now(port: str, identity: tuple | None) -> str:
+    """Where that device is now: the port it was on while that still exists."""
+    if identity is None:
+        return port
+    ports = serial_ports()
+    if any(p["device"] == port for p in ports):
+        return port
+    for p in ports:
+        if (p["vid"], p["pid"], p["serial_number"]) == identity:
+            return p["device"]
+    return port
+
+
 def node_id_from_mac(mac: str) -> str | None:
     """Meshtastic's node number is the last four bytes of the ESP32's base MAC address
     (NodeDB::pickNewNodeNum), so esptool's "MAC: ..." line tells us the node ID before the collar
@@ -391,9 +408,15 @@ def node_id_from_mac(mac: str) -> str | None:
 
 
 def flash_usb(job: Job, builds: BuildStore, build_id: str, port: str, mode: str, base_radio: str = "") -> dict:
-    """mode "update": write the app and OTA loader, and clear otadata so the collar boots the new
-    app (also gets a collar out of update mode). Settings, keys and fences are kept.
-    mode "full": erase everything first. The collar comes back blank and must be set up again."""
+    """mode "update": write the app, and clear otadata so the collar boots it (this also gets a
+    collar out of Meshtastic's update loader, if an older version of this app left it there).
+    Settings, keys and fences are kept.
+    mode "full": erase everything first. The collar comes back blank and must be set up again.
+
+    Meshtastic's update loader is not written in either mode (see the top of this file).
+
+    The result has manual_reset set when esptool says it could not restart the chip: an ESP32-S3
+    put into download mode with its buttons stays there until RST is pressed."""
     if mode not in ("update", "full"):
         raise FirmwareError("mode must be update or full")
     if base_radio and os.path.realpath(port) == os.path.realpath(base_radio):
@@ -412,10 +435,9 @@ def flash_usb(job: Job, builds: BuildStore, build_id: str, port: str, mode: str,
         if not blank.exists():
             blank.write_bytes(b"\xff" * off["otadata_size"])
         cmd += [hex(off["otadata"]), str(blank), hex(off["app"]), str(d / m["files"]["app"]["name"])]
-    cmd += [hex(off["loader"]), str(d / m["files"]["loader"]["name"])]
 
     job.set_step(f"Flashing {port} ({'full install' if mode == 'full' else 'update, settings kept'})", 0.0)
-    files = 3 if mode == "update" else 2
+    files = 2 if mode == "update" else 1
     seen = [0]
 
     def on_line(line: str) -> None:
@@ -426,6 +448,8 @@ def flash_usb(job: Job, builds: BuildStore, build_id: str, port: str, mode: str,
             return  # too chatty for the log
         if line.startswith("Wrote "):
             seen[0] += 1
+        if re.search(r"reset the chip manually", line, re.I):
+            found["manual_reset"] = True
         mac = re.match(r"MAC:\s*([0-9a-fA-F:]{17})", line.strip())
         if mac and not found.get("node_id"):
             found["mac"] = mac.group(1).lower()
@@ -435,7 +459,8 @@ def flash_usb(job: Job, builds: BuildStore, build_id: str, port: str, mode: str,
 
     found: dict = {}
     _run(job, cmd, on_line=on_line)
-    job.set_step("Done. The collar is restarting.", 1.0)
+    job.set_step("Flashed. Press the collar's RST button once to start it." if found.get("manual_reset")
+                 else "Flashed. The collar is restarting.", 1.0)
     return {"build": build_id, "commit": m.get("geocollar_commit"), "mode": mode, **found}
 
 
@@ -520,21 +545,38 @@ def _close(iface) -> None:
         pass
 
 
-def _open_collar(job: Job, port: str, open_iface, wait_s: float, what: str):
-    job.set_step(f"Waiting for the collar on {port} {what}", None)
+def _open_collar(job: Job, port: str, open_iface, wait_s: float, what: str, identity: tuple | None = None,
+                 press_reset: bool = False):
+    """Connect to the collar, trying again while it starts. A collar that was just flashed does
+    not always restart by itself, so the first wait says what to do about that (press_reset: it is
+    known that it will not). identity (see usb_identity) follows the collar to another port name."""
+    first = what == "to start"
+    hint = ""
+    if first:
+        hint = (": press its RST button once now" if press_reset
+                else ". If nothing happens in a few seconds, press its RST button once")
+    job.set_step(f"Waiting for the collar on {port} {what}{hint}", None)
     deadline = time.monotonic() + wait_s
+    last = port
     while True:
         job.check_cancel()
+        now = port_now(port, identity)
+        if now != last:
+            job.log(f"The collar is on {now} now")
+            last = now
         try:
-            return open_iface(port)
+            return open_iface(now)
         except Exception as e:  # noqa: BLE001 - still booting; any failure means try again
             if time.monotonic() > deadline:
-                raise FirmwareError(f"could not talk to the collar on {port}: {e}") from e
+                hint = (". If it had to be restarted by hand, its port may have changed: pick the collar again "
+                        "and press \"Set up only\"") if first else ""
+                raise FirmwareError(f"could not talk to the collar on {now}: {e}{hint}") from e
             time.sleep(3)
 
 
 def setup_collar(job: Job, port: str, base_iface, name: str = "", open_iface=open_serial_node,
-                 boot_wait_s: float = 60, lock: bool = True, restart_s: float = 9) -> dict:
+                 boot_wait_s: float = 60, lock: bool = True, restart_s: float = 9,
+                 press_reset: bool = False) -> dict:
     """Over USB, make a collar trust and talk to this base: put the base's public key in its admin
     keys, give it the base's LoRa settings and channels, keep Bluetooth on for the lost beacon, and
     name it after the dog.
@@ -556,6 +598,9 @@ def setup_collar(job: Job, port: str, base_iface, name: str = "", open_iface=ope
       and lock, restart. Then the setup reconnects, checks that everything stuck, and writes the
       key and lock once more if they didn't.
 
+    press_reset: the collar was just flashed and could not be restarted over USB, so the first wait
+    asks for its RST button.
+
     Returns the node ID (and the one before setup, if it changed), the Bluetooth PIN, and whether
     the settings were checked after the restart."""
     if base_iface is None:
@@ -567,12 +612,16 @@ def setup_collar(job: Job, port: str, base_iface, name: str = "", open_iface=ope
     base_lora = base.localConfig.lora
     base_chans = list(base.channels or [])
 
-    iface = _open_collar(job, port, open_iface, boot_wait_s, "to start")
+    identity = usb_identity(port)  # None for a collar on the browser's computer: the page follows it
+    iface = _open_collar(job, port, open_iface, boot_wait_s, "to start", identity, press_reset)
     try:
         first_id = _node_id(iface)
         job.log(f"Collar is Meshtastic node {first_id}")
         node = iface.localNode
         sec = node.localConfig.security
+        if bytes(sec.public_key) == base_key:
+            raise FirmwareError("that is the base station's own radio, not a collar")
+        first_key = _key_b64(sec)  # empty on a fresh collar: its key is made when the region is set
         if sec.is_managed:
             if base_key in [bytes(k) for k in sec.admin_key]:
                 job.set_step("This collar is already locked to this base; nothing to change over USB.", 1.0)
@@ -596,9 +645,9 @@ def setup_collar(job: Job, port: str, base_iface, name: str = "", open_iface=ope
     if moved:
         # The new key, and with it the final node number, arrive with a fresh connection.
         time.sleep(2)
-        iface = _open_collar(job, port, open_iface, 30, "to come back with its new key")
+        iface = _open_collar(job, port, open_iface, max(30, boot_wait_s), "to come back with its new key", identity)
     else:
-        iface = _open_collar(job, port, open_iface, 30, "again")
+        iface = _open_collar(job, port, open_iface, max(30, boot_wait_s), "again", identity)
     pin = None
     locked_msg = ("Added the base's public key to the collar's admin keys"
                   + (" and locked it to this base: its settings can now only be changed by this base, "
@@ -608,6 +657,7 @@ def setup_collar(job: Job, port: str, base_iface, name: str = "", open_iface=ope
         if node_id != first_id:
             job.log(f"Its node ID is now {node_id} (Meshtastic derives it from the key it just made)")
         node = iface.localNode
+        _check_same_collar(node, first_key)
         collar_key = _key_b64(node.localConfig.security)  # the base's radio needs it to write to the collar
         job.set_step("Setting up the collar", 0.3)
 
@@ -651,10 +701,11 @@ def setup_collar(job: Job, port: str, base_iface, name: str = "", open_iface=ope
     if wrote_bt:
         job.set_step("Waiting for the collar to restart with Bluetooth on", 0.45)
         time.sleep(restart_s)
-        iface = _open_collar(job, port, open_iface, boot_wait_s, "to restart")
+        iface = _open_collar(job, port, open_iface, boot_wait_s, "to restart", identity)
         try:
             node_id = _node_id(iface) or node_id
             node = iface.localNode
+            _check_same_collar(node, collar_key)
             if _bluetooth_problem(node.localConfig.bluetooth, pin):
                 raise FirmwareError("the collar restarted without its Bluetooth settings, so it was not locked. "
                                     "Try again; if it keeps failing, do a full install first")
@@ -672,7 +723,7 @@ def setup_collar(job: Job, port: str, base_iface, name: str = "", open_iface=ope
         job.set_step("Waiting for the collar to restart, to check its settings", 0.7)
         time.sleep(restart_s)
         try:
-            iface = _open_collar(job, port, open_iface, boot_wait_s, "to restart")
+            iface = _open_collar(job, port, open_iface, boot_wait_s, "to restart", identity)
         except FirmwareError as e:
             job.log(f"Could not reconnect to check the settings ({e}). The collar shows here once it reports.")
             job.set_step("Done. Unchecked: the collar didn't reconnect over USB after restarting.", 1.0)
@@ -681,6 +732,7 @@ def setup_collar(job: Job, port: str, base_iface, name: str = "", open_iface=ope
         again = False
         try:
             node = iface.localNode
+            _check_same_collar(node, collar_key)
             problems = _setup_problems(node, base_lora, base_chans, base_key, lock, pin)
             final_id = _node_id(iface)
             collar_key = _key_b64(node.localConfig.security) or collar_key
@@ -707,6 +759,17 @@ def _key_b64(sec) -> str:
 
     key = bytes(sec.public_key)
     return base64.b64encode(key).decode() if len(key) == 32 else ""
+
+
+def _check_same_collar(node, key_b64: str) -> None:
+    """A collar keeps its key pair across restarts. If what answers after one has another key, or
+    is blank, it is a different device: two were plugged in and the reconnect found the other.
+    Stop before anything is written to it, above all the lock."""
+    now = _key_b64(node.localConfig.security)
+    blank = not now and not node.localConfig.lora.region  # never set up, so not the collar being set up
+    if key_b64 and (blank or (now and now != key_b64)):
+        raise FirmwareError("a different device answered after the collar restarted, so nothing more was written. "
+                            "Unplug other Meshtastic devices from that computer and run the setup again")
 
 
 def _write_security(node, base_key: bytes, lock: bool) -> None:
@@ -745,188 +808,3 @@ def _setup_problems(node, base_lora, base_chans, base_key: bytes, lock: bool, pi
     if bool(cfg.security.is_managed) != bool(lock):
         problems.append("lock")
     return problems
-
-
-# -------------------------------------------------------------------------------------------------
-# Wi-Fi OTA
-# -------------------------------------------------------------------------------------------------
-def probe_loader(ip: str, timeout: float = 1.5) -> str | None:
-    """Ask a host on TCP 3232 for its version. Returns the reply if it is a Meshtastic OTA loader."""
-    try:
-        with socket.create_connection((ip, OTA_PORT), timeout=timeout) as s:
-            s.settimeout(timeout)
-            s.sendall(b"VERSION\n")
-            data = b""
-            while not data.endswith(b"\n") and len(data) < 200:
-                chunk = s.recv(200)
-                if not chunk:
-                    break
-                data += chunk
-    except OSError:
-        return None
-    reply = data.decode("ascii", "replace").strip()
-    return reply if reply.startswith("OK ") else None
-
-
-def supervisor_subnets() -> list[str]:
-    """The Home Assistant host's IPv4 networks, from the Supervisor API (needs hassio_api)."""
-    token = os.environ.get("SUPERVISOR_TOKEN")
-    if not token:
-        return []
-    try:
-        req = urllib.request.Request("http://supervisor/network/info", headers={"Authorization": f"Bearer {token}"})
-        with urllib.request.urlopen(req, timeout=5) as r:  # noqa: S310 - fixed internal URL
-            info = json.load(r)["data"]
-    except (OSError, ValueError, KeyError):
-        return []
-    nets = []
-    for iface in info.get("interfaces", []):
-        for addr in (iface.get("ipv4") or {}).get("address", []):
-            try:
-                net = ipaddress.ip_interface(addr).network
-            except ValueError:
-                continue
-            if net.prefixlen >= 22 and not net.is_loopback and str(net) not in nets:
-                nets.append(str(net))
-    return nets
-
-
-def local_subnets() -> list[str]:
-    """Fallback when not under Home Assistant: the /24 of this machine's outbound address."""
-    try:
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-            s.connect(("192.0.2.1", 9))  # no packet is sent for UDP connect
-            ip = s.getsockname()[0]
-        net = ipaddress.ip_network(f"{ip}/24", strict=False)
-        return [] if net.is_loopback or ip.startswith("172.") else [str(net)]
-    except OSError:
-        return []
-
-
-def find_loader(job: Job, subnets: list[str], manual_ip: str = "", timeout: float = 240) -> tuple[str, str]:
-    """Wait for the OTA loader to appear: listen for its UDP broadcasts, try the given address,
-    and scan the subnets on TCP 3232. Returns (ip, VERSION reply)."""
-    heard: list[str] = []
-    stop = threading.Event()
-
-    def listen():
-        try:
-            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as u:
-                u.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                u.bind(("", OTA_PORT))
-                u.settimeout(1)
-                while not stop.is_set():
-                    try:
-                        msg, (ip, _port) = u.recvfrom(256)
-                    except socket.timeout:
-                        continue
-                    if msg.startswith(b"Meshtastic_") and ip not in heard:
-                        job.log(f"Heard {msg.decode('ascii', 'replace')} at {ip}")
-                        heard.append(ip)
-        except OSError as e:
-            job.log(f"Not listening for loader broadcasts ({e})")
-
-    threading.Thread(target=listen, daemon=True).start()
-    hosts: list[str] = []
-    for net in subnets:
-        hosts += [str(h) for h in ipaddress.ip_network(net, strict=False).hosts()][:1024]
-    deadline = time.time() + timeout
-    try:
-        with ThreadPoolExecutor(max_workers=64) as pool:
-            while time.time() < deadline:
-                job.check_cancel()
-                for ip in ([manual_ip] if manual_ip else []) + heard:
-                    reply = probe_loader(ip)
-                    if reply:
-                        return ip, reply
-                if hosts:
-                    for ip, reply in zip(hosts, pool.map(lambda h: probe_loader(h, 0.6), hosts)):
-                        if reply:
-                            return ip, reply
-                time.sleep(3)
-    finally:
-        stop.set()
-    raise FirmwareError("the collar's update loader did not show up on the network")
-
-
-def upload(job: Job, ip: str, image: bytes, sha_hex: str) -> None:
-    """Stream an app image to the OTA loader (protocol of meshtastic/esp32-unified-ota)."""
-    with socket.create_connection((ip, OTA_PORT), timeout=15) as s:
-        f = s.makefile("rb")
-
-        def line(timeout: float) -> str:
-            s.settimeout(timeout)
-            raw = f.readline(200)
-            if not raw:
-                raise FirmwareError("the collar closed the connection")
-            return raw.decode("ascii", "replace").strip()
-
-        s.sendall(f"OTA {len(image)} {sha_hex}\n".encode())
-        while True:
-            reply = line(120)
-            if reply == "OK":
-                break
-            if reply == "ERASING":
-                job.set_step("Collar is erasing its app slot", 0.0)
-            elif reply.startswith("ERR"):
-                raise FirmwareError(f"collar refused the image: {reply[4:]}")
-        job.set_step(f"Sending {len(image) // 1024} KB", 0.0)
-        s.settimeout(30)
-        for i in range(0, len(image), 1024):
-            job.check_cancel()
-            s.sendall(image[i:i + 1024])
-            job.progress = min(1.0, (i + 1024) / len(image))
-        job.set_step("Collar is checking the image", None)
-        while True:
-            reply = line(180)
-            if reply == "OK":
-                return
-            if reply.startswith("ERR"):
-                raise FirmwareError(f"collar rejected the image: {reply[4:]}")
-
-
-def wifi_ota(job: Job, builds: BuildStore, build_id: str, link, node_id: str, wifi: dict | None,
-             subnets: list[str], manual_ip: str = "", resume: bool = False,
-             on_update_mode: Callable[[str], None] | None = None) -> dict:
-    """Update one collar over Wi-Fi. With resume=True the collar is already waiting in its
-    loader for this build (an earlier attempt sent it there), so go straight to finding it."""
-    image_path = builds.file(build_id, "app")
-    m = builds.manifest(build_id)
-    image = image_path.read_bytes()
-    sha_hex = m["files"]["app"]["sha256"]
-    if hashlib.sha256(image).hexdigest() != sha_hex:
-        raise FirmwareError("the stored image is corrupt; download it again")
-
-    if not resume:
-        if not link or not link.connected:
-            raise FirmwareError("the base station's radio is not connected")
-        job.set_step("Asking the collar for its firmware details (over the mesh, can take a minute)")
-        meta = link.get_metadata(node_id)
-        job.log(f"Collar runs Meshtastic {meta.firmware_version}")
-        if not meta.hasWifi:
-            raise FirmwareError("this collar's firmware has no Wi-Fi, so it can only be updated over USB")
-        if wifi:
-            job.set_step(f"Saving the Wi-Fi network \"{wifi['ssid']}\" on the collar (it restarts to apply it)")
-            link.set_wifi(node_id, wifi["ssid"], wifi["psk"])
-            time.sleep(20)
-            for attempt in range(6):
-                job.check_cancel()
-                try:
-                    link.get_metadata(node_id, timeout=45)
-                    break
-                except (TimeoutError, RuntimeError):
-                    job.log("Waiting for the collar to come back")
-            else:
-                raise FirmwareError("the collar did not come back after saving the Wi-Fi settings")
-        job.set_step("Sending the collar into update mode")
-        link.request_ota(node_id, bytes.fromhex(sha_hex))
-        if on_update_mode:
-            on_update_mode(build_id)
-        time.sleep(5)
-
-    job.set_step("Looking for the collar on Wi-Fi" + (f" ({', '.join(subnets)})" if subnets else ""))
-    ip, version = find_loader(job, subnets, manual_ip)
-    job.log(f"Found the update loader at {ip}: {version}")
-    upload(job, ip, image, sha_hex)
-    job.set_step("Image accepted. The collar is restarting into the new firmware.", 1.0)
-    return {"build": build_id, "commit": m.get("geocollar_commit"), "ip": ip}

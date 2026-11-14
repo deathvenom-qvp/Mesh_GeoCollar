@@ -426,24 +426,19 @@ class MeshLink:
         m.get_config_request = admin_pb2.AdminMessage.ConfigType.NETWORK_CONFIG
         return self._admin(node_id, m, timeout=timeout).get_config_response.network
 
-    def set_wifi(self, node_id: str, ssid: str, psk: str, timeout: float = 90) -> None:
-        """Store Wi-Fi credentials on the node for its OTA loader, leaving Wi-Fi itself as it was
-        (normally off, to save battery). The node reboots to apply network settings."""
+    def forget_wifi(self, node_id: str, ssid: str, timeout: float = 90) -> bool:
+        """Remove the Wi-Fi network an older version of this app saved on the node for Wi-Fi
+        updates. Only if the node holds that network (ssid): one the owner set up is left alone.
+        Returns whether there was anything to remove; if so, the node reboots to apply it."""
         from meshtastic.protobuf import admin_pb2
 
         net = self.get_network_config(node_id, timeout)
+        if not net.wifi_ssid or net.wifi_ssid != ssid:
+            return False
         m = admin_pb2.AdminMessage()
         m.set_config.network.CopyFrom(net)
-        m.set_config.network.wifi_ssid = ssid
-        m.set_config.network.wifi_psk = psk
+        m.set_config.network.wifi_ssid = ""
+        m.set_config.network.wifi_psk = ""
+        m.set_config.network.wifi_enabled = False
         self._admin(node_id, m, want_response=False, timeout=timeout)
-
-    def request_ota(self, node_id: str, sha256: bytes, timeout: float = 90) -> None:
-        """Reboot the node into its Wi-Fi OTA loader, which will only accept the image with this
-        SHA-256 (Meshtastic 2.7.18+ with the unified OTA loader in its app1 partition)."""
-        from meshtastic.protobuf import admin_pb2
-
-        m = admin_pb2.AdminMessage()
-        m.ota_request.reboot_ota_mode = admin_pb2.OTAMode.OTA_WIFI
-        m.ota_request.ota_hash = sha256
-        self._admin(node_id, m, want_response=False, timeout=timeout)
+        return True
