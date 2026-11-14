@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.14.4
+
+- Fixed: **Set up only** failed with "the collar restarted without these settings: the base's
+  key, lock". The collar lost the lock when it came right after the Bluetooth change, in the same
+  boot. Now Bluetooth and the lock each get their own restart, the lock is written once more if it
+  still didn't stick, and the check after the restart covers Bluetooth too. Setup takes about a
+  minute.
+
 ## 0.14.3
 
 - Fixed: **Set up only** said it worked but changed nothing on the collar. Two things in

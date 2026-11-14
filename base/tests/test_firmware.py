@@ -345,11 +345,13 @@ class FakeMeshtasticDevice:
     """A stand-in for a collar on USB that behaves like Meshtastic 2.8 where it matters: settings
     sent to another node number go nowhere; setting the region on a fresh device makes its key and
     moves its node number to a hash of the key; managed mode ignores all later USB admin (commit
-    included); changes inside an edit transaction are lost unless committed. Each open() is a new
-    USB connection, through the same SocketStream bridge the browser relay uses, with the real
-    Meshtastic library on top."""
+    included); changes inside an edit transaction are lost unless committed; a Bluetooth or security
+    change shuts Bluetooth down and restarts the collar, and a second one in the same boot resets
+    it before the save. Each open() is a new USB connection, through the same SocketStream bridge
+    the browser relay uses, with the real Meshtastic library on top. drop_security loses that many
+    security writes, to check the setup's second try."""
 
-    def __init__(self, num=0xAB52A4E5, region=0, managed=False, admin_keys=()):
+    def __init__(self, num=0xAB52A4E5, region=0, managed=False, admin_keys=(), bt=False, drop_security=0):
         from meshtastic.protobuf import channel_pb2, localonly_pb2
 
         self.num = num
@@ -359,16 +361,26 @@ class FakeMeshtasticDevice:
         self.saved.security.admin_key.extend(admin_keys)
         if region:
             self.saved.security.public_key = b"P" * 32
+        self.saved.bluetooth.enabled = bt
         self.saved_channels = [channel_pb2.Channel(index=i, role=1 if i == 0 else 0) for i in range(8)]
         self.long_name = "GeoCollar a4e5"
         self.ram = None
         self.txn = False
         self.ignored = []
+        self.restart_pending = False  # a write asked for a restart; it happens before the next open()
+        self.bt_down = False  # Bluetooth was shut down in this boot
+        self.dead = False  # reset mid-connection: nothing more arrives on it
+        self.restarts = 0
+        self.drop_security = drop_security
 
     def open(self, _port=None):
         from meshtastic.protobuf import localonly_pb2
 
         # A new connection after a restart sees what was saved.
+        if self.restart_pending:
+            self.restarts += 1
+            self.restart_pending = self.bt_down = False
+        self.dead = False
         self.ram = localonly_pb2.LocalConfig()
         self.ram.CopyFrom(self.saved)
         self.ram_channels = [type(c)() for c in self.saved_channels]
@@ -407,6 +419,9 @@ class FakeMeshtasticDevice:
         import zlib
 
         kind = m.WhichOneof("payload_variant")
+        if self.dead:
+            self.ignored.append(("after a reset", kind))
+            return
         if to != self.num:
             self.ignored.append(("to another node", kind))
             return
@@ -420,6 +435,16 @@ class FakeMeshtasticDevice:
             self.save()
         elif kind == "set_config":
             which = m.set_config.WhichOneof("payload_variant")
+            if which in ("bluetooth", "security") and not self.txn:
+                if self.bt_down:  # shutting Bluetooth down twice resets the collar before it saves
+                    self.ignored.append(("lost in a reset", which))
+                    self.dead = self.restart_pending = True
+                    return
+                self.bt_down = self.restart_pending = True
+            if which == "security" and self.drop_security:
+                self.drop_security -= 1
+                self.ignored.append(("dropped", which))
+                return
             if which == "lora" and not self.ram.lora.region and m.set_config.lora.region:
                 self.ram.security.public_key = b"P" * 32  # the key is made now...
                 self.num = zlib.crc32(b"P" * 32)  # ...and the node number follows it
@@ -435,6 +460,7 @@ class FakeMeshtasticDevice:
             self.save()
         elif kind == "set_owner":
             self.long_name = m.set_owner.long_name or self.long_name
+            self.restart_pending = True
 
     def send_config(self, config_id):
         from meshtastic.protobuf import mesh_pb2
@@ -496,6 +522,7 @@ def test_setup_collar_sticks_on_a_fresh_meshtastic_28_collar():
     assert dev.saved.bluetooth.enabled and dev.saved.bluetooth.fixed_pin == r["ble_pin"]
     assert dev.long_name == "Rex the Dog"
     assert ("to another node", "set_config") not in dev.ignored  # nothing was lost to the old number
+    assert dev.ignored == [] and dev.restarts == 2  # Bluetooth, then the key and lock, each in its own boot
 
     # Again: locked to this base already, so nothing is written.
     r = fw.setup_collar(fw.Job("usb", "t"), "/dev/ttyACM0", fake_base(), "", open_iface=dev.open, boot_wait_s=5)
@@ -514,6 +541,33 @@ def test_setup_collar_sticks_on_a_fresh_meshtastic_28_collar():
     assert r["checked"] and r["node_id"] == "!ab52a4e5" and r["ble_pin"] is None
     assert not free.saved.security.is_managed
     assert [bytes(k) for k in free.saved.security.admin_key] == [b"1" * 32, b"2" * 32, b"B" * 32]
+
+    # Bluetooth already on and no lock: no Bluetooth change, so the key goes in the same boot.
+    on = FakeMeshtasticDevice(region=1, bt=True)
+    r = fw.setup_collar(fw.Job("usb", "t"), "/dev/ttyACM0", fake_base(), "", open_iface=on.open, lock=False,
+                        boot_wait_s=5, restart_s=0)
+    assert r["checked"] and on.restarts == 1 and [bytes(k) for k in on.saved.security.admin_key] == [b"B" * 32]
+
+
+def test_setup_writes_the_lock_again_if_it_did_not_stick():
+    dev = FakeMeshtasticDevice(region=1, drop_security=1)
+    job = fw.Job("usb", "t")
+    r = fw.setup_collar(job, "/dev/ttyACM0", fake_base(), "", open_iface=dev.open, boot_wait_s=5, restart_s=0)
+    assert r["checked"] and dev.saved.security.is_managed and dev.ignored == [("dropped", "security")]
+    assert any("writing them again" in line for line in job.lines)
+
+    # Lost twice: it says so, and the collar is not locked.
+    dev = FakeMeshtasticDevice(region=1, drop_security=2)
+    with pytest.raises(fw.FirmwareError, match="without these settings: the base's key, lock"):
+        fw.setup_collar(fw.Job("usb", "t"), "/dev/ttyACM0", fake_base(), "", open_iface=dev.open, boot_wait_s=5,
+                        restart_s=0)
+    assert not dev.saved.security.is_managed
+
+
+def test_fixed_pin_matches_meshtastic():
+    from meshtastic.protobuf import config_pb2
+
+    assert fw.FIXED_PIN == config_pb2.Config.BluetoothConfig.PairingMode.FIXED_PIN
 
     with pytest.raises(fw.FirmwareError, match="not connected"):
         fw.setup_collar(fw.Job("usb", "t"), "/dev/ttyACM0", None)

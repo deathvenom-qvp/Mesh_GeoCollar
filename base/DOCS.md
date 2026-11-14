@@ -109,8 +109,9 @@ transmit anything until it is set up: use **Set up only** (or set the region and
 hand). Until a collar reports, its panel says what it is waiting for.
 
 Setting the region on a fresh collar makes its key, and Meshtastic 2.8 then changes its node ID to
-match; the setup follows it and keeps the collar's name and fences. The setup ends by reconnecting
-after the collar restarts and checking that its settings stuck.
+match; the setup follows it and keeps the collar's name and fences. The collar restarts twice
+during setup (once for Bluetooth, once for the base's key and the lock), so it takes about a
+minute. The setup ends by reconnecting and checking that its settings stuck.
 
 By hand, collars only obey messages from base nodes they trust:
 

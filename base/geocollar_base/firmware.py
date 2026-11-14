@@ -45,6 +45,7 @@ RELEASE_TAG = "firmware-latest"
 OTA_PORT = 3232
 KEEP_BUILDS = 3
 USER_AGENT = "geocollar-base"
+FIXED_PIN = 1  # meshtastic Config.BluetoothConfig.PairingMode.FIXED_PIN (checked in tests)
 
 
 class FirmwareError(Exception):
@@ -539,8 +540,11 @@ def setup_collar(job: Job, port: str, base_iface, name: str = "", open_iface=ope
       goes first, on its own, and the setup reconnects to learn the final node number.
     - Managed mode blocks every later message over USB, including the commit of an edit
       transaction. So no transaction: each setting saves as it is written, and the lock goes last.
-    - Bluetooth and security changes restart the collar 7 s after the last one. After that the
-      setup reconnects and checks that the settings stuck.
+    - A Bluetooth or security change shuts Bluetooth down and restarts the collar 7 s later. A
+      second such change in the same boot gets lost (the collar never saved the key and lock that
+      followed the Bluetooth change), so each gets its own boot: Bluetooth, restart, then the key
+      and lock, restart. Then the setup reconnects, checks that everything stuck, and writes the
+      key and lock once more if they didn't.
 
     Returns the node ID (and the one before setup, if it changed), the Bluetooth PIN, and whether
     the settings were checked after the restart."""
@@ -585,6 +589,10 @@ def setup_collar(job: Job, port: str, base_iface, name: str = "", open_iface=ope
         iface = _open_collar(job, port, open_iface, 30, "to come back with its new key")
     else:
         iface = _open_collar(job, port, open_iface, 30, "again")
+    pin = None
+    locked_msg = ("Added the base's public key to the collar's admin keys"
+                  + (" and locked it to this base: its settings can now only be changed by this base, "
+                     "or by a full install that erases it" if lock else ""))
     try:
         node_id = _node_id(iface)
         if node_id != first_id:
@@ -606,63 +614,73 @@ def setup_collar(job: Job, port: str, base_iface, name: str = "", open_iface=ope
             node.setOwner(long_name=name[:39], short_name=short[:4])
             job.log(f"Named the collar {name}")
 
-        # 3. Bluetooth, then security with the lock: each restarts the collar 7 s later.
-        from meshtastic.protobuf import config_pb2
-
+        # 3. Bluetooth (the lost beacon needs it), with a random PIN when locking: a fixed one instead
+        # of Meshtastic's default 123456 (boards without a screen) or one shown on a screen inside
+        # the collar's case. Saving it restarts the collar.
         bt = node.localConfig.bluetooth
-        bt.enabled = True  # the lost beacon needs it
-        pin = None
         if lock:
-            # A fixed random PIN instead of Meshtastic's default 123456 (boards without a screen) or
-            # a PIN shown on a screen inside the collar's case.
             import secrets
 
             pin = secrets.randbelow(900000) + 100000
-            bt.mode = config_pb2.Config.BluetoothConfig.PairingMode.FIXED_PIN
-            bt.fixed_pin = pin
-        node.writeConfig("bluetooth")
-        job.log("Bluetooth on" + (", pairing PIN set (shown in the collar's panel)" if pin else ""))
-
-        sec = node.localConfig.security
-        keys = [bytes(k) for k in sec.admin_key]
-        if base_key not in keys:
-            if len(keys) >= 3:  # Meshtastic keeps three admin keys; replace the last one
-                del sec.admin_key[-1]
-            sec.admin_key.append(base_key)
-        sec.admin_channel_enabled = False  # the old shared-channel admin: off
-        sec.is_managed = bool(lock)
-        node.writeConfig("security")  # last: once managed, the collar ignores USB settings
-        job.log("Added the base's public key to the collar's admin keys"
-                + (" and locked it to this base: its settings can now only be changed by this base, "
-                   "or by a full install that erases it" if lock else ""))
+        wrote_bt = bool(lock) or not bt.enabled
+        if wrote_bt:
+            bt.enabled = True
+            if lock:
+                bt.mode = FIXED_PIN
+                bt.fixed_pin = pin
+            node.writeConfig("bluetooth")
+            job.log("Bluetooth on" + (", pairing PIN set (shown in the collar's panel)" if pin else ""))
+        else:
+            _write_security(node, base_key, lock)  # nothing restarted yet, so it can go now
+            job.log(locked_msg)
     finally:
         _close(iface)
 
-    # 4. Check, after the restart, that it all stuck.
-    job.set_step("Waiting for the collar to restart, to check its settings", 0.7)
-    time.sleep(restart_s)
-    try:
+    # 4. The base's key and the lock, alone in the boot after Bluetooth's restart.
+    if wrote_bt:
+        job.set_step("Waiting for the collar to restart with Bluetooth on", 0.45)
+        time.sleep(restart_s)
         iface = _open_collar(job, port, open_iface, boot_wait_s, "to restart")
-    except FirmwareError as e:
-        job.log(f"Could not reconnect to check the settings ({e}). The collar shows here once it reports.")
-        job.set_step("Done. Unchecked: the collar didn't reconnect over USB after restarting.", 1.0)
-        return {"node_id": node_id, "previous_node_id": first_id, "ble_pin": pin, "locked": lock, "checked": False}
-    try:
-        node = iface.localNode
-        problems = []
-        if node.localConfig.lora.region != base_lora.region:
-            problems.append("region")
-        if node.localConfig.lora.modem_preset != base_lora.modem_preset:
-            problems.append("preset")
-        if base_key not in [bytes(k) for k in node.localConfig.security.admin_key]:
-            problems.append("the base's key")
-        if base_chans and node.channels and bytes(node.channels[0].settings.psk) != bytes(base_chans[0].settings.psk):
-            problems.append("primary channel")
-        if bool(node.localConfig.security.is_managed) != bool(lock):
-            problems.append("lock")
-        final_id = _node_id(iface)
-    finally:
-        _close(iface)
+        try:
+            node_id = _node_id(iface) or node_id
+            node = iface.localNode
+            if _bluetooth_problem(node.localConfig.bluetooth, pin):
+                raise FirmwareError("the collar restarted without its Bluetooth settings, so it was not locked. "
+                                    "Try again; if it keeps failing, do a full install first")
+            job.set_step("Locking the collar to this base", 0.55)
+            _write_security(node, base_key, lock)
+            job.log(locked_msg)
+        finally:
+            _close(iface)
+
+    # 5. Check, after the restart, that it all stuck. If the key or the lock didn't, the collar still
+    # takes settings over USB, so they get one more try.
+    problems: list[str] = []
+    final_id = None
+    for attempt in (1, 2):
+        job.set_step("Waiting for the collar to restart, to check its settings", 0.7)
+        time.sleep(restart_s)
+        try:
+            iface = _open_collar(job, port, open_iface, boot_wait_s, "to restart")
+        except FirmwareError as e:
+            job.log(f"Could not reconnect to check the settings ({e}). The collar shows here once it reports.")
+            job.set_step("Done. Unchecked: the collar didn't reconnect over USB after restarting.", 1.0)
+            return {"node_id": node_id, "previous_node_id": first_id, "ble_pin": pin, "locked": lock,
+                    "checked": False}
+        again = False
+        try:
+            node = iface.localNode
+            problems = _setup_problems(node, base_lora, base_chans, base_key, lock, pin)
+            final_id = _node_id(iface)
+            if (attempt == 1 and problems and set(problems) <= {"the base's key", "lock"}
+                    and not node.localConfig.security.is_managed):
+                job.log("The collar restarted without " + " and ".join(problems) + "; writing them again")
+                _write_security(node, base_key, lock)
+                again = True
+        finally:
+            _close(iface)
+        if not again:
+            break
     if problems:
         raise FirmwareError("the collar restarted without these settings: " + ", ".join(problems)
                             + ". Try again; if it keeps failing, do a full install first")
@@ -670,6 +688,44 @@ def setup_collar(job: Job, port: str, base_iface, name: str = "", open_iface=ope
     job.set_step("Done. The collar is set up for this base and reports within a minute or two.", 1.0)
     return {"node_id": final_id or node_id, "previous_node_id": first_id, "ble_pin": pin, "locked": lock,
             "checked": True}
+
+
+def _write_security(node, base_key: bytes, lock: bool) -> None:
+    """Put the base's key in the collar's admin keys and, with lock, turn on managed mode. Once
+    managed, the collar ignores settings over USB, so this is always the last write."""
+    sec = node.localConfig.security
+    keys = [bytes(k) for k in sec.admin_key]
+    if base_key not in keys:
+        if len(keys) >= 3:  # Meshtastic keeps three admin keys; replace the last one
+            del sec.admin_key[-1]
+        sec.admin_key.append(base_key)
+    sec.admin_channel_enabled = False  # the old shared-channel admin: off
+    sec.is_managed = bool(lock)
+    node.writeConfig("security")
+
+
+def _bluetooth_problem(bt, pin) -> bool:
+    # The PIN reads back as 0 on firmware that hides it from USB clients; then only the mode is checked.
+    return not bt.enabled or bool(pin and (bt.mode != FIXED_PIN or (bt.fixed_pin and bt.fixed_pin != pin)))
+
+
+def _setup_problems(node, base_lora, base_chans, base_key: bytes, lock: bool, pin) -> list[str]:
+    """What the collar is missing after setup, read back after it restarted."""
+    cfg = node.localConfig
+    problems = []
+    if cfg.lora.region != base_lora.region:
+        problems.append("region")
+    if cfg.lora.modem_preset != base_lora.modem_preset:
+        problems.append("preset")
+    if base_chans and node.channels and bytes(node.channels[0].settings.psk) != bytes(base_chans[0].settings.psk):
+        problems.append("primary channel")
+    if _bluetooth_problem(cfg.bluetooth, pin):
+        problems.append("Bluetooth")
+    if base_key not in [bytes(k) for k in cfg.security.admin_key]:
+        problems.append("the base's key")
+    if bool(cfg.security.is_managed) != bool(lock):
+        problems.append("lock")
+    return problems
 
 
 # -------------------------------------------------------------------------------------------------
