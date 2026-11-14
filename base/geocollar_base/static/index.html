@@ -446,10 +446,6 @@
       <div id="fwUsb" class="fwgrid" hidden>
         <div class="wide muted">For a collar plugged into the machine running this app (the Home Assistant machine).</div>
         <label class="field wide">Port <select id="fwPort"></select></label>
-        <label class="wide row muted" style="gap:6px"><input type="checkbox" id="fwSetup" checked>
-          Then set it up for this base: trust the base, copy its radio settings and channels, name it after the dog</label>
-        <label class="wide row muted" style="gap:6px"><input type="checkbox" id="fwLock" checked>
-          And lock it to this base: no other base, phone or computer can change its settings. Undoing this needs a full install, which erases it.</label>
         <div class="wide actions"><button class="primary" id="fwUsbGo">Flash</button>
           <button id="fwSetupOnly" title="For a collar that already runs GeoCollar firmware">Set up only</button>
           <button id="fwRescan">Rescan ports</button></div>
@@ -459,7 +455,8 @@
         <div class="wide muted">For a collar plugged into the computer you are using now. Needs Chrome or Edge, and this page opened
           over HTTPS (or on localhost).</div>
         <div class="wide" id="fwWebState"></div>
-        <div class="wide actions"><button class="primary" id="fwWebGo">Connect and flash</button></div>
+        <div class="wide actions"><button class="primary" id="fwWebGo">Connect and flash</button>
+          <button id="fwWebSetup" title="For a collar that already runs GeoCollar firmware">Set up only</button></div>
       </div>
 
       <div class="fwgrid" id="fwUsbOpts">
@@ -470,6 +467,10 @@
         <label class="field">Which collar is it? <select id="fwCollar"></select></label>
         <label class="field wide" id="fwNewNameRow">Dog's name, if it is a new collar <input id="fwNewName" maxlength="24" placeholder="Rex"></label>
         <div class="wide muted" id="fwModeNote"></div>
+        <label class="wide row muted" style="gap:6px"><input type="checkbox" id="fwSetup" checked>
+          Then set it up for this base: trust the base, copy its radio settings and channels, name it after the dog</label>
+        <label class="wide row muted" style="gap:6px"><input type="checkbox" id="fwLock" checked>
+          And lock it to this base: no other base, phone or computer can change its settings. Undoing this needs a full install, which erases it.</label>
       </div>
       <div class="muted" id="fwMsg" role="status" style="margin-top:6px"></div>
     </details>
@@ -1148,7 +1149,7 @@ function renderNewCollars() {
         el('button', { class: 'link', onclick: dismiss }, 'Not mine')),
       el('div', { class: 'muted' }, bits.join(' · ')),
       el('div', { class: 'row', style: 'gap:6px;margin-top:6px' }, input, el('button', { class: 'primary', onclick: add }, 'Add')),
-      d.has_admin_key ? null : el('div', { class: 'callout' }, 'This collar does not trust any base yet. After adding it, plug it into the base and use "Set up only" under Collar firmware, or paste the base key (under "Add a collar") into its Admin key in the Meshtastic app.'));
+      d.has_admin_key ? null : el('div', { class: 'callout' }, 'This collar does not trust any base yet. After adding it, plug it into the base or this computer and use "Set up only" under Collar firmware, or paste the base key (under "Add a collar") into its Admin key in the Meshtastic app.'));
   });
   $('newCollars').replaceChildren(...items);
 }
@@ -1372,15 +1373,15 @@ function renderBeacon(c) {
     const h = c.hello;
     parts.push(el('div', { class: 'callout beacon' }, !h
       ? (c.locked ? `Not heard from ${c.name} since it was set up. Check that it is on and near the base: after it starts it says hello every minute for 15 minutes, and the base answers.`
-        : `Not heard from ${c.name} yet. A collar can only talk to the base once it is set up for it (region, channels and the base's key); a freshly installed one can't transmit at all. Plug it into the base and use "Set up only" under Collar firmware.`)
-      : !h.has_admin_key ? `${c.name} is on the air but does not trust this base yet, so it ignores it. Plug it into the base and use "Set up only" under Collar firmware.`
+        : `Not heard from ${c.name} yet. A collar can only talk to the base once it is set up for it (region, channels and the base's key); a freshly installed one can't transmit at all. Plug it into the base or this computer and use "Set up only" under Collar firmware.`)
+      : !h.has_admin_key ? `${c.name} is on the air but does not trust this base yet, so it ignores it. Plug it into the base or this computer and use "Set up only" under Collar firmware.`
       : `${c.name} is on the air and the base has answered. It reports once it gets the answer; if it keeps saying hello, it may trust a different base: use "Set up only" to set it up for this one.`));
   }
   const rc = c.radio_changed;
   if (rc && rc.moved) parts.push(el('div', { class: 'callout beacon' },
     `Moved to the base radio's new settings ${ago(Date.now() / 1000 - rc.at)}. Waiting for its first report on them.`));
   else if (rc) parts.push(el('div', { class: 'callout bad beacon' },
-    `${c.name} missed the base radio's change ${ago(Date.now() / 1000 - rc.at)}, so it can't hear the base. Plug it into the base and use "Set up only" under Collar firmware (a full install first if it is locked to this base).`));
+    `${c.name} missed the base radio's change ${ago(Date.now() / 1000 - rc.at)}, so it can't hear the base. Plug it into the base or this computer and use "Set up only" under Collar firmware (a full install first if it is locked to this base).`));
   if (c.key_mismatch) parts.push(el('div', { class: 'callout bad beacon' },
     `Ignored a report ${ago(Date.now() / 1000 - c.key_mismatch)} that claimed to be ${c.name} but was signed with a different key. `
     + 'Another node may be pretending to be this collar. If you fully re-installed this collar yourself, set it up again over USB (or remove and re-add it) so the base accepts its new key.'));
@@ -1684,6 +1685,7 @@ function renderFw() {
     ? 'This browser cannot talk to USB devices. Use Chrome or Edge on a computer.'
     : 'USB access needs this page over HTTPS. Open Home Assistant through its https:// address, or use "USB on base".'));
   $('fwWebGo').disabled = busy || !fwSel || !webSerialOk();
+  $('fwWebSetup').disabled = busy || !webSerialOk();
 
   // Shared options
   const keepCollar = $('fwCollar').value;
@@ -1824,7 +1826,7 @@ $('fwWebGo').onclick = async () => {
       const r = await api('firmware/flashed', { method: 'POST', body: JSON.stringify({ node_id: foundId, build: m.id, via: 'usb', name: $('fwNewName').value.trim() || null, mode }) }).catch(() => null);
       if (r && r.new_collar) {
         logLine(`Added ${r.collar.name} (${foundId}) to the base.`);
-        job.step = `Done. Added ${r.collar.name} as a new collar. Its Meshtastic settings still need this base's key: plug it into the base and use "Set up only", or see "Add a collar".`;
+        job.step = `Done. Added ${r.collar.name} as a new collar.` + ($('fwSetup').checked ? '' : ' It still needs setting up for this base: press "Set up only".');
       }
     } else if (nodeId) {
       if (foundId && nodeId !== foundId) logLine(`Note: this is node ${foundId}, not ${collars[nodeId].name} (${nodeId}).`);
@@ -1836,6 +1838,81 @@ $('fwWebGo').onclick = async () => {
     try { if (transport) await transport.disconnect(); } catch { /* already closed */ }
     fwWebBusy = false; renderJob(job); renderFw(); refresh();
   }
+  if (job.state === 'done' && $('fwSetup').checked) {
+    const name = nodeId ? collars[nodeId]?.name : $('fwNewName').value.trim();
+    fwSay('Waiting for the collar to restart, then setting it up…');
+    const again = await findPortAgain(port);
+    if (!again) { fwSay('Could not reopen the collar after it restarted. Press "Set up only" and pick it again.'); return; }
+    webSetup(again, name, $('fwLock').checked).catch(e => fwSay(e.message));
+  }
+};
+
+// After flashing, the collar restarts and its USB port comes back, sometimes as a new port
+// object; the browser keeps the permission, so find it again without asking.
+async function findPortAgain(old) {
+  const want = old.getInfo();
+  for (let i = 0; i < 20; i++) {
+    await new Promise(r => setTimeout(r, 1500));
+    const ports = (await navigator.serial.getPorts()).filter(p => {
+      const info = p.getInfo();
+      return info.usbVendorId === want.usbVendorId && info.usbProductId === want.usbProductId;
+    });
+    const p = ports.includes(old) ? old : ports[0];
+    if (!p) continue;
+    try { await p.open({ baudRate: 115200 }); return p; } catch { /* still restarting */ }
+  }
+  return null;
+}
+
+// "Set up only" for a collar on this computer: the base does the setup (the same as on its own
+// USB) and this page relays the collar's serial port to it over a WebSocket.
+function webSetup(port, name, lock) {
+  const url = new URL('api/firmware/setup-web', location.href);
+  url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
+  url.searchParams.set('name', name || '');
+  url.searchParams.set('lock', lock ? 'true' : 'false');
+  return new Promise(async (resolve, reject) => {
+    try { if (!port.readable) await port.open({ baudRate: 115200 }); }
+    catch (e) { reject(new Error(`Could not open the collar's port: ${e.message}. Close any other app using it (such as the Meshtastic web client).`)); return; }
+    fwWebBusy = true; renderFw(); fwSay('');
+    const reader = port.readable.getReader(), writer = port.writable.getWriter();
+    const ws = new WebSocket(url);
+    ws.binaryType = 'arraybuffer';
+    let open = true, started = false;
+    const finish = async () => {
+      if (!open) return;
+      open = false;
+      try { await reader.cancel(); } catch { /* port already gone */ }
+      try { reader.releaseLock(); writer.releaseLock(); await port.close(); } catch { /* the collar restarted */ }
+      try { ws.close(); } catch { /* closed */ }
+      fwWebBusy = false; renderFw();
+      if (!started) reject(new Error('The base did not start the setup. Is another firmware job running?'));
+    };
+    ws.onmessage = ev => {
+      if (typeof ev.data !== 'string') { writer.write(new Uint8Array(ev.data)).catch(finish); return; }
+      const m = JSON.parse(ev.data);
+      if (m.job) { started = true; watchJob(m.job); resolve(m.job); }
+      if (m.error) { started = true; reject(new Error(m.error)); finish(); }
+      if (m.done) finish();
+    };
+    ws.onclose = finish;
+    ws.onopen = async () => {
+      try {
+        while (open) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          if (value && ws.readyState === WebSocket.OPEN) ws.send(value);
+        }
+      } catch { /* the port went away (the collar restarts at the end of setup) */ }
+      finish();
+    };
+  });
+}
+$('fwWebSetup').onclick = async () => {
+  let port;
+  try { port = await navigator.serial.requestPort(); } catch { return; } // the user closed the chooser
+  const id = $('fwCollar').value, name = id ? collars[id].name : $('fwNewName').value.trim();
+  webSetup(port, name, $('fwLock').checked).catch(e => fwSay(e.message));
 };
 
 // ---------------------------------------------------------------------------------------------

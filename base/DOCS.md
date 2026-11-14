@@ -48,7 +48,8 @@ the base over the mesh. So when one of those changes, the app:
 3. changes the base radio last. It restarts too, and the app reconnects within a minute.
 
 Each moved collar shows "Waiting for its first report" until it is heard on the new settings. A
-collar left behind can't hear the base: plug it in and use **Set up only** under Collar firmware
+collar left behind can't hear the base: plug it into the base or this computer and use **Set up
+only** under Collar firmware
 (after a full install, if it is locked to this base). The name and hop limit only affect the base.
 
 If the base radio fails to take the settings after the collars have moved, the panel shows
@@ -86,8 +87,14 @@ The easy way: plug the new collar into the base machine, open **Collar firmware*
 base**, type the dog's name, leave **Then set it up for this base** ticked and press **Flash** (or
 **Set up only** if it already runs GeoCollar). The base reads the collar's node ID from its chip,
 adds it, puts the base's public key in the collar's admin keys, and copies the base's LoRa
-settings and channels to it. Flashing from **USB on this computer** also adds the collar, but its
-Meshtastic settings then need the base's key by hand (below).
+settings and channels to it.
+
+**From the computer you're using** (Chrome or Edge, with the page opened over HTTPS): plug the
+collar into this computer, pick **USB on this computer**, and press **Connect and flash** (with
+**Then set it up for this base** ticked) or **Set up only**. The setup is the same as on the
+base's USB: the page passes the collar's serial port through to the base app, which does the
+work. After flashing, the page finds the collar again when it restarts; if it can't, press **Set
+up only** and pick the collar.
 
 A collar running GeoCollar that no base has adopted says hello on the mesh every minute for 15
 minutes after it starts, then every 15 minutes. If the base hears it (same LoRa settings and

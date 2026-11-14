@@ -437,6 +437,64 @@ def open_serial_node(port: str):
     return SerialInterface(devPath=port)
 
 
+class SocketStream:
+    """A collar's USB serial port, relayed by the browser over a WebSocket (Web Serial), that looks
+    enough like pyserial for Meshtastic's StreamInterface. feed() takes bytes from the browser;
+    write() hands bytes to send(), which delivers them to the browser."""
+
+    def __init__(self, send: Callable[[bytes], None], read_timeout: float = 0.5):
+        self._send = send
+        self._buf = bytearray()
+        self._cv = threading.Condition()
+        self._shut = False
+        self.timeout = read_timeout
+
+    def feed(self, data: bytes) -> None:
+        with self._cv:
+            self._buf += data
+            self._cv.notify_all()
+
+    def shutdown(self) -> None:
+        """The browser went away: reads fail from now on, so the interface stops."""
+        with self._cv:
+            self._shut = True
+            self._cv.notify_all()
+
+    def read(self, n: int = 1) -> bytes:
+        with self._cv:
+            if not self._buf and not self._shut:
+                self._cv.wait(self.timeout)
+            if not self._buf and self._shut:
+                raise OSError("the browser closed the USB connection")
+            out = bytes(self._buf[:n])
+            del self._buf[:n]
+            return out
+
+    def write(self, data: bytes) -> int:
+        if self._shut:
+            raise OSError("the browser closed the USB connection")
+        self._send(bytes(data))
+        return len(data)
+
+    def flush(self) -> None:
+        pass
+
+    def close(self) -> None:
+        """Called by the interface when it is done; the WebSocket stays open for a retry."""
+
+
+def open_socket_node(stream: SocketStream):
+    """A Meshtastic interface over a SocketStream (each attempt gets a fresh interface)."""
+    from meshtastic.stream_interface import StreamInterface
+
+    class SocketInterface(StreamInterface):
+        def connect(self) -> None:
+            self.stream = stream
+            super().connect()
+
+    return SocketInterface(timeout=60)
+
+
 def setup_collar(job: Job, port: str, base_iface, name: str = "", open_iface=open_serial_node,
                  boot_wait_s: float = 60, lock: bool = True) -> dict:
     """Over USB, make a collar trust and talk to this base: put the base's public key in its admin

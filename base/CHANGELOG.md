@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.14.2
+
+- **Set up a collar from this computer's browser**: under Collar firmware, **USB on this computer**
+  now has **Set up only**, and **Connect and flash** sets the collar up afterwards when "Then set
+  it up for this base" is ticked. The page relays the collar's USB serial port to the base app
+  over a WebSocket, and the base runs the same setup as on its own USB. The connection is accepted
+  only through Home Assistant's sidebar or from the page on the app's own address, because it
+  carries the base's channel keys.
+
 ## 0.14.1
 
 Needs the new collar firmware for the collar's name.

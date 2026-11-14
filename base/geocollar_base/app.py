@@ -14,7 +14,10 @@ import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+import asyncio
+from urllib.parse import urlsplit
+
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -613,6 +616,59 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
             return result
 
         return start("usb", f"Set up the collar on {body.port}", run)
+
+    @app.websocket("/api/firmware/setup-web")
+    async def firmware_setup_web(ws: WebSocket, name: str = "", lock: bool = True):
+        """Set up a collar plugged into the computer the page is open on: the page relays the
+        collar's serial port (Web Serial) over this WebSocket, and the base runs the same setup as
+        "Set up only" on its own USB.
+
+        WebSockets ignore CORS, so a page on another site must not reach this: it would receive the
+        base's channel keys. Through Home Assistant's ingress (which adds X-Ingress-Path and checks
+        the login) or from the page on this app's own address only."""
+        origin = urlsplit(ws.headers.get("origin", ""))
+        if not ws.headers.get("x-ingress-path") and origin.netloc != ws.headers.get("host"):
+            await ws.close(code=1008)
+            return
+        await ws.accept()
+        loop = asyncio.get_running_loop()
+
+        def send(data: bytes) -> None:
+            asyncio.run_coroutine_threadsafe(ws.send_bytes(data), loop).result(timeout=10)
+
+        stream = fw.SocketStream(send)
+        dog = " ".join(name.split())[:39]
+
+        def run(job):
+            try:
+                result = fw.setup_collar(job, "this computer's USB", getattr(link, "iface", None), dog,
+                                         open_iface=lambda _port: fw.open_socket_node(stream), boot_wait_s=90,
+                                         lock=lock)
+            finally:
+                asyncio.run_coroutine_threadsafe(ws.send_json({"done": True}), loop)
+            if result.get("node_id"):
+                result["new_collar"] = note_device(result["node_id"], "usb", dog or None)
+                note_setup(result["node_id"], result)
+            return result
+
+        try:
+            job = jobs.start("usb", "Set up the collar on this computer's USB", run).view()
+        except fw.FirmwareError as e:
+            await ws.send_json({"error": str(e)})
+            await ws.close()
+            return
+        await ws.send_json({"job": job["id"]})
+        try:
+            while True:
+                msg = await ws.receive()
+                if msg["type"] == "websocket.disconnect":
+                    break
+                if msg.get("bytes"):
+                    stream.feed(msg["bytes"])
+        except WebSocketDisconnect:
+            pass
+        finally:
+            stream.shutdown()
 
     # -- Base radio settings ----------------------------------------------------------------------
     # Set when collars moved to new settings but the base radio then failed to take them; the plan

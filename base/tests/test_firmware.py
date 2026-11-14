@@ -422,3 +422,139 @@ def test_new_collars_from_usb_browser_and_mesh(client, tmp_path, monkeypatch):
     assert list(found) == ["!33333333"] and found["!33333333"]["long_name"] == "Meshtastic 3333"
     c.post("/api/collars", json={"node_id": "!33333333", "name": "Pip"})
     assert c.get("/api/discovered").json() == {}
+
+
+def test_socket_stream_relays_bytes_both_ways():
+    sent = []
+    s = fw.SocketStream(sent.append, read_timeout=0.05)
+    assert s.read(1) == b""  # nothing yet: times out like pyserial
+    s.feed(b"\x94\xc3ab")
+    assert s.read(2) == b"\x94\xc3" and s.read(5) == b"ab"
+    s.write(b"to the collar")
+    s.flush()
+    s.close()  # the interface closing doesn't end the relay
+    assert sent == [b"to the collar"]
+    s.shutdown()
+    with pytest.raises(OSError):
+        s.read(1)
+    with pytest.raises(OSError):
+        s.write(b"x")
+
+
+def test_setup_from_the_browser_over_a_websocket(tmp_path, monkeypatch):
+    from starlette.websockets import WebSocketDisconnect
+
+    def fake_setup(job, port, base_iface, name="", open_iface=None, boot_wait_s=60, lock=True):
+        stream = open_iface(port)  # patched below to hand back the stream itself
+        stream.write(b"ping")
+        reply = b""
+        while len(reply) < 4:
+            reply += stream.read(4 - len(reply))
+        assert reply == b"pong" and name == "Rex" and lock is False
+        return {"node_id": "!a1b2c3d4", "ble_pin": None, "locked": False}
+
+    monkeypatch.setattr(fw, "setup_collar", fake_setup)
+    monkeypatch.setattr(fw, "open_socket_node", lambda stream: stream)
+    c = TestClient(create_app({"data_dir": str(tmp_path)}))
+    with c.websocket_connect("/api/firmware/setup-web?name=Rex&lock=false",
+                             headers={"origin": "http://testserver"}) as ws:
+        job = ws.receive_json()["job"]
+        assert ws.receive_bytes() == b"ping"
+        ws.send_bytes(b"pong")
+        assert ws.receive_json() == {"done": True}
+    for _ in range(100):
+        j = c.get(f"/api/firmware/jobs/{job}").json()
+        if j["state"] != "running":
+            break
+        time.sleep(0.05)
+    assert j["state"] == "done", j
+    assert c.get("/api/collars").json()["!a1b2c3d4"]["name"] == "Rex"
+
+    # Another site's page can't open it: WebSockets ignore CORS.
+    with pytest.raises(WebSocketDisconnect):
+        with c.websocket_connect("/api/firmware/setup-web", headers={"origin": "https://evil.example"}) as ws:
+            ws.receive_json()
+
+
+class FakeSerialDevice:
+    """Speaks just enough of Meshtastic's serial API (framed ToRadio / FromRadio) for the real
+    Meshtastic library to connect over a SocketStream and send admin messages."""
+
+    def __init__(self):
+        self.buf = b""
+        self.stream = fw.SocketStream(self.on_bytes, read_timeout=0.05)
+        self.admin = []
+
+    @staticmethod
+    def frame(msg) -> bytes:
+        b = msg.SerializeToString()
+        return bytes([0x94, 0xC3, len(b) >> 8, len(b) & 255]) + b
+
+    def on_bytes(self, data):
+        from meshtastic.protobuf import admin_pb2, mesh_pb2
+
+        self.buf += data
+        while (i := self.buf.find(b"\x94\xc3")) >= 0 and len(self.buf) >= i + 4:
+            n = (self.buf[i + 2] << 8) | self.buf[i + 3]
+            if len(self.buf) < i + 4 + n:
+                return
+            tr = mesh_pb2.ToRadio()
+            tr.ParseFromString(self.buf[i + 4 : i + 4 + n])
+            self.buf = self.buf[i + 4 + n :]
+            if tr.HasField("want_config_id"):
+                threading.Thread(target=self.send_config, args=(tr.want_config_id,), daemon=True).start()
+            elif tr.HasField("packet") and tr.packet.decoded.portnum == 6:  # ADMIN_APP
+                m = admin_pb2.AdminMessage()
+                m.ParseFromString(tr.packet.decoded.payload)
+                self.admin.append(m)
+
+    def send_config(self, config_id):
+        from meshtastic.protobuf import mesh_pb2
+
+        out = [mesh_pb2.FromRadio()]
+        out[0].my_info.my_node_num = 0xA1B2C3D4
+        fr = mesh_pb2.FromRadio()
+        fr.node_info.num = 0xA1B2C3D4
+        fr.node_info.user.id = "!a1b2c3d4"
+        out.append(fr)
+        for name in ("device", "lora", "security", "bluetooth"):
+            fr = mesh_pb2.FromRadio()
+            getattr(fr.config, name).SetInParent()
+            out.append(fr)
+        for i in range(8):
+            fr = mesh_pb2.FromRadio()
+            fr.channel.index = i
+            fr.channel.role = 1 if i == 0 else 0
+            out.append(fr)
+        fr = mesh_pb2.FromRadio()
+        fr.config_complete_id = config_id
+        out.append(fr)
+        for f in out:
+            self.stream.feed(self.frame(f))
+
+
+def test_setup_runs_over_the_browser_relay_with_the_real_meshtastic_library():
+    from meshtastic.protobuf import channel_pb2, localonly_pb2
+
+    base_node = type("N", (), {})()
+    base_node.localConfig = localonly_pb2.LocalConfig()
+    base_node.localConfig.security.public_key = b"K" * 32
+    base_node.localConfig.lora.region = 1
+    base_node.channels = [channel_pb2.Channel(index=i) for i in range(8)]
+    base_node.channels[0].role = 1
+    base_node.channels[0].settings.psk = b"\x01"
+    base_iface = type("I", (), {"localNode": base_node})()
+
+    dev = FakeSerialDevice()
+    job = fw.Job("usb", "test")
+    result = fw.setup_collar(job, "this computer's USB", base_iface, "Rex",
+                             open_iface=lambda _p: fw.open_socket_node(dev.stream), boot_wait_s=5)
+    time.sleep(0.3)
+    assert result["node_id"] == "!a1b2c3d4" and result["locked"] and 100000 <= result["ble_pin"] <= 999999
+    kinds = [m.WhichOneof("payload_variant") for m in dev.admin]
+    assert "begin_edit_settings" in kinds and kinds[-1] == "commit_edit_settings"
+    assert kinds.index("begin_edit_settings") < kinds.index("set_config")
+    security = [m.set_config.security for m in dev.admin if m.WhichOneof("payload_variant") == "set_config"
+                and m.set_config.WhichOneof("payload_variant") == "security"][-1]
+    assert list(security.admin_key) == [b"K" * 32] and security.is_managed
+    assert any(m.WhichOneof("payload_variant") == "set_owner" and m.set_owner.long_name == "Rex" for m in dev.admin)
