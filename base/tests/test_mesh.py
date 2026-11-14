@@ -115,8 +115,12 @@ def test_base_info_reports_settings_and_problems():
     assert link.base_info()["issues"] == []
 
 
-def test_radio_gets_the_collars_key_and_reports_failed_sends():
+def test_radio_gets_the_collars_key_and_reports_failed_sends(monkeypatch):
     import base64
+
+    from geocollar_base import mesh
+
+    monkeypatch.setattr(mesh.time, "sleep", lambda s: None)
 
     from meshtastic.protobuf import admin_pb2, mesh_pb2, portnums_pb2
 
@@ -162,10 +166,13 @@ def test_radio_gets_the_collars_key_and_reports_failed_sends():
     assert len(admin) == 1  # only once
     assert sent[-1][1:] == ("!7f5ffdcc", protocol.PORT_NUM, False, True)
     assert errors[-1] == ("!7f5ffdcc", "PKI_SEND_FAIL_PUBLIC_KEY")  # what the radio said is passed on
+    link.forget_key("!7f5ffdcc")  # the radio turned out not to have it: given again next time
+    link.send_owner("!7f5ffdcc", "Testy", "Ken", "")
+    assert len(admin) == 2
 
     # No key from setup: nothing to add; the base can swap NodeInfo with it instead.
     link.send_owner("!11112222", "", "", "")
-    assert len(admin) == 1
+    assert len(admin) == 2
     link.request_node_info("!11112222")
     data, dest, port, want_response, pki = sent[-1]
     assert dest == 0x11112222 and port == portnums_pb2.PortNum.NODEINFO_APP and want_response and not pki

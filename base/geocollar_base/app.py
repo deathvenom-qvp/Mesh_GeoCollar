@@ -263,7 +263,10 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
         if store.collar(node_id) is None:
             return
         store.set_collar_info(node_id, "send_error", {"reason": reason, "at": time.time()})
-        if reason in ("PKI_SEND_FAIL_PUBLIC_KEY", "PKI_UNKNOWN_PUBKEY"):
+        # Meshtastic 2.7 says PKI_FAILED, and 2.8 PKI_SEND_FAIL_PUBLIC_KEY, when the radio has no
+        # public key for the collar. Give it the one from setup again, and ask the collar for it.
+        if reason in ("PKI_FAILED", "PKI_SEND_FAIL_PUBLIC_KEY", "PKI_UNKNOWN_PUBKEY"):
+            link.forget_key(node_id)
             ask_node_info(node_id)
 
     # -- New collars: a GeoCollar collar no base has adopted says hello on the mesh now and then.
@@ -294,7 +297,7 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
             found = dict(sorted(found.items(), key=lambda kv: kv[1].get("seen", 0))[-20:])
         store.set_setting("discovered", found)
 
-    def note_device(node_id: str, via: str, name: str | None) -> bool:
+    def note_device(node_id: str, via: str, name: str | None, push: bool = True) -> bool:
         """A collar found while flashing or setting up over USB: add it if it is new."""
         if not re.fullmatch(r"![0-9a-f]{8}", node_id or ""):
             return False
@@ -303,7 +306,8 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
             dog = " ".join((name or "").split())
             store.upsert_collar(node_id, protocol.fit_text(dog, protocol.MAX_DOG_NAME) or None)
             store.set_collar_info(node_id, "added_via", via)
-            push_owner(node_id)
+            if push:
+                push_owner(node_id)
         found = store.setting("discovered", {}) or {}
         if found.pop(node_id, None) is not None:
             store.set_setting("discovered", found)
@@ -319,11 +323,16 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
         # The key read over USB: reports must carry it, and the radio needs it to write to the collar.
         store.set_collar_info(node_id, "public_key", result.get("public_key") or None)
         store.set_collar_info(node_id, "key_mismatch", None)
+        store.set_collar_info(node_id, "send_error", None)
         if result.get("public_key") and link.connected:
             try:
                 link.ensure_contact(node_id)
             except Exception as e:  # noqa: BLE001 - done again before the next message to it
                 log.warning("could not give the base radio the key of %s: %s", node_id, e)
+        # A collar that trusts this base reports once it hears from it, so say something now
+        # rather than at its next hello.
+        if result.get("locked") or result.get("already_locked") or result.get("checked"):
+            push_owner(node_id)
 
     def adopt_setup(job, result: dict, name: str | None) -> None:
         """After a USB setup: keep the collar's record if its node ID changed, add it if new."""
@@ -336,7 +345,8 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
             else:
                 store.remove_collar(old)
             job.log(f"Moved the collar's record from {old} to its new node ID {new}")
-        result["new_collar"] = note_device(new, "usb", name)
+        # Its key goes to the radio (note_setup) before anything is sent to it.
+        result["new_collar"] = note_device(new, "usb", name, push=False)
         note_setup(new, result)
 
     for node_id, c in store.collars().items():

@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.14.6
+
+- Fixed: a collar added by **Set up only** got its first message before the base had given its
+  radio the collar's key, so that message failed (PKI_FAILED). The key now goes first, the radio
+  gets a moment to take it, and the base then talks to the collar straight away instead of at its
+  next hello.
+- PKI_FAILED (how Meshtastic 2.7 says it has no key for the collar) now makes the base give its
+  radio the key again and ask the collar for it, and the collar's panel explains it.
+
 ## 0.14.5
 
 - Fixed: a collar set up over USB could keep saying hello and never report. The base's radio can

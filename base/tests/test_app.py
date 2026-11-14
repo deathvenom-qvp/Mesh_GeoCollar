@@ -41,6 +41,9 @@ class FakeLink:
     def request_node_info(self, node_id):
         self.asked.append(node_id)
 
+    def forget_key(self, node_id):
+        self.radio_keys.pop(node_id, None)
+
     def ensure_contact(self, node_id):
         key = self.key_for(node_id)
         if key and self.radio_keys.get(node_id) != key:
@@ -60,6 +63,7 @@ class FakeLink:
 
     def send_owner(self, node_id, dog, owner, phone):
         self.sent.append((node_id, protocol.encode_owner(dog, owner, phone)))
+        self.key_at_send = getattr(self, "key_at_send", []) + [node_id in self.radio_keys]
 
 
 def make(tmp_path):
@@ -316,9 +320,25 @@ def test_setup_gives_the_radio_the_collars_key(tmp_path, monkeypatch):
         time.sleep(0.05)
     c = client.get("/api/collars").json()["!a1b2c3d4"]
     assert c["public_key"] == "S0VZMQ==" and c["locked"] and link.contacts == [("!a1b2c3d4", "S0VZMQ==")]
+    assert link.key_at_send[-1]  # and then the base talks to it, so it starts reporting
     # Reports must now carry that key.
     client.app.state.on_status("!a1b2c3d4", {"state": "LOST", "pki": True, "sender_key": "T1RIRVI="})
     assert client.get("/api/collars").json()["!a1b2c3d4"].get("key_mismatch")
+
+    # A collar the base didn't have yet: added, its key given to the radio, and only then written to.
+    monkeypatch.setattr(fw, "setup_collar", lambda job, port, base, name="", **kw: {
+        "node_id": "!0000beef", "already_locked": True, "public_key": "QkVFRg=="})
+    job = client.post("/api/firmware/setup-usb", json={"port": "/dev/ttyACM0", "name": "Biscuit"}).json()
+    for _ in range(100):
+        if client.get(f"/api/firmware/jobs/{job['id']}").json()["state"] != "running":
+            break
+        time.sleep(0.05)
+    assert client.get("/api/collars").json()["!0000beef"]["name"] == "Biscuit"
+    assert link.sent[-1][0] == "!0000beef" and link.key_at_send[-1]
+
+    # Meshtastic 2.7 says PKI_FAILED when its radio has no key for the collar: give it again, ask.
+    client.app.state.on_send_error("!0000beef", "PKI_FAILED")
+    assert "!0000beef" not in link.radio_keys and link.asked == ["!0000beef"]
 
 
 def test_a_collar_that_does_not_trust_the_base_is_not_sent_anything(tmp_path):

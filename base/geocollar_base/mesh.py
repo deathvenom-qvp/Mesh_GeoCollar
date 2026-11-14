@@ -192,7 +192,22 @@ class MeshLink:
         node = self.iface._getOrCreateByNum(num)  # noqa: SLF001
         node.setdefault("user", {})["publicKey"] = key
         log.info("gave the base radio the public key of %s from its USB setup", node_id)
+        # The radio encrypts an outgoing message as it arrives but applies admin messages a moment
+        # later, so give it time before the message that needs the key.
+        time.sleep(1.5)
         return True
+
+    def forget_key(self, node_id: str) -> None:
+        """The radio turned out not to have the collar's key: forget the library's copy, so the
+        next message gives it the key again."""
+        if not self.iface:
+            return
+        try:
+            num = int(node_id.lstrip("!"), 16)
+        except ValueError:
+            return
+        node = (getattr(self.iface, "nodesByNum", None) or {}).get(num) or {}
+        (node.get("user") or {}).pop("publicKey", None)
 
     def request_node_info(self, node_id: str) -> None:
         """Swap NodeInfo with a collar: send the base's (name and public key) and ask for its own.

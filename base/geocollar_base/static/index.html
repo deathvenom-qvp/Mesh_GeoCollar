@@ -1381,6 +1381,7 @@ function renderBeacon(c) {
   if (se && !c.sim && (!s || se.at > (s.received || 0))) {
     const why = {
       PKI_SEND_FAIL_PUBLIC_KEY: `its radio doesn't have ${c.name}'s public key yet, so it sent nothing. The base has asked the collar for it over the air; or plug the collar into the base or this computer and use "Set up only", which gives the base its key.`,
+      PKI_FAILED: `its radio doesn't have ${c.name}'s public key yet, so it sent nothing. The base has asked the collar for it over the air; or plug the collar into the base or this computer and use "Set up only", which gives the base its key.`,
       PKI_UNKNOWN_PUBKEY: `${c.name} doesn't know the base's key. The base has sent it; the next message should get through.`,
       MAX_RETRANSMIT: `${c.name} never acknowledged it. It may be off or out of range.`,
       NO_CHANNEL: `${c.name} couldn't read it: it isn't on the base's channels. Use "Set up only" to copy them to it.`,
