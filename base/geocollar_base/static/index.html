@@ -182,7 +182,13 @@
   <section>
     <div class="row spread">
       <h1>GeoCollar</h1>
-      <span class="pill" id="health">Checking radio…</span>
+      <div class="row" style="gap:8px">
+        <div class="segmented" id="unitPick" role="group" aria-label="Units">
+          <button type="button" data-u="m">m</button>
+          <button type="button" data-u="ft">ft</button>
+        </div>
+        <span class="pill" id="health">Checking radio…</span>
+      </div>
     </div>
   </section>
 
@@ -210,7 +216,7 @@
     <div class="muted" style="margin-top:6px">Import your parcel from your county's GIS or tax map site as GeoJSON, KML, or a
       shapefile (the .zip, or the .shp, .dbf and .prj files together). Click parcels on the map to select them, then make
       a keep-in zone from their outline, set back from the property line by as much as you like.
-      Tax-map lines are often 1 to 5 m off, so check them against the satellite view.</div>
+      Tax-map lines are often 1 to 5 m (3 to 16 ft) off, so check them against the satellite view.</div>
     <div class="psel" id="parcelSel" hidden>
       <div class="row spread"><b id="parcelSelTitle"></b><button class="link" id="parcelSelClear">Clear selection</button></div>
       <ul id="parcelSelList"></ul>
@@ -223,8 +229,8 @@
       </div>
       <div class="offset" id="parcelSame">
         <label class="field">Set-back
-          <input type="range" id="parcelOffsetRange" min="-10" max="30" step="0.5" value="3" aria-label="Set-back in metres"></label>
-        <label class="field">Metres <input type="number" id="parcelOffset" min="-10" max="30" step="0.5" value="3"></label>
+          <input type="range" id="parcelOffsetRange" min="-10" max="30" step="0.5" value="3" aria-label="Set-back"></label>
+        <label class="field"><span class="unitName">Metres</span> <input type="number" id="parcelOffset" min="-10" max="30" step="0.5" value="3"></label>
       </div>
       <div class="sides" id="parcelSides" hidden></div>
       <div class="muted" id="parcelOffsetNote" style="margin-top:4px"></div>
@@ -271,9 +277,7 @@
       </div>
       <div class="muted" style="margin-top:4px">While the dog stays in a band, the collar repeats its beep or vibration this often.
         Once the dog is past the line it goes quiet, and stays quiet until it is back inside and clear of every band.</div>
-      <div class="muted gpsnote"><b>GPS accuracy:</b> the collar's UC6580 receiver is rated 1.5 m (RMS) in open sky. On a dog,
-        near buildings or under trees, expect 2 to 5 m, with the odd jump of 10 m or more. Keep each band at least 3 m wide, and
-        draw the line a few metres inside anything that really matters, such as a road.</div>
+      <div class="muted gpsnote" id="gpsNote"></div>
       <div id="zones"></div>
       <ul class="notes" id="notes"></ul>
       <div class="sync" id="sync"></div>
@@ -303,7 +307,7 @@
         <label class="field wide">Speed <b id="simSpeedVal"></b>
           <input type="range" id="simSpeed" min="0.5" max="12" step="0.5"></label>
         <label class="field">Report every (s) <input type="number" id="simReport" min="1" max="600" step="1"></label>
-        <label class="field">GPS error (m) <input type="number" id="simNoise" min="0" max="30" step="0.5"></label>
+        <label class="field">GPS error (<span class="unit">m</span>) <input type="number" id="simNoise" min="0" max="30" step="0.5"></label>
         <label class="field wide row"><input type="checkbox" id="simShock"> Shock enabled on this collar</label>
       </div>
       <div class="muted" style="margin-top:6px">A real collar reports when its state changes, every 10 minutes, and every 30 s when lost. The simulator reports more often so you can watch it.</div>
@@ -437,6 +441,19 @@ const ago = secs => secs < 90 ? `${Math.round(secs)} s ago` : secs < 5400 ? `${M
   : secs < 172800 ? `${Math.round(secs / 3600)} h ago` : `${Math.round(secs / 86400)} days ago`;
 const stateLabel = s => ({ NO_FENCE: 'No fence', INSIDE: 'Inside', WARNING: 'Near the line', OUTSIDE: 'Outside', LOST: 'Lost' })[s] || 'No report yet';
 const round7 = x => Math.round(x * 1e7) / 1e7; // the collar stores degrees × 1e7
+
+// Units. Everything is stored and sent in metres (the collar's bands are whole metres); feet are
+// for display and input only. The choice is remembered per browser.
+const FT_PER_M = 3.28084;
+let units = 'm';
+try { units = localStorage.getItem('geocollar.units') || (navigator.language === 'en-US' ? 'ft' : 'm'); } catch {}
+const isFt = () => units === 'ft';
+const toUnit = m => isFt() ? m * FT_PER_M : m;
+const fromUnit = v => isFt() ? v / FT_PER_M : v;
+const unitLabel = () => isFt() ? 'ft' : 'm';
+// A distance in metres, as text in the chosen unit: feet to the nearest foot, metres to dp places.
+const len = (m, dp = 0) => isFt() ? `${Math.round(m * FT_PER_M)} ft` : `${dp ? (+m).toFixed(dp).replace(/\.0+$/, '') : Math.round(m)} m`;
+const speedText = mps => isFt() ? `${(mps * 2.23694).toFixed(1)} mph` : `${(+mps).toFixed(1)} m/s`;
 
 // ---------------------------------------------------------------------------------------------
 // Map
@@ -696,14 +713,14 @@ function checks() {
     if (n < 3) errors.push(`"${z.props.name}" needs at least 3 corners.`);
     for (const b of BANDS) {
       const m = z.props[b.key];
-      if (!Number.isInteger(m) || m < 0 || m > MAX_BAND_M) errors.push(`"${z.props.name}": the ${b.name.toLowerCase()} band must be a whole number of metres, 0 to ${MAX_BAND_M}.`);
+      if (!Number.isInteger(m) || m < 0 || m > MAX_BAND_M) errors.push(`"${z.props.name}": the ${b.name.toLowerCase()} band must be 0 to ${len(MAX_BAND_M)}.`);
     }
     const thin = BANDS.filter(b => z.props[b.key] > 0 && z.props[b.key] < GPS_MIN_BAND_M).map(b => b.name.toLowerCase());
-    if (thin.length) warnings.push(`"${z.props.name}": the ${thin.join(' and ')} band${thin.length > 1 ? 's are' : ' is'} under ${GPS_MIN_BAND_M} m, narrower than the collar's GPS error, so the dog may skip straight past ${thin.length > 1 ? 'them' : 'it'}.`);
+    if (thin.length) warnings.push(`"${z.props.name}": the ${thin.join(' and ')} band${thin.length > 1 ? 's are' : ' is'} under ${len(GPS_MIN_BAND_M)}, narrower than the collar's GPS error, so the dog may skip straight past ${thin.length > 1 ? 'them' : 'it'}.`);
     if (!z.props.warning_m && !z.props.attention_m && !z.props.danger_m) warnings.push(`"${z.props.name}" has no bands, so the collar only reacts once the dog is past the line.`);
     if (z.covers) warnings.push(`"${z.props.name}": its bands cover the whole zone, so the dog would be corrected everywhere inside it. Make the bands narrower or the zone bigger.`);
     const b = z.layer.getBounds();
-    if (b.getNorthWest().distanceTo(b.getSouthEast()) > BIG_ZONE_M) warnings.push(`"${z.props.name}" is over ${BIG_ZONE_M / 1000} km across; the collar's distance maths is most accurate for smaller zones.`);
+    if (b.getNorthWest().distanceTo(b.getSouthEast()) > BIG_ZONE_M) warnings.push(`"${z.props.name}" is over ${isFt() ? '3 miles' : `${BIG_ZONE_M / 1000} km`} across; the collar's distance maths is most accurate for smaller zones.`);
   }
   const keepIns = zones.filter(z => z.props.kind === 'keep_in');
   if (keepIns.length > 1) warnings.push('The collar requires the dog to be inside every keep-in zone at once. Unless the keep-in zones overlap, use one keep-in zone with keep-out zones inside it.');
@@ -780,9 +797,12 @@ function bandRows(z) {
       el('span', { class: off ? 'off' : '' }, el('b', {}, b.name),
         b.key === 'danger_m' && !off && shockOffOnCollar() ? ' (vibrate, shock off on collar)' : ` (${b.does})`,
         i === 0 ? el('span', { class: 'muted' }, ' at the line') : null),
-      off ? el('span', { class: 'muted' }, 'off') : el('input', { type: 'number', min: 0, max: MAX_BAND_M, step: 1, value: z.props[b.key], 'aria-label': `${b.name} band width in metres`,
-        onclick: stop, oninput: e => { z.props[b.key] = e.target.value === '' ? NaN : Number(e.target.value); renderStatusArea(); scheduleBands(); } }),
-      el('span', { class: 'muted' }, off ? '' : 'm'));
+      off ? el('span', { class: 'muted' }, 'off') : el('input', { type: 'number', min: 0, max: Math.round(toUnit(MAX_BAND_M)), step: 1,
+        value: Number.isFinite(z.props[b.key]) ? Math.round(toUnit(z.props[b.key])) : '', 'aria-label': `${b.name} band width in ${isFt() ? 'feet' : 'metres'}`,
+        // The collar takes whole metres, so feet are rounded to the nearest metre (and shown again in feet on blur).
+        onclick: stop, onchange: () => renderZones(),
+        oninput: e => { z.props[b.key] = e.target.value === '' ? NaN : Math.round(fromUnit(Number(e.target.value))); renderStatusArea(); scheduleBands(); } }),
+      el('span', { class: 'muted' }, off ? '' : unitLabel()));
   });
   return el('div', { class: 'bands' }, ...kids);
 }
@@ -874,7 +894,7 @@ function renderCollars() {
     if (s) {
       bits.push(ago(now - s.received));
       if (s.battery_pct != null && s.battery_pct !== 255) bits.push(`battery ${s.battery_pct}%`);
-      if (s.clearance_m != null && c.fence_version) bits.push(`${s.clearance_m} m ${s.clearance_m < 0 ? 'past' : 'from'} the line`);
+      if (s.clearance_m != null && c.fence_version) bits.push(`${len(Math.abs(s.clearance_m))} ${s.clearance_m < 0 ? 'past' : 'from'} the line`);
     }
     box.append(el('div', { class: 'collar' + (id === selected ? ' selected' : ''), onclick: () => select(id), role: 'button', tabindex: 0,
         onkeydown: e => { if (e.key === 'Enter') select(id); } },
@@ -943,8 +963,9 @@ function renderSim() {
   if (!sim) return;
   for (const b of $('simMode').children) b.setAttribute('aria-pressed', String(b.dataset.mode === sim.mode));
   const set = (id, v) => { if (document.activeElement !== $(id)) $(id).value = v; };
-  set('simSpeed', sim.speed_mps); set('simReport', sim.report_s); set('simNoise', sim.noise_m);
-  $('simSpeedVal').textContent = `${(+$('simSpeed').value).toFixed(1)} m/s (${speedName(+$('simSpeed').value)})`;
+  set('simSpeed', sim.speed_mps); set('simReport', sim.report_s); set('simNoise', Math.round(toUnit(sim.noise_m) * 2) / 2);
+  $('simNoise').max = Math.round(toUnit(30));
+  $('simSpeedVal').textContent = `${speedText($('simSpeed').value)} (${speedName(+$('simSpeed').value)})`;
   $('simShock').checked = sim.shock_enabled;
   const fmt = t => new Date(t * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
   $('simEvents').replaceChildren(...(sim.events.length ? sim.events.map(e => el('li', {}, el('time', {}, fmt(e.t)), el('span', { class: 'k-' + e.kind }, e.text)))
@@ -998,10 +1019,10 @@ $('simMode').addEventListener('click', e => {
 });
 $('simPlace').onclick = () => startPick('place');
 $('simTarget').onclick = () => startPick('target');
-$('simSpeed').oninput = () => { $('simSpeedVal').textContent = `${(+$('simSpeed').value).toFixed(1)} m/s (${speedName(+$('simSpeed').value)})`; };
+$('simSpeed').oninput = () => { $('simSpeedVal').textContent = `${speedText($('simSpeed').value)} (${speedName(+$('simSpeed').value)})`; };
 $('simSpeed').onchange = () => simUpdate({ speed_mps: +$('simSpeed').value });
 $('simReport').onchange = () => simUpdate({ report_s: +$('simReport').value });
-$('simNoise').onchange = () => simUpdate({ noise_m: +$('simNoise').value });
+$('simNoise').onchange = () => simUpdate({ noise_m: Math.min(30, Math.round(fromUnit(+$('simNoise').value) * 10) / 10) });
 $('simShock').onchange = () => simUpdate({ shock_enabled: $('simShock').checked });
 
 // ---------------------------------------------------------------------------------------------
@@ -1500,7 +1521,7 @@ function perimeterFrom(o, offsets) {
   if (shape.length > 1) notes.push('The set-backs split the property in two; the larger part is used.');
   const ring = largestPoly(shape)[0].slice(0, -1).map(p => L.latLng(o.fr.back(p)));
   const { ring: simple, tolerance } = simplifyRing(ring, MAX_VERTICES, 0.3); // 0.3 m: tidies sliver bumps, well under GPS error
-  if (tolerance > 0.5) notes.push(`Simplified to ${simple.length} corners, which moves the line by up to ${tolerance < 2 ? tolerance.toFixed(1) : Math.round(tolerance)} m.`);
+  if (tolerance > 0.5) notes.push(`Simplified to ${simple.length} corners, which moves the line by up to ${len(tolerance, tolerance < 2 ? 1 : 0)}.`);
   return { ring: simple, notes };
 }
 
@@ -1523,7 +1544,7 @@ function renderParcelSel() {
   for (const b of $('parcelMode').children) b.setAttribute('aria-pressed', String(b.dataset.mode === parcelMode));
   $('parcelSame').hidden = parcelMode !== 'same';
   $('parcelSides').hidden = parcelMode !== 'sides';
-  const same = Number($('parcelOffset').value) || 0;
+  const same = sameOffsetM;
   try {
     const key = sel.map(parcelKey).sort().join('|');
     if (key !== outlineKey) { outline = outlineFrom(sel); outlineKey = key; sideOffsets = outline.sides.map(() => same); }
@@ -1536,8 +1557,8 @@ function renderParcelSel() {
       outline.sides.forEach((sd, i) => L.marker(sd.mid, { pane: 'parcels', interactive: false, keyboard: false, pmIgnore: true, snapIgnore: true,
         icon: L.divIcon({ className: '', iconSize: [22, 22], iconAnchor: [11, 11], html: `<div class="sidetag">${i + 1}</div>` }) }).addTo(perimeterLayer));
     const lead = parcelMode === 'sides' ? 'The dotted green line is the perimeter, each side set back as listed.'
-      : same > 0 ? `The dotted green line is the perimeter, ${same} m inside the property line.`
-      : same < 0 ? `The dotted green line is the perimeter, ${-same} m outside the property line.`
+      : same > 0 ? `The dotted green line is the perimeter, ${len(same, 1)} inside the property line.`
+      : same < 0 ? `The dotted green line is the perimeter, ${len(-same, 1)} outside the property line.`
       : 'The dotted green line is the perimeter, on the property line.';
     $('parcelOffsetNote').textContent = [lead, 'The zone\'s bands sit inside it. Negative set-backs go outside the line.', ...perimeter.notes].join(' ');
   } catch (e) {
@@ -1550,9 +1571,10 @@ function renderSides() {
   if (box.childElementCount === outline.sides.length * 3 && box.contains(document.activeElement)) return; // don't steal focus while typing
   box.replaceChildren(...outline.sides.flatMap((sd, i) => [
     el('div', { class: 'sidetag' }, String(i + 1)),
-    el('span', {}, `${sd.dir[0].toUpperCase()}${sd.dir.slice(1)} side`, el('span', { class: 'muted' }, ` · ${Math.round(sd.len)} m`)),
-    el('input', { type: 'number', min: -10, max: 30, step: 0.5, value: sideOffsets[i], 'aria-label': `Set-back for side ${i + 1} in metres`,
-      oninput: e => { sideOffsets[i] = Number(e.target.value) || 0; schedulePerimeter(); } }),
+    el('span', {}, `${sd.dir[0].toUpperCase()}${sd.dir.slice(1)} side`, el('span', { class: 'muted' }, ` · ${len(sd.len)}`)),
+    el('input', { type: 'number', min: Math.round(toUnit(-10)), max: Math.round(toUnit(30)), step: isFt() ? 1 : 0.5, value: offsetText(sideOffsets[i]),
+      'aria-label': `Set-back for side ${i + 1} in ${isFt() ? 'feet' : 'metres'}`,
+      oninput: e => { sideOffsets[i] = fromUnit(Number(e.target.value) || 0); schedulePerimeter(); } }),
   ]));
 }
 function schedulePerimeter() { clearTimeout(perimeterTimer); perimeterTimer = setTimeout(renderParcelSel, 150); }
@@ -1561,9 +1583,18 @@ function updateParcelMake() {
   $('parcelMake').disabled = !perimeter || !c || zones.length >= MAX_ZONES;
   $('parcelMake').textContent = !c ? 'Select a collar first' : zones.length >= MAX_ZONES ? `${c.name} already has ${MAX_ZONES} zones` : `Make keep-in zone for ${c.name}`;
 }
+let sameOffsetM = 3;
+const offsetText = m => isFt() ? Math.round(m * FT_PER_M) : Math.round(m * 2) / 2;
 function setOffset(v) {
   $('parcelOffset').value = v; $('parcelOffsetRange').value = v;
+  sameOffsetM = fromUnit(Number(v) || 0);
   schedulePerimeter();
+}
+function setOffsetInputs() {
+  for (const id of ['parcelOffset', 'parcelOffsetRange']) {
+    $(id).min = Math.round(toUnit(-10)); $(id).max = Math.round(toUnit(30)); $(id).step = isFt() ? 1 : 0.5;
+    $(id).value = offsetText(sameOffsetM);
+  }
 }
 $('parcelOffset').oninput = () => setOffset($('parcelOffset').value);
 $('parcelOffsetRange').oninput = () => setOffset($('parcelOffsetRange').value);
@@ -1572,7 +1603,7 @@ $('parcelMode').onclick = e => {
   if (!b || b.dataset.mode === parcelMode) return;
   parcelMode = b.dataset.mode;
   // Switching to per-side starts every side at the single set-back.
-  if (parcelMode === 'sides' && outline) sideOffsets = outline.sides.map(() => Number($('parcelOffset').value) || 0);
+  if (parcelMode === 'sides' && outline) sideOffsets = outline.sides.map(() => sameOffsetM);
   $('parcelSides').replaceChildren();
   renderParcelSel();
 };
@@ -1686,6 +1717,37 @@ $('parcelClear').onclick = async () => {
   try { await saveParcels({ type: 'FeatureCollection', features: [] }); } catch (e) { parcelSay(e.message); }
 };
 loadParcels();
+
+function renderGpsNote() {
+  $('gpsNote').replaceChildren(el('b', {}, 'GPS accuracy:'), ` the collar's UC6580 receiver is rated ${len(1.5, 1)} (RMS) in open sky. On a dog,
+    near buildings or under trees, expect ${isFt() ? '7 to 16 ft' : '2 to 5 m'}, with the odd jump of ${len(10)} or more. Keep each band at least
+    ${len(GPS_MIN_BAND_M)} wide, and draw the line a few ${isFt() ? 'yards' : 'metres'} inside anything that really matters, such as a road.`,
+    isFt() ? ' Band widths are kept in whole metres, so feet round to the nearest 3 ft.' : '');
+}
+function applyUnits() {
+  for (const b of $('unitPick').children) b.setAttribute('aria-pressed', String(b.dataset.u === units));
+  document.querySelectorAll('.unit').forEach(e => { e.textContent = unitLabel(); });
+  document.querySelectorAll('.unitName').forEach(e => { e.textContent = isFt() ? 'Feet' : 'Metres'; });
+  renderGpsNote();
+  setOffsetInputs();
+  $('parcelSides').replaceChildren();
+  renderZones();
+  if (parcelSelected.size) renderParcelSel();
+  renderSelected();
+  renderCollars();
+}
+$('unitPick').onclick = e => {
+  const b = e.target.closest('button');
+  if (!b || b.dataset.u === units) return;
+  units = b.dataset.u;
+  try { localStorage.setItem('geocollar.units', units); } catch {}
+  applyUnits();
+};
+renderGpsNote();
+setOffsetInputs();
+for (const b of $('unitPick').children) b.setAttribute('aria-pressed', String(b.dataset.u === units));
+document.querySelectorAll('.unit').forEach(e => { e.textContent = unitLabel(); });
+document.querySelectorAll('.unitName').forEach(e => { e.textContent = isFt() ? 'Feet' : 'Metres'; });
 
 window.addEventListener('beforeunload', e => { if (isDirty() || Object.keys(drafts).length) { e.preventDefault(); e.returnValue = ''; } });
 

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.8.1
+
+- Metres / feet toggle at the top of the page, remembered per browser (feet by default in the
+  US). Covers band widths, set-backs, side lengths, distances from the line, GPS notes and the
+  simulator. The collar still works in whole metres, so band widths in feet round to the
+  nearest metre.
+
 ## 0.8.0
 
 - Property lines: click parcels to select one or more (neighbouring lots merge into one
