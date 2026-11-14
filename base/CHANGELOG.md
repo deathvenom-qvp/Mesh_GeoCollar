@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.0
+
+- Each zone now has three bands inside its line: danger (shock), warning (vibrate) and attention
+  (beep), each with its own width. The danger band can be turned off per zone, so that zone never
+  shocks. The map shades each band in its own colour.
+- Needs collar firmware with protocol v2; older collars ignore the new messages. Fences saved
+  before this version are converted (their warning distance becomes warning + attention).
+- GPS accuracy note and checks for bands narrower than the GPS error or covering the whole zone.
+
 ## 0.3.0
 
 - Simulated collars for trying fences without hardware: place one on the map, let it stay,

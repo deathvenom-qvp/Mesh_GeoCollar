@@ -10,11 +10,12 @@ from enum import IntEnum
 from typing import Iterable
 
 PORT_NUM = 300
-VERSION = 1
+VERSION = 2  # 2: zones carry danger / warning / attention band widths
 MAX_CHUNK_DATA = 180
 MAX_ZONES = 4
 MAX_VERTICES = 32
 MAX_CHUNKS = 8
+MAX_BAND_M = 255  # each band width is one byte on the wire
 
 
 class MsgType(IntEnum):
@@ -50,9 +51,18 @@ class ZoneKind(IntEnum):
 
 @dataclass
 class Zone:
+    """A fence polygon. The line is the outer edge of its bands, which run from the line into
+    the allowed side: danger (shock; 0 = none), then warning (vibrate), then attention (beep)."""
+
     kind: ZoneKind
-    warn_margin_m: int
+    danger_m: int
+    warning_m: int
+    attention_m: int
     vertices: list[tuple[float, float]]  # (lat, lon) in degrees
+
+    @property
+    def band_width_m(self) -> int:
+        return self.danger_m + self.warning_m + self.attention_m
 
 
 @dataclass
@@ -129,7 +139,10 @@ def encode_fence_set(zones: Iterable[Zone]) -> bytes:
     for z in zones:
         if not 3 <= len(z.vertices) <= MAX_VERTICES:
             raise ValueError(f"a zone needs 3..{MAX_VERTICES} vertices")
-        out += struct.pack("<BBH", z.kind, len(z.vertices), z.warn_margin_m)
+        for w in (z.danger_m, z.warning_m, z.attention_m):
+            if not 0 <= w <= MAX_BAND_M:
+                raise ValueError(f"band widths must be 0..{MAX_BAND_M} m")
+        out += struct.pack("<BBBBBB", z.kind, len(z.vertices), z.danger_m, z.warning_m, z.attention_m, 0)
         for lat, lon in z.vertices:
             out += struct.pack("<ii", _to_i(lat), _to_i(lon))
     return bytes(out)
@@ -151,8 +164,10 @@ def fence_chunks(zones: Iterable[Zone], fence_version: int) -> list[bytes]:
 def zones_from_geojson(geojson: dict) -> list[Zone]:
     """Accept a FeatureCollection (or one Feature) of Polygons.
 
-    Feature properties: kind = "keep_in" (default) or "keep_out"; warn_margin_m (default 10);
-    any others (such as the web page's zone name) are kept by the store but not sent.
+    Feature properties: kind = "keep_in" (default) or "keep_out"; danger_m (default 0, no danger
+    band), warning_m (default 5), attention_m (default 5), in metres. Fences saved before bands
+    existed carry warn_margin_m instead, which becomes warning + attention as the old firmware
+    split it. Other properties (such as the page's zone name) are kept but not sent.
     GeoJSON uses [lon, lat]; the closing vertex is dropped.
     """
     features = geojson["features"] if geojson.get("type") == "FeatureCollection" else [geojson]
@@ -172,8 +187,17 @@ def zones_from_geojson(geojson: dict) -> list[Zone]:
         if kind_name not in ("keep_in", "keep_out"):
             raise ValueError(f"unknown zone kind {kind_name!r}")
         kind = ZoneKind.KEEP_OUT if kind_name == "keep_out" else ZoneKind.KEEP_IN
-        margin = props.get("warn_margin_m", 10)
-        if isinstance(margin, bool) or not isinstance(margin, (int, float)) or not 0 <= margin <= 0xFFFF:
-            raise ValueError("warn_margin_m must be 0..65535")
-        zones.append(Zone(kind, int(margin), [(lat, lon) for lon, lat in ring]))
+        if "warn_margin_m" in props and not any(k in props for k in ("danger_m", "warning_m", "attention_m")):
+            old = _band(props, "warn_margin_m", 10)
+            bands = (0, old // 2, old - old // 2)
+        else:
+            bands = (_band(props, "danger_m", 0), _band(props, "warning_m", 5), _band(props, "attention_m", 5))
+        zones.append(Zone(kind, *bands, [(lat, lon) for lon, lat in ring]))
     return zones
+
+
+def _band(props: dict, key: str, default: int) -> int:
+    v = props.get(key, default)
+    if isinstance(v, bool) or not isinstance(v, (int, float)) or not 0 <= v <= MAX_BAND_M or v != int(v):
+        raise ValueError(f"{key} must be a whole number of metres, 0..{MAX_BAND_M}")
+    return int(v)

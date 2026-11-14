@@ -39,7 +39,7 @@ namespace
 
 constexpr const char *kStateFile = "/prefs/geocollar.bin";
 constexpr uint32_t kStateMagic = 0x47434F4C; // "GCOL"
-constexpr uint16_t kStateFormat = 2; // 2: Settings gained the GPS pacing fields
+constexpr uint16_t kStateFormat = 3; // 2: Settings gained the GPS pacing fields; 3: per-zone bands
 
 /// Sends CaiXianLin frames on the data-line GPIO without blocking the Meshtastic scheduler:
 /// one frame per call to poll(), each started asynchronously on the RMT peripheral.
@@ -228,7 +228,7 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
         if (current != lastPacedSecs_)
             ownerGpsSecs_ = current;
         const uint32_t want =
-            gpsIntervalSecs(engine_.settings(), engine_.state(), lastClearance_, warnMarginM(engine_.fences()));
+            gpsIntervalSecs(engine_.settings(), engine_.state(), lastClearance_, alertWidthM(engine_.fences()));
         const uint32_t target = want ? want : ownerGpsSecs_;
         if (current != target) {
             LOG_DEBUG("GeoCollar: GPS interval %us -> %us", (unsigned)current, (unsigned)target);

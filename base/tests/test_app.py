@@ -10,7 +10,7 @@ FENCE = {
     "features": [
         {
             "type": "Feature",
-            "properties": {"kind": "keep_in", "warn_margin_m": 10},
+            "properties": {"kind": "keep_in", "danger_m": 0, "warning_m": 5, "attention_m": 5},
             "geometry": {
                 "type": "Polygon",
                 "coordinates": [[[-75.0, 40.0], [-74.998, 40.0], [-74.998, 40.002], [-75.0, 40.002], [-75.0, 40.0]]],
@@ -50,14 +50,14 @@ def test_collar_fence_and_command_flow(tmp_path):
 
     r = client.put("/api/collars/!a1b2c3d4/fences", json=FENCE)
     assert r.status_code == 200 and r.json() == {"fence_version": 1, "chunks_sent": 1}
-    assert link.sent[0][1][:2] == b"\x01\x01"
+    assert link.sent[0][1][:2] == b"\x02\x01"
 
     r = client.put("/api/collars/!a1b2c3d4/fences", json=FENCE)
     assert r.json()["fence_version"] == 2
 
     r = client.post("/api/collars/!a1b2c3d4/command", json={"action": "vibrate", "intensity": 40, "duration_ms": 1500})
     assert r.status_code == 200
-    assert link.sent[-1] == ("!a1b2c3d4", bytes.fromhex("01040228dc05"))
+    assert link.sent[-1] == ("!a1b2c3d4", bytes.fromhex("02040228dc05"))
 
     assert client.post("/api/collars/!a1b2c3d4/command", json={"action": "explode"}).status_code == 400
     assert client.put("/api/collars/!nope/fences", json=FENCE).status_code == 404
@@ -99,7 +99,7 @@ def test_fence_properties_validated(tmp_path):
     assert r.status_code == 200
     assert client.get("/api/collars").json()["!a1b2c3d4"]["fences"]["features"][0]["properties"]["name"] == "Yard"
 
-    for bad in ({"kind": "keep_near"}, {"warn_margin_m": -1}, {"warn_margin_m": 70000}, {"warn_margin_m": None}):
+    for bad in ({"kind": "keep_near"}, {"danger_m": -1}, {"warning_m": 300}, {"attention_m": None}):
         assert client.put("/api/collars/!a1b2c3d4/fences", json=with_props(**bad)).status_code == 400, bad
 
     # An empty set clears the collar's fences.

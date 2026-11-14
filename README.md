@@ -26,18 +26,26 @@ a Home Assistant app, manages fences and collars and shows where each dog is.
  └────────────────────────────────────┘
 ```
 
+The line you draw is the outer edge of three bands inside it, each with its own width:
+
+| Band (from the line inwards) | Collar does |
+| --- | --- |
+| Attention (innermost) | Beep. |
+| Warning | Vibrate. |
+| Danger (next to the line, optional) | Shock, only if shock is enabled on the collar, capped per breach and per hour; otherwise vibrate. Turn the danger band off and the zone never shocks. |
+
 | State | Collar does |
 | --- | --- |
-| Inside | Nothing; reports status every 10 minutes. |
-| Warning (inside, within the zone's margin) | Beep, then vibrate when under half the margin. |
-| Outside (not yet confirmed) | Vibrate; shock only if the owner enabled it, capped per breach and per hour. |
+| Inside, clear of every band | Nothing; reports status every 10 minutes. |
+| Warning (inside, in any band) | The band's correction, above. |
+| Outside (not yet confirmed) | Keeps correcting: shock only if the zone has a danger band and shock is enabled; otherwise vibrate. |
 | Lost (3 good fixes outside) | **Stops all corrections**, sends a breach alert, reports position every 30 s. |
 | Back inside by 5 m for 3 fixes | Re-arms. |
 
 Fixes with poor PDOP or few satellites are ignored entirely.
 
 The collar also paces its own GPS: every 5 s near the line, slowing to once a minute deep inside
-(the time a running dog would need to reach the warning margin), and every 15 s while lost.
+(the time a running dog would need to reach the outermost band), and every 15 s while lost.
 
 ## Repository layout
 
@@ -98,7 +106,8 @@ the collar by node ID in the app, draw keep-in and keep-out zones on the map, an
 The map starts on satellite imagery so you can trace the yard. Each collar holds up to 4 zones of
 up to 32 corners. Draw one keep-in zone around the yard and keep-out zones inside it (a pond, a
 flower bed): the collar requires the dog to be inside *every* keep-in zone, so two separate
-keep-in zones would never both be satisfied. Click a zone to drag its corners, then press **Send
+keep-in zones would never both be satisfied. Each zone shows its danger, warning and attention
+bands in their own colours, so you can see where each correction starts. Click a zone to drag its corners, then press **Send
 to collar**; the page shows when the collar reports the new fence version. It warns before you
 send fences that the dog's last position already breaks. The map libraries are bundled, so only
 the map tiles need internet.

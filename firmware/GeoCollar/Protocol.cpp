@@ -174,8 +174,8 @@ bool decodeFenceChunk(const uint8_t *buf, size_t len, FenceChunk &c)
     return c.length <= kMaxChunkData;
 }
 
-// Fence set blob: u8 zoneCount, then per zone: u8 kind, u8 vertexCount, u16 warnMarginM,
-// then vertexCount pairs of (i32 latI, i32 lonI).
+// Fence set blob: u8 zoneCount, then per zone: u8 kind, u8 vertexCount, u8 dangerM, u8 warningM,
+// u8 attentionM, u8 reserved (0), then vertexCount pairs of (i32 latI, i32 lonI).
 size_t encodeFenceSet(uint8_t *out, size_t cap, const FenceSet &f)
 {
     Writer w{out, cap};
@@ -184,7 +184,10 @@ size_t encodeFenceSet(uint8_t *out, size_t cap, const FenceSet &f)
         const Zone &z = f.zones[i];
         w.u8(static_cast<uint8_t>(z.kind));
         w.u8(z.vertexCount);
-        w.u16(z.warnMarginM);
+        w.u8(z.dangerM);
+        w.u8(z.warningM);
+        w.u8(z.attentionM);
+        w.u8(0);
         for (size_t v = 0; v < z.vertexCount && v < kMaxVertices; v++) {
             w.u32(static_cast<uint32_t>(z.latI[v]));
             w.u32(static_cast<uint32_t>(z.lonI[v]));
@@ -208,7 +211,10 @@ bool decodeFenceSet(const uint8_t *buf, size_t len, uint16_t version, FenceSet &
             return false;
         z.kind = static_cast<ZoneKind>(kind);
         z.vertexCount = r.u8();
-        z.warnMarginM = r.u16();
+        z.dangerM = r.u8();
+        z.warningM = r.u8();
+        z.attentionM = r.u8();
+        r.u8(); // reserved
         if (!r.ok || z.vertexCount < 3 || z.vertexCount > kMaxVertices)
             return false;
         for (size_t v = 0; v < z.vertexCount; v++) {

@@ -83,14 +83,28 @@ float clearanceM(const FenceSet &fences, int32_t latI, int32_t lonI)
     return best;
 }
 
-uint16_t warnMarginM(const FenceSet &fences)
+uint16_t alertWidthM(const FenceSet &fences)
 {
     uint16_t m = 0;
     for (size_t i = 0; i < fences.zoneCount && i < kMaxZones; i++) {
-        if (i == 0 || fences.zones[i].warnMarginM < m)
-            m = fences.zones[i].warnMarginM;
+        const uint16_t w = bandWidthM(fences.zones[i]);
+        if (w > m)
+            m = w;
     }
     return m;
+}
+
+Band bandFor(const Zone &z, float d)
+{
+    if (d < 0)
+        return Band::Outside;
+    if (d < z.dangerM)
+        return Band::Danger;
+    if (d < (float)z.dangerM + z.warningM)
+        return Band::Warning;
+    if (d < (float)bandWidthM(z))
+        return Band::Attention;
+    return Band::Clear;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -160,7 +174,21 @@ Decision FenceEngine::onFix(const Fix &fix)
         return d;
     }
 
-    const float c = clearanceM(fences_, fix.latI, fix.lonI);
+    // Every zone has its own bands; the most severe band over all zones decides.
+    float c = 1e9f;
+    Band band = Band::Clear;
+    bool shockBand = false; // outside or in danger of a zone that has a danger band
+    for (size_t i = 0; i < fences_.zoneCount && i < kMaxZones; i++) {
+        const Zone &z = fences_.zones[i];
+        const float zd = signedDistanceM(z, fix.latI, fix.lonI);
+        if (zd < c)
+            c = zd;
+        const Band b = bandFor(z, zd);
+        if (b > band)
+            band = b;
+        if ((b == Band::Danger || b == Band::Outside) && z.dangerM > 0)
+            shockBand = true;
+    }
     d.clearanceM = c;
 
     // Lost: never correct; just watch for the dog coming back well inside.
@@ -178,25 +206,25 @@ Decision FenceEngine::onFix(const Fix &fix)
         return d;
     }
 
-    const float margin = warnMarginM(fences_);
-
-    if (c >= margin) {
+    if (band == Band::Clear) {
         outsideCount_ = 0;
         shocksThisBreach_ = 0;
         setState(CollarState::Inside, d);
         return d;
     }
 
-    if (c >= 0) {
-        // Inside, but close to the line: warn, harder the closer it gets.
+    if (band != Band::Outside) {
+        // Inside, in a band: beep, then vibrate, then (danger band) shock.
         outsideCount_ = 0;
         setState(CollarState::Warning, d);
         if (settings_.correctionsEnabled) {
-            if (c < margin / 2) {
+            if (band == Band::Attention) {
+                d.correction = Correction::Beep;
+            } else if (band == Band::Danger && shockBand) {
+                correctHard(d, fix.nowMs);
+            } else {
                 d.correction = Correction::Vibrate;
                 d.intensity = settings_.vibrateLevel;
-            } else {
-                d.correction = Correction::Beep;
             }
         }
         return d;
@@ -213,12 +241,23 @@ Decision FenceEngine::onFix(const Fix &fix)
     setState(CollarState::Outside, d);
     if (!settings_.correctionsEnabled)
         return d;
+    if (shockBand) {
+        correctHard(d, fix.nowMs);
+    } else {
+        // The crossed zone has no danger band: never shock for it.
+        d.correction = Correction::Vibrate;
+        d.intensity = settings_.vibrateLevel;
+    }
+    return d;
+}
 
-    if (shockAllowed(fix.nowMs)) {
+void FenceEngine::correctHard(Decision &d, uint32_t nowMs)
+{
+    if (shockAllowed(nowMs)) {
         d.correction = Correction::Shock;
         d.intensity = settings_.shockLevel < settings_.maxShockLevel ? settings_.shockLevel : settings_.maxShockLevel;
         shocksThisBreach_++;
-        shockTimes_[shockHead_] = fix.nowMs;
+        shockTimes_[shockHead_] = nowMs;
         shockHead_ = (shockHead_ + 1) % kShockHistory;
         if (shockCount_ < kShockHistory)
             shockCount_++;
@@ -226,10 +265,9 @@ Decision FenceEngine::onFix(const Fix &fix)
         d.correction = Correction::Vibrate;
         d.intensity = settings_.vibrateLevel;
     }
-    return d;
 }
 
-uint32_t gpsIntervalSecs(const Settings &s, CollarState state, float clearanceM, uint16_t warnMarginM)
+uint32_t gpsIntervalSecs(const Settings &s, CollarState state, float clearanceM, uint16_t alertWidthM)
 {
     if (!s.gpsPacing || state == CollarState::NoFence)
         return 0;
@@ -244,7 +282,7 @@ uint32_t gpsIntervalSecs(const Settings &s, CollarState state, float clearanceM,
     default:
         break;
     }
-    const float room = clearanceM - (float)warnMarginM;
+    const float room = clearanceM - (float)alertWidthM;
     if (!(room > 0) || s.dogSpeedMps == 0)
         return fast;
     const float secs = room / (float)s.dogSpeedMps;

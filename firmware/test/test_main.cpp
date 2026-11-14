@@ -72,11 +72,13 @@ static void testCaiXianLin()
 // --------------------------------------------------------------------------------------------
 
 // A square keep-in zone about 222 m on a side, near 40.0N 75.0W.
-static Zone square(ZoneKind kind = ZoneKind::KeepIn, uint16_t margin = 10)
+static Zone square(ZoneKind kind = ZoneKind::KeepIn, uint8_t danger = 0, uint8_t warning = 5, uint8_t attention = 5)
 {
     Zone z;
     z.kind = kind;
-    z.warnMarginM = margin;
+    z.dangerM = danger;
+    z.warningM = warning;
+    z.attentionM = attention;
     z.vertexCount = 4;
     const int32_t lat0 = 400000000, lon0 = -750000000, d = 20000; // 0.002 degrees
     z.latI[0] = lat0;
@@ -146,7 +148,7 @@ static void testStateMachine()
     FenceSet f;
     f.version = 7;
     f.zoneCount = 1;
-    f.zones[0] = square(ZoneKind::KeepIn, 10);
+    f.zones[0] = square(ZoneKind::KeepIn, 0, 5, 5); // no danger band: 5 m vibrate, 5 m beep
     e.setFences(f);
     CHECK(e.state() == CollarState::Inside);
 
@@ -155,11 +157,11 @@ static void testStateMachine()
     Decision d = e.onFix(fixAt(100, 100, t += 1000));
     CHECK(d.correction == Correction::None && e.state() == CollarState::Inside);
 
-    // 8 m from the line, margin 10: beep.
+    // 8 m from the line: attention band, beep.
     d = e.onFix(fixAt(8, 100, t += 1000));
     CHECK(d.correction == Correction::Beep && e.state() == CollarState::Warning && d.sendStatus);
 
-    // 3 m from the line (under half the margin): vibrate.
+    // 3 m from the line: warning band, vibrate.
     d = e.onFix(fixAt(3, 100, t += 1000));
     CHECK(d.correction == Correction::Vibrate);
 
@@ -212,7 +214,7 @@ static void testShockCaps()
     FenceEngine e;
     FenceSet f;
     f.zoneCount = 1;
-    f.zones[0] = square();
+    f.zones[0] = square(ZoneKind::KeepIn, 3, 5, 5); // with a 3 m danger band
     e.setFences(f);
     Settings &s = e.settings();
     s.shockEnabled = true;
@@ -250,6 +252,56 @@ static void testShockCaps()
     CHECK(d.correction == Correction::None);
 }
 
+static void testBands()
+{
+    FenceEngine e;
+    e.settings().shockEnabled = true;
+    e.settings().lostConfirmFixes = 10;
+    FenceSet f;
+    f.zoneCount = 1;
+    f.zones[0] = square(ZoneKind::KeepIn, 3, 4, 6); // shock 0-3 m, vibrate 3-7 m, beep 7-13 m
+    e.setFences(f);
+    uint32_t t = 0;
+    CHECK(e.onFix(fixAt(20, 100, t += 1000)).correction == Correction::None);
+    CHECK(e.onFix(fixAt(10, 100, t += 1000)).correction == Correction::Beep);
+    CHECK(e.onFix(fixAt(5, 100, t += 1000)).correction == Correction::Vibrate);
+    Decision d = e.onFix(fixAt(1.5, 100, t += 1000));
+    CHECK(d.correction == Correction::Shock && e.state() == CollarState::Warning); // danger band, still inside
+    CHECK(bandFor(f.zones[0], 12.9f) == Band::Attention && bandFor(f.zones[0], 13.1f) == Band::Clear);
+    CHECK(bandFor(f.zones[0], -0.1f) == Band::Outside && bandFor(f.zones[0], 2.9f) == Band::Danger);
+    CHECK(alertWidthM(f) == 13);
+
+    // Danger band off: the zone never shocks, even outside and with shock enabled on the collar.
+    FenceEngine soft;
+    soft.settings().shockEnabled = true;
+    soft.settings().lostConfirmFixes = 10;
+    f.zones[0] = square(ZoneKind::KeepIn, 0, 4, 6);
+    soft.setFences(f);
+    CHECK(soft.onFix(fixAt(1, 100, t += 1000)).correction == Correction::Vibrate);
+    CHECK(soft.onFix(fixAt(-3, 100, t += 1000)).correction == Correction::Vibrate);
+
+    // Shock disabled on the collar: a danger band vibrates instead.
+    FenceEngine off;
+    f.zones[0] = square(ZoneKind::KeepIn, 3, 4, 6);
+    off.setFences(f);
+    CHECK(off.onFix(fixAt(1, 100, t += 1000)).correction == Correction::Vibrate);
+
+    // Several zones: the most severe band wins. A keep-out pond's bands lie outside the pond.
+    FenceEngine two;
+    FenceSet g;
+    g.zoneCount = 2;
+    g.zones[0] = square(ZoneKind::KeepIn, 0, 5, 5);
+    g.zones[1] = square(ZoneKind::KeepOut, 0, 5, 5);
+    for (int i = 0; i < 4; i++) { // shrink the pond to the middle: 80..140 m north, 60..110 m east
+        g.zones[1].latI[i] = latAt(i < 2 ? 80 : 140);
+        g.zones[1].lonI[i] = lonAt(i == 0 || i == 3 ? 60 : 110);
+    }
+    two.setFences(g);
+    CHECK(two.onFix(fixAt(110, 30, t += 1000)).correction == Correction::None); // 30 m from both
+    CHECK(two.onFix(fixAt(110, 52, t += 1000)).correction == Correction::Beep);  // 8 m from the pond
+    CHECK(two.onFix(fixAt(110, 57, t += 1000)).correction == Correction::Vibrate);
+}
+
 // --------------------------------------------------------------------------------------------
 // Protocol
 // --------------------------------------------------------------------------------------------
@@ -262,14 +314,14 @@ static void testProtocol()
     // Golden vectors, shared with base/tests/test_protocol.py.
     Command c{CommandAction::Vibrate, 40, 1500};
     size_t n = encodeCommand(buf, sizeof(buf), c);
-    CHECK(hex(buf, n) == "01040228dc05");
+    CHECK(hex(buf, n) == "02040228dc05");
     Command c2{};
     CHECK(decodeCommand(buf, n, c2) && c2.action == CommandAction::Vibrate && c2.intensity == 40 && c2.durationMs == 1500);
 
     StatusReport s{3, 4, 87, 400001234, -750004321, 180, 9, -12, 1};
     n = encodeStatus(buf, sizeof(buf), MsgType::Breach, s);
     CHECK(n == kStatusLength);
-    CHECK(hex(buf, n) == "010303000457d288d7179fd74bd3b40009f4ff01");
+    CHECK(hex(buf, n) == "020303000457d288d7179fd74bd3b40009f4ff01");
     StatusReport s2{};
     CHECK(decodeStatus(buf, n, s2) && s2.latI == 400001234 && s2.lonI == -750004321 && s2.clearanceM == -12 &&
           s2.state == 4);
@@ -279,8 +331,8 @@ static void testProtocol()
     // Fence set round trip, chunked and reassembled out of order.
     FenceSet f;
     f.zoneCount = 2;
-    f.zones[0] = square(ZoneKind::KeepIn, 12);
-    f.zones[1] = square(ZoneKind::KeepOut, 5);
+    f.zones[0] = square(ZoneKind::KeepIn, 2, 4, 6);
+    f.zones[1] = square(ZoneKind::KeepOut, 0, 5, 5);
     f.zones[1].vertexCount = 32; // make it big enough to need several chunks
     for (int i = 4; i < 32; i++) {
         f.zones[1].latI[i] = 400000000 + i * 100;
@@ -288,7 +340,7 @@ static void testProtocol()
     }
     uint8_t blob[kMaxFenceBlob];
     const size_t blobLen = encodeFenceSet(blob, sizeof(blob), f);
-    CHECK(blobLen == 1 + (4 + 4 * 8) + (4 + 32 * 8));
+    CHECK(blobLen == 1 + (6 + 4 * 8) + (6 + 32 * 8));
 
     const uint8_t count = (blobLen + kMaxChunkData - 1) / kMaxChunkData;
     CHECK(count == 2);
@@ -305,15 +357,15 @@ static void testProtocol()
     CHECK(complete && a.version() == 9 && a.length() == blobLen);
     FenceSet g;
     CHECK(decodeFenceSet(a.data(), a.length(), a.version(), g));
-    CHECK(g.version == 9 && g.zoneCount == 2 && g.zones[0].warnMarginM == 12 && g.zones[1].kind == ZoneKind::KeepOut &&
+    CHECK(g.version == 9 && g.zoneCount == 2 && g.zones[0].dangerM == 2 && g.zones[0].warningM == 4 && g.zones[0].attentionM == 6 && g.zones[1].kind == ZoneKind::KeepOut &&
           g.zones[1].vertexCount == 32 && g.zones[1].lonI[31] == -750000000 + 3100);
 
     // Golden fence blob for one small zone, shared with the Python tests.
     FenceSet one;
     one.zoneCount = 1;
-    one.zones[0] = square(ZoneKind::KeepIn, 10);
+    one.zones[0] = square(ZoneKind::KeepIn, 3, 5, 7);
     n = encodeFenceSet(buf, sizeof(buf), one);
-    CHECK(hex(buf, n) == "01" "00" "04" "0a00"  // 1 zone: keep-in, 4 vertices, 10 m margin
+    CHECK(hex(buf, n) == "01" "00" "04" "03" "05" "07" "00" // 1 zone: keep-in, 4 vertices, bands 3/5/7 m
                          "0084d717" "80e84bd3" // 40.0000000, -75.0000000
                          "0084d717" "a0364cd3" // 40.0000000, -74.9980000
                          "20d2d717" "a0364cd3" // 40.0020000, -74.9980000
@@ -323,7 +375,7 @@ static void testProtocol()
     CHECK(!decodeFenceSet(buf, n - 1, 1, g)); // truncated
     buf[0] = 9;
     CHECK(!decodeFenceSet(buf, n, 1, g)); // too many zones
-    const uint8_t junk[] = {2, 4, 0, 0};
+    const uint8_t junk[] = {1, 4, 0, 0}; // version 1 had a different fence format
     CHECK(!messageType(junk, sizeof(junk), type)); // wrong protocol version
 }
 
@@ -333,6 +385,7 @@ int main()
     testGeometry();
     testStateMachine();
     testShockCaps();
+    testBands();
     testGpsPacing();
     testProtocol();
     std::printf("%d checks, %d failures\n", checks, failures);

@@ -3,7 +3,7 @@
 
 A simulated collar moves on its own (stays put, wanders, or walks to a point), and checks each
 position against its fences with a Python copy of the collar firmware's rules
-(firmware/GeoCollar/Fence.cpp): the same clearance maths, warning margin, Outside -> Lost after
+(firmware/GeoCollar/Fence.cpp): the same clearance maths, danger / warning / attention bands, Outside -> Lost after
 3 fixes, re-arming after 3 fixes 5 m back inside, and beep / vibrate / shock choices. It reports
 to the base like a real collar would, minus the radio.
 """
@@ -66,6 +66,22 @@ def clearance_m(zones: list[protocol.Zone], lat: float, lon: float) -> float:
     return min((signed_distance_m(z, lat, lon) for z in zones), default=1e9)
 
 
+# Bands, from quiet to outside (firmware: enum class Band).
+CLEAR, ATTENTION, WARNING, DANGER, OUTSIDE = range(5)
+
+
+def band_for(zone: protocol.Zone, d: float) -> int:
+    if d < 0:
+        return OUTSIDE
+    if d < zone.danger_m:
+        return DANGER
+    if d < zone.danger_m + zone.warning_m:
+        return WARNING
+    if d < zone.band_width_m:
+        return ATTENTION
+    return CLEAR
+
+
 @dataclass
 class EngineSettings:
     corrections_enabled: bool = True
@@ -113,9 +129,6 @@ class FenceEngine:
             self.state = protocol.CollarState.INSIDE if self.zones else protocol.CollarState.NO_FENCE
         self._outside = self._rearm = self._shocks_this_breach = 0
 
-    def warn_margin_m(self) -> int:
-        return min((z.warn_margin_m for z in self.zones), default=0)
-
     def _set_state(self, s: protocol.CollarState, d: Decision) -> None:
         if s != self.state:
             self.state = s
@@ -132,7 +145,15 @@ class FenceEngine:
         d = Decision()
         if self.state == S.NO_FENCE:
             return d
-        c = clearance_m(self.zones, lat, lon)
+        # Every zone has its own bands; the most severe band over all zones decides.
+        c, band, shock_band = 1e9, CLEAR, False
+        for z in self.zones:
+            zd = signed_distance_m(z, lat, lon)
+            c = min(c, zd)
+            b = band_for(z, zd)
+            band = max(band, b)
+            if b in (DANGER, OUTSIDE) and z.danger_m > 0:
+                shock_band = True
         d.clearance_m = c
         s = self.settings
 
@@ -146,19 +167,20 @@ class FenceEngine:
                 self._rearm = 0
             return d
 
-        margin = self.warn_margin_m()
-        if c >= margin:
+        if band == CLEAR:
             self._outside = self._shocks_this_breach = 0
             self._set_state(S.INSIDE, d)
             return d
-        if c >= 0:
+        if band != OUTSIDE:
             self._outside = 0
             self._set_state(S.WARNING, d)
             if s.corrections_enabled:
-                if c < margin / 2:
-                    d.correction, d.intensity = "vibrate", s.vibrate_level
-                else:
+                if band == ATTENTION:
                     d.correction = "beep"
+                elif band == DANGER and shock_band:
+                    self._correct_hard(d, now)
+                else:
+                    d.correction, d.intensity = "vibrate", s.vibrate_level
             return d
 
         self._outside += 1
@@ -169,13 +191,20 @@ class FenceEngine:
         self._set_state(S.OUTSIDE, d)
         if not s.corrections_enabled:
             return d
+        if shock_band:
+            self._correct_hard(d, now)
+        else:  # the crossed zone has no danger band: never shock for it
+            d.correction, d.intensity = "vibrate", s.vibrate_level
+        return d
+
+    def _correct_hard(self, d: Decision, now: float) -> None:
+        s = self.settings
         if self._shock_allowed(now):
             d.correction, d.intensity = "shock", min(s.shock_level, s.max_shock_level)
             self._shocks_this_breach += 1
             self._shock_times.append(now)
         else:
             d.correction, d.intensity = "vibrate", s.vibrate_level
-        return d
 
 
 # ---------------------------------------------------------------------------------------------
@@ -264,7 +293,7 @@ class SimCollar:
     def set_fences(self, zones: list[protocol.Zone], version: int) -> None:
         # Round to the collar's integer degrees x 1e7, as the radio would.
         self.engine.set_fences([
-            protocol.Zone(z.kind, z.warn_margin_m, [(round(a, 7), round(o, 7)) for a, o in z.vertices]) for z in zones
+            protocol.Zone(z.kind, z.danger_m, z.warning_m, z.attention_m, [(round(a, 7), round(o, 7)) for a, o in z.vertices]) for z in zones
         ])
         self.fence_version = version
         self._event("fences", f"loaded fence version {version}")

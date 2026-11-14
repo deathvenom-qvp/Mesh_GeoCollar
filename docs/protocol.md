@@ -1,11 +1,11 @@
-# GeoCollar wire protocol (v1)
+# GeoCollar wire protocol (v2)
 
 GeoCollar messages travel as Meshtastic data packets on **portnum 300** (private apps use 256 and
 up). All multi-byte fields are little-endian. Every message starts with:
 
 | Byte | Field |
 | --- | --- |
-| 0 | protocol version, `1` |
+| 0 | protocol version, `2` (v2 added per-zone correction bands; v1 messages are ignored) |
 | 1 | message type |
 
 Messages between base and collar are **direct messages**, so Meshtastic encrypts them with PKI
@@ -32,8 +32,25 @@ a **fence set**:
 | 1 | zone count (0..4) |
 | per zone: 1 | kind: 0 keep-in, 1 keep-out |
 | per zone: 1 | vertex count (3..32) |
-| per zone: 2 | warning margin, metres |
+| per zone: 1 | danger band width, metres (0 = no danger band, never shock for this zone) |
+| per zone: 1 | warning band width, metres |
+| per zone: 1 | attention band width, metres |
+| per zone: 1 | reserved, 0 |
 | per vertex: 4 + 4 | latitude, longitude as int32 degrees × 1e7 |
+
+The polygon is the outer edge of the zone's correction bands. Measured from the line into the
+allowed side (inwards for keep-in, outwards for keep-out):
+
+| Band | From the line | Correction |
+| --- | --- | --- |
+| danger | 0 to danger | shock, if shock is enabled on the collar and under its caps; otherwise vibrate |
+| warning | danger to danger + warning | vibrate |
+| attention | to danger + warning + attention | beep |
+| clear | beyond that | nothing |
+
+Past the line the collar keeps correcting (shock only if the zone has a danger band) until it has
+3 good fixes outside, then switches to lost mode and stops correcting. With several zones, the
+most severe band of any zone wins.
 
 The collar saves a complete set to flash and reports its fence version in every Status, so the
 base can resend until the versions match.

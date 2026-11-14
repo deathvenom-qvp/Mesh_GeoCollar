@@ -15,7 +15,8 @@
   :root {
     --bg: #ffffff; --panel: #f6f7f9; --fg: #1c1d1f; --muted: #686b72; --line: #d9dbe0;
     --accent: #2563eb; --accent-fg: #ffffff;
-    --keep-in: #15803d; --keep-out: #dc2626;
+    --keep-in: #15803d; --keep-out: #7c3aed;
+    --danger: #dc2626; --warning-band: #f97316; --attention: #eab308;
     --ok: #15803d; --warn: #b45309; --bad: #dc2626; --idle: #8a8d93;
     --shadow: 0 1px 3px rgba(0,0,0,.12);
   }
@@ -23,7 +24,8 @@
     :root:not([data-theme="light"]) {
       --bg: #17181b; --panel: #1f2024; --fg: #eceef1; --muted: #a0a3aa; --line: #34363c;
       --accent: #6d9eff; --accent-fg: #0b1020;
-      --keep-in: #4ade80; --keep-out: #f87171;
+      --keep-in: #4ade80; --keep-out: #a78bfa;
+      --danger: #f87171; --warning-band: #fb923c; --attention: #facc15;
       --ok: #4ade80; --warn: #fbbf24; --bad: #f87171; --idle: #8a8d93;
       --shadow: 0 1px 3px rgba(0,0,0,.5);
     }
@@ -31,7 +33,8 @@
   :root[data-theme="dark"] {
     --bg: #17181b; --panel: #1f2024; --fg: #eceef1; --muted: #a0a3aa; --line: #34363c;
     --accent: #6d9eff; --accent-fg: #0b1020;
-    --keep-in: #4ade80; --keep-out: #f87171;
+    --keep-in: #4ade80; --keep-out: #a78bfa;
+    --danger: #f87171; --warning-band: #fb923c; --attention: #facc15;
     --ok: #4ade80; --warn: #fbbf24; --bad: #f87171; --idle: #8a8d93;
     --shadow: 0 1px 3px rgba(0,0,0,.5);
   }
@@ -87,7 +90,11 @@
   .zone .zname { border: 0; padding: 2px 0; font-weight: 600; background: transparent; }
   .zone .zname:focus { outline: none; border-bottom: 1px dashed var(--muted); border-radius: 0; }
   .zone .line { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 6px; white-space: nowrap; }
-  .zone .margin { width: 70px; }
+  .bands { display: grid; grid-template-columns: 18px 1fr 64px 14px; gap: 4px 6px; align-items: center; margin-top: 8px; font-size: 13px; }
+  .bands input[type=number] { padding: 3px 6px; }
+  .bands .sw { width: 14px; height: 14px; border-radius: 3px; }
+  .bands .off { opacity: .45; }
+  .gpsnote { margin-top: 8px; padding: 6px 8px; border: 1px dashed var(--line); border-radius: 6px; }
   .count.over { color: var(--bad); font-weight: 600; }
   .empty { border: 1px dashed var(--line); border-radius: 8px; padding: 12px; text-align: center; color: var(--muted); font-size: 13px; }
   .notes { margin: 8px 0 0; padding: 0; list-style: none; font-size: 12px; }
@@ -187,6 +194,9 @@
           <button type="button" data-shape="Rectangle" aria-pressed="false">Rectangle</button>
         </div>
       </div>
+      <div class="muted gpsnote"><b>GPS accuracy:</b> the collar's UC6580 receiver is rated 1.5 m (RMS) in open sky. On a dog,
+        near buildings or under trees, expect 2 to 5 m, with the odd jump of 10 m or more. Keep each band at least 3 m wide, and
+        draw the line a few metres inside anything that really matters, such as a road.</div>
       <div id="zones"></div>
       <ul class="notes" id="notes"></ul>
       <div class="sync" id="sync"></div>
@@ -254,10 +264,19 @@
 
 <script src="static/vendor/leaflet/leaflet.js"></script>
 <script src="static/vendor/geoman/leaflet-geoman.min.js"></script>
+<script src="static/vendor/polygon-clipping/polygon-clipping.umd.min.js"></script>
 <script>
 'use strict';
 // Limits from firmware/GeoCollar/Fence.h and docs/protocol.md.
-const MAX_ZONES = 4, MAX_VERTICES = 32, MAX_MARGIN_M = 1000;
+const MAX_ZONES = 4, MAX_VERTICES = 32, MAX_BAND_M = 100;
+// The line is the outer edge of three bands, measured into the allowed side (firmware Fence.h).
+const BANDS = [
+  { key: 'danger_m', name: 'Danger', does: 'shock', color: '--danger' },
+  { key: 'warning_m', name: 'Warning', does: 'vibrate', color: '--warning-band' },
+  { key: 'attention_m', name: 'Attention', does: 'beep', color: '--attention' },
+];
+const DEFAULT_BANDS = { danger_m: 3, warning_m: 5, attention_m: 5 };
+const GPS_MIN_BAND_M = 3;
 const STALE_S = 15 * 60;      // grey out a collar position older than this
 const TRACK_POINTS = 120;     // recent positions drawn for the selected collar
 const BIG_ZONE_M = 5000;      // the collar's flat-earth maths is accurate over a few km
@@ -316,8 +335,9 @@ const Legend = L.Control.extend({
   options: { position: 'bottomleft' },
   onAdd() {
     return el('div', { class: 'legend' },
-      el('div', {}, el('i', { style: 'background:var(--keep-in)' }), 'Keep in'),
-      el('div', {}, el('i', { style: 'background:var(--keep-out)' }), 'Keep out'));
+      el('div', {}, el('i', { style: 'background:var(--keep-in)' }), 'Keep-in line'),
+      el('div', {}, el('i', { style: 'background:var(--keep-out)' }), 'Keep-out line'),
+      ...BANDS.map(b => el('div', {}, el('i', { style: `background:var(${b.color});opacity:.7` }), `${b.name}: ${b.does}`)));
   },
 });
 new Legend().addTo(map);
@@ -332,6 +352,8 @@ map.pm.setLang('en', { tooltips: {
 
 const fenceLayer = L.featureGroup().addTo(map);
 const trackLayer = L.featureGroup().addTo(map);
+map.createPane('bands').style.zIndex = 390; // under the zone outlines
+const bandLayer = L.featureGroup().addTo(map);
 const dogLayer = L.featureGroup().addTo(map);
 
 // ---------------------------------------------------------------------------------------------
@@ -339,7 +361,7 @@ const dogLayer = L.featureGroup().addTo(map);
 // ---------------------------------------------------------------------------------------------
 let collars = {};          // from the API
 let selected = null;       // node id
-let zones = [];            // [{ layer, props: { name, kind, warn_margin_m } }] for the selected collar
+let zones = [];            // [{ layer, props: { name, kind, danger_m, warning_m, attention_m } }] for the selected collar
 let activeZone = null;     // the zone being edited
 let drawKind = null;       // kind of the zone being drawn, while drawing
 let createKind = 'keep_in'; // kept past pm:drawend, which Geoman fires before pm:create
@@ -353,7 +375,7 @@ const zoneStyle = (kind, active) => ({
   color: css(kind === 'keep_out' ? '--keep-out' : '--keep-in'),
   weight: active ? 4 : 3,
   opacity: 1,
-  fillOpacity: kind === 'keep_out' ? 0.28 : 0.12,
+  fillOpacity: kind === 'keep_out' ? 0.18 : 0.05,
   dashArray: kind === 'keep_out' ? '8 6' : null,
 });
 const ringOf = layer => {
@@ -390,10 +412,20 @@ function loadZones(geojson) {
     addZone(L.polygon(ring), {
       name: p.name || defaultName(p.kind === 'keep_out' ? 'keep_out' : 'keep_in'),
       kind: p.kind === 'keep_out' ? 'keep_out' : 'keep_in',
-      warn_margin_m: p.warn_margin_m ?? 10,
+      ...bandProps(p),
     });
   });
   renderZones();
+}
+
+// Band widths from saved properties. Fences saved before bands existed have warn_margin_m, which
+// becomes warning + attention, as the server and the old firmware split it.
+function bandProps(p) {
+  if (p.warn_margin_m != null && p.danger_m == null && p.warning_m == null && p.attention_m == null) {
+    const m = p.warn_margin_m, w = Math.floor(m / 2);
+    return { danger_m: 0, warning_m: w, attention_m: m - w };
+  }
+  return { danger_m: p.danger_m ?? 0, warning_m: p.warning_m ?? 5, attention_m: p.attention_m ?? 5 };
 }
 
 function defaultName(kind) {
@@ -405,7 +437,7 @@ function defaultName(kind) {
 function addZone(layer, props) {
   const z = { layer, props };
   layer.setStyle(zoneStyle(props.kind));
-  layer.on('click', e => { L.DomEvent.stopPropagation(e); if (!handlePick(e.latlng)) editZone(z); });
+  layer.on('click', e => { if (drawKind) return; L.DomEvent.stopPropagation(e); if (!handlePick(e.latlng)) editZone(z); });
   layer.on('pm:edit pm:vertexadded pm:vertexremoved pm:markerdragend', () => { renderZones(); });
   layer.on('pm:intersect', () => say('Fence lines cannot cross each other.'));
   fenceLayer.addLayer(layer);
@@ -465,7 +497,7 @@ map.on('pm:create', e => {
   // Store every zone as a plain polygon, as the collar sees it.
   const layer = L.polygon(ringOf(e.layer));
   map.removeLayer(e.layer);
-  const z = addZone(layer, { name: defaultName(kind), kind, warn_margin_m: 10 });
+  const z = addZone(layer, { name: defaultName(kind), kind, ...DEFAULT_BANDS });
   endDraw();
   editZone(z);
   ignoreMapClickUntil = Date.now() + 400; // the click that closed the shape also reaches the map
@@ -513,16 +545,22 @@ function checks() {
     const n = vertexCount(z.layer);
     if (n > MAX_VERTICES) errors.push(`"${z.props.name}" has ${n} corners; the collar allows ${MAX_VERTICES}. Right-click a corner to remove it.`);
     if (n < 3) errors.push(`"${z.props.name}" needs at least 3 corners.`);
-    const m = z.props.warn_margin_m;
-    if (!Number.isInteger(m) || m < 0 || m > MAX_MARGIN_M) errors.push(`"${z.props.name}": warning distance must be 0 to ${MAX_MARGIN_M} m.`);
+    for (const b of BANDS) {
+      const m = z.props[b.key];
+      if (!Number.isInteger(m) || m < 0 || m > MAX_BAND_M) errors.push(`"${z.props.name}": the ${b.name.toLowerCase()} band must be a whole number of metres, 0 to ${MAX_BAND_M}.`);
+    }
+    const thin = BANDS.filter(b => z.props[b.key] > 0 && z.props[b.key] < GPS_MIN_BAND_M).map(b => b.name.toLowerCase());
+    if (thin.length) warnings.push(`"${z.props.name}": the ${thin.join(' and ')} band${thin.length > 1 ? 's are' : ' is'} under ${GPS_MIN_BAND_M} m, narrower than the collar's GPS error, so the dog may skip straight past ${thin.length > 1 ? 'them' : 'it'}.`);
+    if (!z.props.warning_m && !z.props.attention_m && !z.props.danger_m) warnings.push(`"${z.props.name}" has no bands, so the collar only reacts once the dog is past the line.`);
+    if (z.covers) warnings.push(`"${z.props.name}": its bands cover the whole zone, so the dog would be corrected everywhere inside it. Make the bands narrower or the zone bigger.`);
     const b = z.layer.getBounds();
     if (b.getNorthWest().distanceTo(b.getSouthEast()) > BIG_ZONE_M) warnings.push(`"${z.props.name}" is over ${BIG_ZONE_M / 1000} km across; the collar's distance maths is most accurate for smaller zones.`);
   }
   const keepIns = zones.filter(z => z.props.kind === 'keep_in');
   if (keepIns.length > 1) warnings.push('The collar requires the dog to be inside every keep-in zone at once. Unless the keep-in zones overlap, use one keep-in zone with keep-out zones inside it.');
   if (zones.length && !keepIns.length) warnings.push('There is no keep-in zone, so the dog may roam anywhere outside the keep-out zones.');
-  const margins = new Set(zones.map(z => z.props.warn_margin_m));
-  if (margins.size > 1) warnings.push(`The collar starts warning at the smallest distance of all zones (${Math.min(...margins)} m).`);
+  if (zones.some(z => z.props.danger_m > 0) && selected && collars[selected] && collars[selected].status && !collars[selected].status.shock_enabled)
+    warnings.push('Shock is disabled on this collar, so danger bands vibrate instead of shocking.');
   const s = selected && collars[selected] && collars[selected].status;
   if (s && (s.lat || s.lon) && zones.length && isDirty()) {
     const outside = zones.filter(z => pointInRing(s.lat, s.lon, ringOf(z.layer)) !== (z.props.kind === 'keep_in'));
@@ -554,12 +592,7 @@ function renderZones() {
       el('div', { class: 'line' },
         el('div', { class: 'segmented kind' }, kindBtn('keep_in', 'Keep in'), kindBtn('keep_out', 'Keep out')),
         el('span', { class: 'muted count' + (n > MAX_VERTICES ? ' over' : ''), title: 'Corners used of the collar\'s limit' }, `${n}/${MAX_VERTICES} corners`)),
-      el('div', { class: 'line', style: 'justify-content:flex-start' },
-          el('span', { class: 'muted' }, 'Warn within'),
-          el('input', { class: 'margin', type: 'number', min: 0, max: MAX_MARGIN_M, step: 1, value: z.props.warn_margin_m, 'aria-label': 'Warning distance in metres',
-            onclick: e => e.stopPropagation(),
-            oninput: e => { z.props.warn_margin_m = e.target.value === '' ? NaN : Number(e.target.value); renderStatusArea(); } }),
-          el('span', { class: 'muted' }, 'm of the line')),
+      bandRows(z),
       activeZone === z ? el('div', { class: 'muted', style: 'margin-top:6px' },
         'Drag corners to move them. Drag a midpoint to add a corner. Right-click (or long-press) a corner to remove it.') : null);
     box.append(card);
@@ -567,6 +600,85 @@ function renderZones() {
   const full = zones.length >= MAX_ZONES;
   $('drawIn').disabled = $('drawOut').disabled = full || !!drawKind;
   $('drawIn').title = $('drawOut').title = full ? `The collar holds at most ${MAX_ZONES} zones` : '';
+  renderBands();
+}
+
+function bandRows(z) {
+  const stop = e => e.stopPropagation();
+  const dangerOn = z.props.danger_m > 0;
+  const kids = [];
+  BANDS.forEach((b, i) => {
+    const off = b.key === 'danger_m' && !dangerOn;
+    kids.push(
+      b.key === 'danger_m'
+        ? el('input', { type: 'checkbox', checked: dangerOn, title: 'Turn the danger (shock) band on or off for this zone', 'aria-label': 'Danger band on',
+            onclick: stop, onchange: e => {
+              if (e.target.checked) z.props.danger_m = z.lastDanger || DEFAULT_BANDS.danger_m;
+              else { z.lastDanger = z.props.danger_m; z.props.danger_m = 0; }
+              renderZones();
+            } })
+        : el('span', { class: 'sw', style: `background:var(${b.color})` }),
+      el('span', { class: off ? 'off' : '' }, el('b', {}, b.name), ` (${b.does})`, i === 0 ? el('span', { class: 'muted' }, ' at the line') : null),
+      off ? el('span', { class: 'muted' }, 'off') : el('input', { type: 'number', min: 0, max: MAX_BAND_M, step: 1, value: z.props[b.key], 'aria-label': `${b.name} band width in metres`,
+        onclick: stop, oninput: e => { z.props[b.key] = e.target.value === '' ? NaN : Number(e.target.value); renderStatusArea(); scheduleBands(); } }),
+      el('span', { class: 'muted' }, off ? '' : 'm'));
+  });
+  return el('div', { class: 'bands' }, ...kids);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Band overlays: exact distance bands, like the collar measures them (distance to the nearest
+// edge), built in local metres and clipped with polygon-clipping.
+// ---------------------------------------------------------------------------------------------
+function localFrame(ref) {
+  const k = Math.PI / 180 * 6371008.8, cos = Math.cos(ref.lat * Math.PI / 180);
+  return { fwd: p => [(p.lng - ref.lng) * k * cos, (p.lat - ref.lat) * k], back: ([x, y]) => [ref.lat + y / k, ref.lng + x / (k * cos)] };
+}
+function edgeBuffer(pts, r) {
+  // Everything within r metres of the ring's edges: a union of edge strips and corner discs.
+  if (!(r > 0)) return [];
+  const N = 24, rr = r / Math.cos(Math.PI / N), parts = [];
+  for (let i = 0; i < pts.length; i++) {
+    const a = pts[i], b = pts[(i + 1) % pts.length];
+    const dx = b[0] - a[0], dy = b[1] - a[1], len = Math.hypot(dx, dy) || 1, nx = -dy / len * r, ny = dx / len * r;
+    parts.push([[[a[0] + nx, a[1] + ny], [b[0] + nx, b[1] + ny], [b[0] - nx, b[1] - ny], [a[0] - nx, a[1] - ny], [a[0] + nx, a[1] + ny]]]);
+    const disc = [];
+    for (let k = 0; k < N; k++) disc.push([a[0] + rr * Math.cos(2 * Math.PI * k / N), a[1] + rr * Math.sin(2 * Math.PI * k / N)]);
+    disc.push(disc[0]);
+    parts.push([disc]);
+  }
+  return polygonClipping.union(...parts);
+}
+let bandTimer = null;
+function scheduleBands() { clearTimeout(bandTimer); bandTimer = setTimeout(renderBands, 150); }
+function renderBands() {
+  bandLayer.clearLayers();
+  for (const z of zones) {
+    z.covers = false;
+    const ring = ringOf(z.layer);
+    if (ring.length < 3 || typeof polygonClipping === 'undefined') continue;
+    try {
+      const f = localFrame(ring[0]);
+      const pts = ring.map(f.fwd);
+      const poly = [[...pts, pts[0]]];
+      const widths = BANDS.map(b => Math.max(0, Number.isFinite(z.props[b.key]) ? z.props[b.key] : 0));
+      let inner = 0, innerBuf = [];
+      BANDS.forEach((b, i) => {
+        if (!widths[i]) return;
+        const outer = inner + widths[i];
+        const outerBuf = edgeBuffer(pts, outer);
+        let area = z.props.kind === 'keep_out'
+          ? polygonClipping.difference(outerBuf, poly, ...(innerBuf.length ? [innerBuf] : []))
+          : polygonClipping.intersection(poly, innerBuf.length ? polygonClipping.difference(outerBuf, innerBuf) : outerBuf);
+        if (area.length) {
+          L.polygon(area.map(pg => pg.map(r => r.map(f.back))), { pane: 'bands', stroke: false, fillColor: css(b.color), fillOpacity: 0.45,
+            interactive: false, pmIgnore: true, snapIgnore: true }).addTo(bandLayer);
+        }
+        inner = outer; innerBuf = outerBuf;
+      });
+      if (z.props.kind !== 'keep_out' && innerBuf.length) z.covers = polygonClipping.difference(poly, innerBuf).length === 0;
+    } catch (err) { console.warn('could not draw bands', err); }
+  }
   renderStatusArea();
 }
 

@@ -44,8 +44,20 @@ Collars only obey messages from base nodes they trust:
    press **Finish**. Use **Rectangle** for a quick box.
 3. Add **+ Keep-out zone** shapes inside it for places to avoid, such as a pond or a road edge.
 4. Click a zone to drag its corners; drag a midpoint to add a corner, right-click a corner to
-   remove it. Rename zones, switch their type or set the warning distance in the side panel.
-5. Press **Send to collar**. The page shows when the collar reports the new fence version.
+   remove it. Rename zones and switch their type in the side panel.
+5. Set each zone's bands. The line you draw is the outer edge; going in from it:
+   - **Danger** (red, optional): shock, if shock is enabled on the collar. Untick it and the line
+     starts the warning band instead, so that zone never shocks.
+   - **Warning** (orange): vibrate.
+   - **Attention** (yellow): beep.
+   The map shades each band so you can see exactly where it starts and ends. For a keep-out zone
+   the bands lie outside its line.
+6. Press **Send to collar**. The page shows when the collar reports the new fence version.
+
+**GPS accuracy.** The collar's UC6580 receiver is rated at 1.5 m (RMS) in open sky. On a dog,
+near buildings and under trees, expect 2 to 5 m, and the occasional jump of 10 m or more. Make
+each band at least 3 m wide, and draw the line a few metres inside anything that really matters,
+such as a road. The collar ignores fixes with poor satellite geometry.
 
 Each collar holds up to 4 zones of up to 32 corners. The dog must be inside **every** keep-in
 zone, so use one keep-in zone, not several side by side.

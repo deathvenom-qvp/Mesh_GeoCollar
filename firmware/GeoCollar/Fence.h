@@ -20,9 +20,19 @@ enum class ZoneKind : uint8_t {
 };
 
 /// A polygon in Meshtastic's integer degrees (degrees * 1e7).
+///
+/// The polygon is the outer edge of the correction bands. Measured from the line into the allowed
+/// side (inwards for keep-in, outwards for keep-out), the bands are:
+///   danger    [0, dangerM)                         shock (if enabled on the collar), else vibrate
+///   warning   [dangerM, dangerM + warningM)        vibrate
+///   attention [.., dangerM + warningM + attentionM) beep
+/// dangerM = 0 turns the danger band off, so the line itself starts the warning band and the
+/// zone never asks for a shock.
 struct Zone {
     ZoneKind kind = ZoneKind::KeepIn;
-    uint16_t warnMarginM = 10; // start warning this many metres before the line
+    uint8_t dangerM = 0;
+    uint8_t warningM = 5;
+    uint8_t attentionM = 5;
     uint8_t vertexCount = 0;
     int32_t latI[kMaxVertices] = {};
     int32_t lonI[kMaxVertices] = {};
@@ -43,8 +53,15 @@ float signedDistanceM(const Zone &zone, int32_t latI, int32_t lonI);
 /// any zone is negative. Returns a large positive value when there are no zones.
 float clearanceM(const FenceSet &fences, int32_t latI, int32_t lonI);
 
-/// The smallest warning margin configured on any zone.
-uint16_t warnMarginM(const FenceSet &fences);
+/// Total band width of a zone (danger + warning + attention).
+inline uint16_t bandWidthM(const Zone &z) { return (uint16_t)z.dangerM + z.warningM + z.attentionM; }
+
+/// The widest band width of any zone: how far inside the dog must be for every zone to be quiet.
+uint16_t alertWidthM(const FenceSet &fences);
+
+/// Which band a point is in for one zone, from quiet to outside.
+enum class Band : uint8_t { Clear = 0, Attention = 1, Warning = 2, Danger = 3, Outside = 4 };
+Band bandFor(const Zone &zone, float signedDistanceM);
 
 // ---------------------------------------------------------------------------------------------
 // State machine
@@ -53,7 +70,7 @@ uint16_t warnMarginM(const FenceSet &fences);
 enum class CollarState : uint8_t {
     NoFence = 0,   // no fences loaded, nothing to do
     Inside = 1,    // well inside
-    Warning = 2,   // inside but within the warning margin
+    Warning = 2,   // inside but in a zone's attention, warning or danger band
     Outside = 3,   // crossed the line, not yet confirmed
     Lost = 4,      // confirmed outside: corrections stop, tracking starts
 };
@@ -120,6 +137,8 @@ class FenceEngine
   private:
     bool fixIsGood(const Fix &fix) const;
     bool shockAllowed(uint32_t nowMs);
+    /// Shock if allowed (enabled, under the per-breach and per-hour caps), otherwise vibrate.
+    void correctHard(Decision &d, uint32_t nowMs);
     void setState(CollarState s, Decision &d);
 
     FenceSet fences_;
@@ -137,8 +156,8 @@ class FenceEngine
 
 /// GPS update interval in seconds for the current state and clearance, or 0 to leave Meshtastic's
 /// own configured interval alone (no fences, or pacing turned off). Inside, the interval is the
-/// time the dog needs at dogSpeedMps to cover the distance to the warning margin, clamped between
-/// gpsFastSecs and gpsSlowSecs.
-uint32_t gpsIntervalSecs(const Settings &s, CollarState state, float clearanceM, uint16_t warnMarginM);
+/// time the dog needs at dogSpeedMps to cover the distance to the outermost band (alertWidthM),
+/// clamped between gpsFastSecs and gpsSlowSecs.
+uint32_t gpsIntervalSecs(const Settings &s, CollarState state, float clearanceM, uint16_t alertWidthM);
 
 } // namespace geocollar

@@ -18,7 +18,7 @@ namespace proto
 
 /// Meshtastic portnum for GeoCollar traffic. Private apps use 256 and up.
 constexpr uint16_t kPortNum = 300;
-constexpr uint8_t kVersion = 1;
+constexpr uint8_t kVersion = 2; // 2: zones carry danger / warning / attention band widths
 
 /// Largest chunk of fence data per packet, leaving room for headers inside Meshtastic's payload.
 constexpr size_t kMaxChunkData = 180;

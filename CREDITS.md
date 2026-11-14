@@ -36,7 +36,8 @@ postamble, and the "vibrate at 0" stop frame). No OpenShock source code is copie
 
 - [Leaflet](https://leafletjs.com) 1.9.4 (BSD-2-Clause) and
   [Leaflet-Geoman](https://github.com/geoman-io/leaflet-geoman) 2.17.0 (MIT) for the fence map,
-  vendored with their licences in `base/geocollar_base/static/vendor/`. Map tiles from
+  and [polygon-clipping](https://github.com/mfogel/polygon-clipping) 0.15.7 (MIT) for drawing the
+  correction bands, vendored with their licences in `base/geocollar_base/static/vendor/`. Map tiles from
   [OpenStreetMap](https://www.openstreetmap.org/copyright) contributors and satellite imagery
   from Esri World Imagery.
 - [FastAPI](https://fastapi.tiangolo.com) and [Uvicorn](https://www.uvicorn.org) for the base app.

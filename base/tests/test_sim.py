@@ -9,7 +9,7 @@ from geocollar_base.app import create_app
 from geocollar_base.sim import SimCollar, _move
 
 # A 200 m square keep-in zone around (40.0, -75.0).
-YARD = protocol.Zone(protocol.ZoneKind.KEEP_IN, 10, [(39.9991, -75.00117), (39.9991, -74.99883), (40.0009, -74.99883), (40.0009, -75.00117)])
+YARD = protocol.Zone(protocol.ZoneKind.KEEP_IN, 0, 5, 5, [(39.9991, -75.00117), (39.9991, -74.99883), (40.0009, -74.99883), (40.0009, -75.00117)])
 S = protocol.CollarState
 
 
@@ -42,13 +42,28 @@ def test_walk_out_matches_firmware_rules():
     assert sim.engine.state == S.INSIDE
 
 
-def test_shock_when_enabled_is_capped_per_breach():
+def test_shock_only_with_a_danger_band_and_capped_per_breach():
+    out = _move(40.0, -75.0, 90, 105)  # 5 m past the east edge
+    for danger, expected in ((3, 2), (0, 0)):
+        sim = walker()
+        sim.set_fences([protocol.Zone(YARD.kind, danger, 5, 5, YARD.vertices)], 8)
+        sim.update({"shock_enabled": True, "lat": out[0], "lon": out[1]})
+        for t in range(5):
+            sim.step(1.0, now=t)
+        shocks = [e for e in sim.events if e["kind"] == "shock"]
+        assert len(shocks) == expected and sim.engine.state == S.LOST
+
+
+def test_danger_band_inside_the_line_shocks():
     sim = walker()
-    sim.update({"shock_enabled": True, "lat": _move(40.0, -75.0, 90, 105)[0], "lon": _move(40.0, -75.0, 90, 105)[1]})
-    for t in range(5):
-        sim.step(1.0, now=t)
-    shocks = [e for e in sim.events if e["kind"] == "shock"]
-    assert len(shocks) == 2 and sim.engine.state == S.LOST
+    sim.set_fences([protocol.Zone(YARD.kind, 3, 4, 6, YARD.vertices)], 9)
+    sim.update({"shock_enabled": True})
+    for t, metres_in in enumerate((20, 10, 5, 1.5)):  # clear, attention, warning, danger
+        lat, lon = _move(40.0, -75.0, 90, 100 - metres_in)
+        sim.update({"lat": lat, "lon": lon})
+        sim.step(0, now=t)
+    kinds = [e["kind"] for e in reversed(sim.events)]
+    assert kinds[-3:] == ["beep", "vibrate", "shock"] and sim.engine.state == S.WARNING
 
 
 def test_sim_api_flow(tmp_path):
@@ -59,7 +74,7 @@ def test_sim_api_flow(tmp_path):
     c = client.get("/api/collars").json()[node_id]
     assert c["name"] == "Simulated dog 1" and c["sim"]["mode"] == "still" and c["status"]["lat"]
 
-    fence = {"type": "FeatureCollection", "features": [{"type": "Feature", "properties": {"kind": "keep_in", "warn_margin_m": 10},
+    fence = {"type": "FeatureCollection", "features": [{"type": "Feature", "properties": {"kind": "keep_in", "warning_m": 5, "attention_m": 5},
              "geometry": {"type": "Polygon", "coordinates": [[[lon, lat] for lat, lon in YARD.vertices + YARD.vertices[:1]]]}}]}
     r = client.put(f"/api/collars/{node_id}/fences", json=fence)
     assert r.json() == {"fence_version": 1, "chunks_sent": 1}
