@@ -249,6 +249,48 @@ public channel (LongFast with the default key) on the collar, at least as a seco
 Without a public channel, the message goes on your primary channel and only your own nodes can
 read it. Your phone number goes out in the clear to anyone nearby, which is the point.
 
+## The phone app
+
+The base reaches a collar over the mesh. The GeoCollar phone app (Android and iOS) reaches it
+over Bluetooth instead, from a few dozen metres, with no mesh and no internet. It is for the
+walk to fetch a dog that got out: it shows the collar on a map next to you, with the distance and
+direction, and it can mute the lost alert once you have the dog. Installing it is described in
+the repository's [app/README.md](https://github.com/deathvenom-qvp/Mesh_GeoCollar/tree/main/app#install).
+
+To link a phone:
+
+1. Select the collar and press **Connect app** in its **Phone app** panel. Say whose phone it is.
+2. A QR code appears. In the app, tap **Add a collar** and point the phone at it. If the camera
+   cannot be used, **Copy the code as text** and paste it into the app.
+3. The base sends the phone's key to the collar with the collar's next report. The panel says
+   "Waiting for Rex to confirm" until the collar has it, then "Rex has this list". The app says
+   so too if it reaches the collar first.
+4. The first time the phone connects, it asks for the collar's Bluetooth PIN. For a collar you
+   locked to the base that is the PIN in the collar's panel, and the app shows it. Otherwise it is
+   the code on the collar's screen, or 123456 on a collar without one.
+
+The code is that phone's key to that collar and is shown once. Press **Done** when the phone has
+it. Anyone who photographs the code can link their own phone, so treat it like a house key; if in
+doubt, remove the phone from the list and make a new code. A collar takes up to 4 phones, and a
+phone can be linked to several collars.
+
+What a linked phone can do: see the collar's position, state, battery and GPS fix, mute the lost
+alert, make the collar beep or vibrate, and pause and resume its corrections. It cannot shock,
+turn shock on, change fences, or change any setting. What it does to the collar reaches the base
+with the collar's next report, like a change made anywhere else.
+
+**Remove** next to a phone takes its key off the collar, again with the collar's next report.
+Until the collar confirms, the panel says it is waiting. Removing a collar from the base also
+tells it to forget every phone.
+
+While a collar is lost and has a linked phone, it no longer goes silent on Bluetooth between the
+90-second bursts of "Rex is lost": in those gaps it shows its ordinary name every 2 seconds, so
+the app can find it at any moment. That costs a little battery. A collar with no linked phone
+behaves as before.
+
+The app needs collar firmware 0.20 or later. A simulated collar has no Bluetooth, so the app
+shows its built-in demo collar for one.
+
 ## Finding your place on the map
 
 Type an address in the search box at the top right of the map and press Enter. The map starts
@@ -379,6 +421,12 @@ that an older version left in update mode says so in its panel; flash it over US
   old ones, so recorded radio packets cannot be played back to it. From collar firmware 0.16.0
   the dog's name, your contact details and the report rate are numbered the same way, and sending
   the fences a collar already has no longer restarts its shock limits or its lost alert.
+- A phone linked with **Connect app** gets a key of its own for one collar. The collar's
+  Bluetooth PIN gets a phone as far as Meshtastic's own Bluetooth service; the key is what the
+  collar's GeoCollar part asks for, on every request, and it only opens the short list of things
+  a phone may do (no shock, no fences, no settings). Keys are random, differ per phone, are sent
+  to the collar encrypted, and can be taken back one phone at a time. The page shows a key once,
+  in the QR code, and the base never sends it anywhere else.
 - The collar's hardware switch (if you fitted one) turns off every correction, including a beep,
   vibration or shock you send from the page.
 - The page has no login of its own. So that another website open in your browser cannot send

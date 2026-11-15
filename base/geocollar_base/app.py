@@ -121,6 +121,10 @@ class FlashedIn(BaseModel):
     via: str = "browser"
 
 
+class AppIn(BaseModel):
+    name: str = ""  # whose phone it is, for the list
+
+
 class CommandIn(BaseModel):
     action: str  # beep, vibrate, shock, corrections_off, corrections_on, force_lost, clear_lost, request_status, silence_lost
     intensity: int = 0
@@ -129,6 +133,8 @@ class CommandIn(BaseModel):
 
 
 NODE_ID = re.compile(r"![0-9a-f]{8}")  # a Meshtastic node ID as the page and the radio write it
+MAX_APP_NAME = 40  # characters of a linked phone's name
+APP_RESEND_MAX_S = 3600  # an unanswered app key list is sent again after 1, 2, 4... minutes, up to this
 MAX_CORRECTION_MS = 3000  # the collar firmware's cap on one beep, vibration or shock
 
 
@@ -233,6 +239,7 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
     # The collar's public key as read over USB at setup, which the radio needs to write to it.
     link.key_for = lambda n: (store.collar(n) or {}).get("public_key")
     link.on_send_error = lambda n, r: on_send_error(n, r)
+    link.on_app_ack = lambda n, a: on_app_ack(n, a)
 
     sim = Simulator(store.record_status, store.set_sim)
 
@@ -292,6 +299,75 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
         store.set_collar_info(node_id, "config_seq", seq or None)
         return True
 
+    # -- The companion app: each phone gets a key of its own in a QR code, and the collar gets the
+    # list of keys over the mesh. The phone then talks to the collar over the collar's Bluetooth.
+    def public_apps(c: dict) -> list[dict]:
+        """A collar's linked phones without their keys: a key leaves the base once, in its QR code."""
+        return [{"id": f"{a['id']:08x}", "name": a.get("name", ""), "created": a.get("created")}
+                for a in c.get("apps") or []]
+
+    def apps_synced(c: dict) -> bool:
+        """Whether the collar has confirmed the list of phones as it is now."""
+        return c.get("apps_seq") == c.get("apps_acked")
+
+    def public_collar(c: dict | None) -> dict | None:
+        """A collar as the page gets it."""
+        if c is None:
+            return None
+        c = dict(c)
+        if "apps" in c:
+            c["apps_synced"] = apps_synced(c)
+            c["apps"] = public_apps(c)
+        return c
+
+    def push_apps(node_id: str) -> bool:
+        """Send the collar the list of phones that may connect to it. The list is confirmed when
+        the collar answers with its number (on_app_ack); until then on_status sends it again."""
+        c = store.collar(node_id) or {}
+        keys = [(a["id"], bytes.fromhex(a["key"])) for a in c.get("apps") or []]
+        if node_id in sim:  # a simulated collar has no Bluetooth: it just agrees
+            seq = store.next_command_seq()
+            store.set_collar_info(node_id, "apps_seq", seq)
+            store.set_collar_info(node_id, "apps_acked", seq)
+            return True
+        if not link.connected:
+            store.set_collar_info(node_id, "apps_seq", "unsent")  # so it counts as not on the collar yet
+            return False
+        seq = store.next_command_seq()
+        store.set_collar_info(node_id, "apps_seq", seq)
+        store.set_collar_info(node_id, "apps_sent", {"at": time.time(), "tries": (c.get("apps_sent") or {}).get("tries", 0) + 1})
+        try:
+            link.send_app_keys(node_id, keys, seq)
+        except Exception as e:  # noqa: BLE001 - sent again on the collar's next report
+            log.warning("could not send the app keys to %s: %s", node_id, e)
+            return False
+        return True
+
+    def apps_changed(node_id: str) -> bool:
+        store.set_collar_info(node_id, "apps_sent", None)  # a new list: start counting tries again
+        return push_apps(node_id)
+
+    def trusted(node_id: str, c: dict, pki: bool, key: str, what: str) -> bool:
+        """Whether a message really comes from the collar: it must be PKI-encrypted, from the key
+        this base first saw (or read over USB) for that collar."""
+        if not pki or not key:
+            log.warning("ignoring %s from %s that was not PKI-encrypted (spoofed?)", what, node_id)
+            return False
+        if c.get("public_key") and c["public_key"] != key:
+            log.warning("ignoring %s from %s: its public key changed (spoofed, or the collar was erased; "
+                        "remove and re-add the collar to accept the new key)", what, node_id)
+            store.set_collar_info(node_id, "key_mismatch", time.time())
+            return False
+        return True
+
+    def on_app_ack(node_id: str, ack: dict) -> None:
+        c = store.collar(node_id)
+        if c is None or not trusted(node_id, c, ack.get("pki", False), ack.get("sender_key", ""), "an app key answer"):
+            return
+        if ack.get("seq") == c.get("apps_seq"):
+            store.set_collar_info(node_id, "apps_acked", ack["seq"])
+            store.set_collar_info(node_id, "apps_sent", None)
+
     def on_status(node_id: str, status: dict) -> None:
         status = dict(status)
         pki, key = status.pop("pki", False), status.pop("sender_key", "")
@@ -299,13 +375,7 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
         if c is None:
             log.info("ignoring a report from %s, which is not a collar on this base", node_id)
             return
-        if not pki or not key:
-            log.warning("ignoring a report from %s that was not PKI-encrypted (spoofed?)", node_id)
-            return
-        if c.get("public_key") and c["public_key"] != key:
-            log.warning("ignoring a report from %s: its public key changed (spoofed, or the collar was erased; "
-                        "remove and re-add the collar to accept the new key)", node_id)
-            store.set_collar_info(node_id, "key_mismatch", time.time())
+        if not trusted(node_id, c, pki, key, "a report"):
             return
         if not c.get("public_key"):
             store.set_collar_info(node_id, "public_key", key)
@@ -332,6 +402,16 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
             push_owner(node_id)
         if c.get("report_s") and (c.get("config_sent") != c["report_s"] or (numbered and not c.get("config_seq"))):
             push_config(node_id)
+        # The list of companion app keys goes again until the collar has confirmed it. So it does
+        # when the collar's report disagrees with the base about holding any: a collar that was
+        # erased has lost its keys, and one that came from another base may still hold that
+        # base's. Collar firmware before 0.20 never answers, so the tries are spaced out.
+        apps = c.get("apps") or []
+        if (c.get("apps_seq") is not None and not apps_synced(c)) or bool(apps) != bool(status.get("apps")):
+            sent = c.get("apps_sent") or {}
+            wait = min(APP_RESEND_MAX_S, 60 * 2 ** min(sent.get("tries", 0), 10) // 2)
+            if time.time() - sent.get("at", 0) >= wait:
+                push_apps(node_id)
 
     def ask_node_info(node_id: str) -> None:
         """The radio can't PKI-encrypt to a collar whose public key it doesn't have (one set up by
@@ -499,6 +579,7 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
     app.state.on_status = on_status
     app.state.on_hello = on_hello
     app.state.on_send_error = on_send_error
+    app.state.on_app_ack = on_app_ack
     # Leaflet and Leaflet-Geoman are vendored so the page works without a CDN (e.g. on a LAN).
     app.mount("/static", StaticFiles(directory=STATIC), name="static")
 
@@ -524,7 +605,8 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
     def list_collars():
         collars = store.collars()
         latest = fw.identity_of_latest(store.setting("fw_latest"))
-        for node_id, c in collars.items():
+        for node_id in list(collars):
+            c = collars[node_id] = public_collar(collars[node_id])
             c["sim"] = sim.public(node_id)
             # Newer collar firmware is known (see the update check) and this collar runs another one.
             c["update_available"] = not c["sim"] and fw.same_firmware(latest, c.get("firmware")) is False
@@ -608,7 +690,7 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
             store.set_collar_info(node_id, "report_s", body.report_s)
             if changed:
                 out["config_sent"] = push_config(node_id)
-        return {**(store.collar(node_id) or {}), **out}
+        return {**(public_collar(store.collar(node_id)) or {}), **out}
 
     @app.get("/api/contact")
     def get_contact():
@@ -629,6 +711,12 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
 
     @app.delete("/api/collars/{node_id}")
     def remove_collar(node_id: str):
+        # A collar leaving this base should not keep trusting phones this base linked to it.
+        if (store.collar(node_id) or {}).get("apps") and node_id not in sim and link.connected:
+            try:
+                link.send_app_keys(node_id, [], store.next_command_seq())
+            except Exception as e:  # noqa: BLE001 - the collar is removed either way
+                log.warning("could not tell %s to forget its linked phones: %s", node_id, e)
         sim.remove(node_id)
         if not store.remove_collar(node_id):
             raise HTTPException(404, "unknown collar")
@@ -711,6 +799,55 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
         if node_id in sim:
             sim.report_now(node_id)
         return {"sent": action.name}
+
+    # -- Companion app ----------------------------------------------------------------------------
+    def apps_view(node_id: str) -> dict:
+        c = store.collar(node_id) or {}
+        return {"apps": public_apps(c), "synced": apps_synced(c), "max": protocol.MAX_APP_KEYS,
+                "pin_known": bool(c.get("ble_pin")), "sim": node_id in sim}
+
+    @app.get("/api/collars/{node_id}/apps")
+    def list_apps(node_id: str):
+        """The phones linked to this collar, and whether the collar has the list yet."""
+        require(node_id)
+        return apps_view(node_id)
+
+    @app.post("/api/collars/{node_id}/apps")
+    def link_app(node_id: str, body: AppIn):
+        """Authorize one more phone: make it a key, send the collar the new list, and return the
+        pairing code for the QR. The key is returned this once and never again."""
+        c = require(node_id)
+        apps = list(c.get("apps") or [])
+        if len(apps) >= protocol.MAX_APP_KEYS:
+            raise HTTPException(409, f"a collar takes at most {protocol.MAX_APP_KEYS} phones; remove one first")
+        name = " ".join("".join(ch for ch in body.name if ch.isprintable()).split())
+        if len(name) > MAX_APP_NAME:
+            raise HTTPException(400, f"the phone's name is at most {MAX_APP_NAME} characters")
+        key_id = 0
+        while not key_id or any(a["id"] == key_id for a in apps):
+            key_id = secrets.randbits(32)
+        key = secrets.token_bytes(protocol.APP_KEY_LEN)
+        entry = {"id": key_id, "name": name or f"Phone {len(apps) + 1}", "key": key.hex(), "created": time.time()}
+        store.set_collar_info(node_id, "apps", apps + [entry])
+        apps_changed(node_id)
+        dog = c.get("name") or ""
+        if dog == node_id:
+            dog = ""
+        code = protocol.pairing_code(node_id, key_id, key, dog=dog, pin=c.get("ble_pin"),
+                                     ble_name=protocol.mesh_names(dog)[1] if dog else "", sim=node_id in sim)
+        return {**apps_view(node_id), "app": public_apps({"apps": [entry]})[0], "code": code}
+
+    @app.delete("/api/collars/{node_id}/apps/{app_id}")
+    def unlink_app(node_id: str, app_id: str):
+        """Take a phone's access away: the collar gets the list without it."""
+        c = require(node_id)
+        apps = list(c.get("apps") or [])
+        keep = [a for a in apps if f"{a['id']:08x}" != app_id.lower()]
+        if len(keep) == len(apps):
+            raise HTTPException(404, "unknown app")
+        store.set_collar_info(node_id, "apps", keep)  # an empty list is kept: the collar must hear of it
+        apps_changed(node_id)
+        return apps_view(node_id)
 
     # -- Property lines (parcels imported from county GIS files) --------------------------------
     @app.get("/api/parcels")
@@ -1168,7 +1305,7 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
         record_flash(node_id, m, body.via)
         if body.mode == "full":  # erased: the collar has a new key pair now
             store.set_collar_info(node_id, "public_key", None)
-        return {"node_id": node_id, "new_collar": new, "collar": store.collar(node_id)}
+        return {"node_id": node_id, "new_collar": new, "collar": public_collar(store.collar(node_id))}
 
     @app.post("/api/collars/{node_id}/firmware/flashed")
     def firmware_flashed(node_id: str, body: FlashedIn):

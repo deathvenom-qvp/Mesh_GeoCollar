@@ -35,6 +35,14 @@ enum class MsgType : uint8_t {
     Owner = 5,      // base -> collar: the dog's name and the owner's contact, for the lost beacon
     Hello = 6,      // collar -> broadcast: "I run GeoCollar and no base has adopted me yet"
     Config = 7,     // base -> collar: how often to report
+    AppKeys = 8,    // base -> collar: the phones that may connect to this collar (see AppLink.h)
+    AppKeysAck = 9, // collar -> base: that list is in force
+    // Between the companion app and the collar, over the collar's own Bluetooth (AppLink.h).
+    AppHello = 16,
+    AppChallenge = 17,
+    AppRequest = 18,
+    AppStatus = 19,
+    AppError = 20,
 };
 
 enum class CommandAction : uint8_t {
@@ -112,6 +120,7 @@ constexpr uint8_t kFlagBeacon = 0x04;         // lost beacon on
 constexpr uint8_t kFlagBeaconSilenced = 0x08; // lost beacon silenced by the owner
 constexpr uint8_t kFlagNoFix = 0x10;          // no current GPS fix: the position is the last one known
 constexpr uint8_t kFlagNumbered = 0x20;       // this firmware reads sequence numbers on Owner and Config
+constexpr uint8_t kFlagApps = 0x40;           // the collar holds the key of at least one companion app
 
 constexpr size_t kMaxDogName = 24;
 constexpr size_t kMaxOwnerName = 24;
@@ -127,7 +136,7 @@ struct OwnerInfo {
 constexpr size_t kStatusLength = 2 + 2 + 1 + 1 + 4 + 4 + 2 + 1 + 2 + 1;
 constexpr size_t kCommandLength = 2 + 1 + 1 + 2 + 4;
 
-/// Peek at a message's type. Returns false if the buffer is not a GeoCollar v1 message.
+/// Peek at a message's type. Returns false if the buffer is not a GeoCollar message of this version.
 bool messageType(const uint8_t *buf, size_t len, MsgType &type);
 
 size_t encodeStatus(uint8_t *out, size_t cap, MsgType type, const StatusReport &s);

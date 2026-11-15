@@ -162,6 +162,18 @@
   button.danger { background: var(--bad); color: #fff; border-color: var(--bad); }
   button.danger:disabled { opacity: .5; }
   .beacon { margin: 8px 0 0; }
+  /* Phone app: linked phones and the pairing code. The QR code is black on white in both themes. */
+  .applist { list-style: none; margin: 8px 0 0; padding: 0; font-size: 13px; }
+  .applist li { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; padding: 4px 0; border-bottom: 1px solid var(--line); }
+  .applist .muted { font-size: 12px; }
+  #appForm { margin-top: 8px; }
+  #appForm input { width: 100%; margin: 2px 0 6px; }
+  .appcode { margin-top: 8px; padding: 10px; border: 1px solid var(--line); border-radius: 8px; font-size: 13px; }
+  .appcode .qr { background: #fff; border-radius: 6px; padding: 0; max-width: 260px; margin: 0 auto 8px; }
+  .appcode .qr svg { display: block; width: 100%; height: auto; }
+  .appcode ol { margin: 0 0 8px; padding-left: 20px; }
+  .appcode li { margin: 3px 0; }
+  .appcode .pin { font-weight: 700; font-variant-numeric: tabular-nums; letter-spacing: .08em; }
   .beacon .actions { margin-top: 6px; }
   .contact { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-top: 6px; }
   @media (max-width: 420px) { .contact { grid-template-columns: 1fr; } }
@@ -345,6 +357,27 @@
             <button class="link" id="shockCancel">Cancel</button></div>
         </div>
       </div>
+    </section>
+
+    <section id="appBox">
+      <div class="row spread"><h2 style="margin:0">Phone app</h2><button id="appConnect">Connect app</button></div>
+      <div class="muted" style="margin-top:6px">The GeoCollar app on your phone talks to this collar over Bluetooth when you are near it.
+        It shows where the dog is and can silence the lost alert. Each phone gets a code of its own.</div>
+      <ul class="applist" id="appList"></ul>
+      <div class="muted" id="appSync" style="margin-top:6px"></div>
+      <form id="appForm" hidden>
+        <label class="field" for="appName">Whose phone is it?</label>
+        <input id="appName" maxlength="40" placeholder="Ken's phone" autocomplete="off">
+        <div class="actions"><button class="primary">Show the code</button><button type="button" class="link" id="appCancel">Cancel</button></div>
+      </form>
+      <div class="appcode" id="appCode" hidden>
+        <div class="qr" id="appQr"></div>
+        <ol id="appSteps"></ol>
+        <div class="muted" id="appCodeNote"></div>
+        <div class="actions" style="margin-top:8px"><button class="primary" id="appDone">Done</button>
+          <button id="appCopy" title="To paste into the app if the phone's camera cannot be used">Copy the code as text</button></div>
+      </div>
+      <div class="muted" id="appMsg" role="status"></div>
     </section>
 
     <section>
@@ -634,6 +667,7 @@
 <script src="static/vendor/polygon-clipping/polygon-clipping.umd.min.js"></script>
 <script src="static/vendor/togeojson/togeojson.umd.js"></script>
 <script src="static/vendor/shpjs/shp.min.js"></script>
+<script src="static/vendor/qrcode-generator/qrcode.js"></script>
 <script>
 'use strict';
 // Limits from firmware/GeoCollar/Fence.h and docs/protocol.md.
@@ -1281,6 +1315,102 @@ function renderSelected() {
   $('clearTrack').disabled = !pathLen;
   renderCopyFrom();
   renderSim();
+  renderApps(c);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Phone app. "Connect app" makes a key for one phone and shows it as a QR code; the base sends
+// the collar the list of keys over the mesh. The key is on this page only while the code shows.
+// ---------------------------------------------------------------------------------------------
+const APP_URL = 'https://github.com/deathvenom-qvp/Mesh_GeoCollar/tree/main/app#install';
+let appCode = null; // { id: the collar it is for, code: the pairing code on screen }
+const appSay = t => { $('appMsg').textContent = t; };
+
+function qrSvg(text) {
+  const qr = qrcode(0, 'M'); // the smallest size that fits, with 15% error correction
+  qr.addData(text);
+  qr.make();
+  const n = qr.getModuleCount(), quiet = 4;
+  let d = '';
+  for (let r = 0; r < n; r++) for (let c = 0; c < n; c++) if (qr.isDark(r, c)) d += `M${c + quiet} ${r + quiet}h1v1h-1z`;
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+  svg.setAttribute('viewBox', `0 0 ${n + 2 * quiet} ${n + 2 * quiet}`);
+  svg.setAttribute('role', 'img');
+  svg.setAttribute('aria-label', 'Pairing code for the GeoCollar app');
+  svg.setAttribute('shape-rendering', 'crispEdges');
+  svg.innerHTML = `<rect width="100%" height="100%" fill="#fff"/><path d="${d}" fill="#000"/>`;
+  return svg;
+}
+
+function renderApps(c) {
+  const apps = c.apps || [];
+  $('appList').replaceChildren(...apps.map(a => el('li', {},
+    el('span', {}, a.name, ' ', el('span', { class: 'muted' }, a.created ? `linked ${ago(Date.now() / 1000 - a.created)}` : '')),
+    el('button', { class: 'link', title: 'Take this phone\'s access to the collar away', onclick: () => unlinkApp(a) }, 'Remove'))));
+  // Whether the collar itself has the list yet: it gets it over the mesh and confirms it.
+  let sync = '';
+  if (c.apps_synced === false) sync = apps.length
+    ? `Waiting for ${c.name} to confirm: a phone can connect once the collar has the list. It is sent again with the collar's next report. The collar needs firmware 0.20 or later.`
+    : `Waiting for ${c.name} to confirm that no phone may connect any more.`;
+  else if (apps.length) sync = c.sim ? 'A simulated collar has no Bluetooth: the app shows a demo for it.' : `${c.name} has this list.`;
+  $('appSync').textContent = sync;
+  $('appConnect').disabled = apps.length >= 4 && !appCode;
+  $('appConnect').title = apps.length >= 4 ? 'A collar takes 4 phones. Remove one first.' : '';
+  if (appCode && appCode.id !== selected) closeAppCode();
+}
+
+function closeAppCode() {
+  appCode = null; // the key is gone from the page with it
+  $('appCode').hidden = true;
+  $('appQr').replaceChildren();
+  $('appForm').hidden = true;
+}
+
+$('appConnect').onclick = () => {
+  if (!collars[selected]) return;
+  closeAppCode();
+  appSay('');
+  $('appForm').hidden = false;
+  $('appName').value = '';
+  $('appName').focus();
+};
+$('appCancel').onclick = closeAppCode;
+$('appDone').onclick = () => { closeAppCode(); appSay(''); };
+$('appCopy').onclick = async () => {
+  if (!appCode) return;
+  try { await navigator.clipboard.writeText(appCode.code); appSay('Copied. Paste it into the app under Add a collar.'); }
+  catch { prompt('Copy this code into the app:', appCode.code); }
+};
+$('appForm').onsubmit = async e => {
+  e.preventDefault();
+  const id = selected, c = collars[id];
+  if (!c) return;
+  let r;
+  try { r = await api(`collars/${encodeURIComponent(id)}/apps`, { method: 'POST', body: JSON.stringify({ name: $('appName').value }) }); }
+  catch (err) { appSay(err.message); return; }
+  if (id !== selected) return; // another collar was picked meanwhile; this phone is in that collar's list to remove
+  appCode = { id, code: r.code };
+  $('appForm').hidden = true;
+  $('appQr').replaceChildren(qrSvg(r.code));
+  const pin = c.ble_pin ? el('span', { class: 'pin' }, String(c.ble_pin).padStart(6, '0')) : null;
+  $('appSteps').replaceChildren(
+    el('li', {}, 'Install the GeoCollar app on the phone (', el('a', { href: APP_URL, target: '_blank', rel: 'noopener' }, 'how to get it'), ').'),
+    el('li', {}, 'In the app, tap ', el('b', {}, 'Add a collar'), ' and point the phone at this code.'),
+    r.sim ? el('li', {}, 'This collar is simulated, so the app shows a demo collar for it.')
+      : el('li', {}, 'Stand near the collar. When the phone asks for a Bluetooth pairing code, enter ',
+        pin || 'the code on the collar\'s screen (123456 on a collar without one)', pin ? '. The app shows it too.' : '.'));
+  $('appCodeNote').textContent = `This code is ${r.app.name}'s key to ${c.name}, and it is shown only this once. `
+    + 'If the scan fails, remove the phone from the list above and make a new code.';
+  $('appCode').hidden = false;
+  appSay('');
+  refresh();
+};
+async function unlinkApp(a) {
+  const c = collars[selected];
+  if (!c || !confirm(`Remove ${a.name}? It can no longer connect to ${c.name} once the collar has heard of it.`)) return;
+  try { await api(`collars/${encodeURIComponent(selected)}/apps/${a.id}`, { method: 'DELETE' }); appSay(`Removed ${a.name}.`); }
+  catch (err) { appSay(err.message); }
+  refresh();
 }
 
 // Copy another collar's fences (as last sent to it) into this collar's editor, to send from here.
@@ -1761,6 +1891,8 @@ function select(id) {
   if (selected && isDirty()) drafts[selected] = zonesToGeoJSON();
   selected = id;
   resetShockConfirm();
+  closeAppCode();
+  appSay('');
   const c = collars[id];
   loadZones(drafts[id] || c.fences);
   delete drafts[id];

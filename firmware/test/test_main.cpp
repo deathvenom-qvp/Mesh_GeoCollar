@@ -1,11 +1,14 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 //
 // Host tests for the parts of GeoCollar that do not need hardware: the CaiXianLin frame builder,
-// the fence engine and the wire protocol. Build and run with `make -C firmware/test`.
+// the fence engine, the wire protocol and the companion app's link. Build and run with
+// `make -C firmware/test`.
 
+#include "../GeoCollar/AppLink.h"
 #include "../GeoCollar/CaiXianLin.h"
 #include "../GeoCollar/Fence.h"
 #include "../GeoCollar/Protocol.h"
+#include "../GeoCollar/Sha256.h"
 
 #include <cmath>
 #include <cstdio>
@@ -708,6 +711,226 @@ static void testBeacon()
     CHECK(strcmp(ln, "Bl") == 0);
 }
 
+// --------------------------------------------------------------------------------------------
+// The companion app's link: SHA-256 and HMAC, the key list from the base, and the session
+// --------------------------------------------------------------------------------------------
+
+static void testSha256()
+{
+    using namespace hash;
+    uint8_t d[kSha256Len];
+    Sha256 a;
+    a.update((const uint8_t *)"abc", 3);
+    a.finish(d);
+    CHECK(hex(d, sizeof(d)) == "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+    Sha256 e;
+    e.finish(d);
+    CHECK(hex(d, sizeof(d)) == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+    // Fed in uneven pieces across block boundaries.
+    std::string big(1000, 'a');
+    Sha256 b;
+    for (size_t i = 0; i < big.size(); i += 37)
+        b.update((const uint8_t *)big.data() + i, big.size() - i < 37 ? big.size() - i : 37);
+    b.finish(d);
+    CHECK(hex(d, sizeof(d)) == "41edece42d63e8d9bf515a9ba6932e1c20cbc9f5a5d134645adb5db1b9737ea3");
+    // RFC 4231 test cases 2 and 6 (a key longer than a block).
+    const char *msg = "what do ya want for nothing?";
+    hmacSha256((const uint8_t *)"Jefe", 4, (const uint8_t *)msg, strlen(msg), d);
+    CHECK(hex(d, sizeof(d)) == "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843");
+    uint8_t longKey[131];
+    memset(longKey, 0xaa, sizeof(longKey));
+    msg = "Test Using Larger Than Block-Size Key - Hash Key First";
+    hmacSha256(longKey, sizeof(longKey), (const uint8_t *)msg, strlen(msg), d);
+    CHECK(hex(d, sizeof(d)) == "60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54");
+    CHECK(sameBytes(d, d, sizeof(d)));
+    uint8_t other[kSha256Len];
+    memcpy(other, d, sizeof(d));
+    other[31] ^= 1;
+    CHECK(!sameBytes(d, other, sizeof(d)));
+}
+
+static void testAppLink()
+{
+    using namespace proto;
+    uint8_t buf[64], reply[64];
+    size_t n = 0, rn = 0;
+
+    // The list of authorized phones, as the base sends it. The same bytes are in the base's and
+    // the app's tests.
+    AppKeySet keys;
+    keys.count = 1;
+    keys.keys[0].id = 0x1a2b3c4d;
+    for (size_t i = 0; i < kAppKeyLen; i++)
+        keys.keys[0].key[i] = static_cast<uint8_t>(i);
+    n = encodeAppKeys(buf, sizeof(buf), keys, 1763085600);
+    CHECK(hex(buf, n) == "0208208d1669014d3c2b1a000102030405060708090a0b0c0d0e0f");
+    MsgType t;
+    CHECK(messageType(buf, n, t) && t == MsgType::AppKeys);
+    AppKeySet back;
+    uint32_t seq = 0;
+    CHECK(decodeAppKeys(buf, n, back, seq) && seq == 1763085600 && back.count == 1 && back.keys[0].id == 0x1a2b3c4d &&
+          memcmp(back.keys[0].key, keys.keys[0].key, kAppKeyLen) == 0);
+    CHECK(!decodeAppKeys(buf, n - 1, back, seq)); // cut short
+    buf[6] = 2;
+    CHECK(!decodeAppKeys(buf, n, back, seq)); // the count does not match the length
+    buf[6] = 1;
+    buf[2] = buf[3] = buf[4] = buf[5] = 0;
+    CHECK(!decodeAppKeys(buf, n, back, seq)); // no sequence number
+    AppKeySet twice = keys;
+    twice.count = 2;
+    twice.keys[1] = keys.keys[0];
+    n = encodeAppKeys(buf, sizeof(buf), twice, 5);
+    CHECK(n && !decodeAppKeys(buf, n, back, seq)); // the same phone twice
+    twice.keys[1].id = 0;
+    n = encodeAppKeys(buf, sizeof(buf), twice, 5);
+    CHECK(!decodeAppKeys(buf, n, back, seq)); // phone number 0
+    AppKeySet none;
+    n = encodeAppKeys(buf, sizeof(buf), none, 9);
+    CHECK(n == kAppKeysHeader && decodeAppKeys(buf, n, back, seq) && back.count == 0); // every phone removed
+    AppKeySet full;
+    full.count = kMaxAppKeys;
+    for (size_t i = 0; i < kMaxAppKeys; i++)
+        full.keys[i].id = static_cast<uint32_t>(i + 1);
+    uint8_t big[kAppKeysMax];
+    n = encodeAppKeys(big, sizeof(big), full, 9);
+    CHECK(n == kAppKeysMax && decodeAppKeys(big, n, back, seq) && back.count == kMaxAppKeys);
+    full.count = kMaxAppKeys + 1;
+    CHECK(encodeAppKeys(big, sizeof(big), full, 9) == 0);
+
+    n = encodeAppKeysAck(buf, sizeof(buf), 1763085600, 1);
+    CHECK(hex(buf, n) == "0209208d166901");
+    uint8_t count = 0;
+    CHECK(decodeAppKeysAck(buf, n, seq, count) && seq == 1763085600 && count == 1);
+    CHECK(messageType(buf, n, t) && t == MsgType::AppKeysAck);
+
+    // What a phone may ask for.
+    CHECK(appActionAllowed(CommandAction::SilenceLost) && appActionAllowed(CommandAction::RequestStatus));
+    CHECK(appActionAllowed(CommandAction::Beep) && appActionAllowed(CommandAction::Vibrate));
+    CHECK(appActionAllowed(CommandAction::CorrectionsOff) && appActionAllowed(CommandAction::CorrectionsOn));
+    CHECK(!appActionAllowed(CommandAction::Shock) && !appActionAllowed(CommandAction::ShockOn));
+    CHECK(!appActionAllowed(CommandAction::ForceLost) && !appActionAllowed(CommandAction::ClearLost));
+    CHECK(!appActionAllowed(static_cast<CommandAction>(99)));
+
+    // A session, byte for byte.
+    uint8_t appNonce[kAppNonceLen], collarNonce[kAppNonceLen];
+    for (size_t i = 0; i < kAppNonceLen; i++) {
+        appNonce[i] = static_cast<uint8_t>(0xa0 + i);
+        collarNonce[i] = static_cast<uint8_t>(0xc0 + i);
+    }
+    AppLink link;
+    AppRequest req;
+    n = encodeAppHello(buf, sizeof(buf), 0x1a2b3c4d, appNonce);
+    CHECK(hex(buf, n) == "02104d3c2b1aa0a1a2a3a4a5a6a7");
+    CHECK(messageType(buf, n, t) && t == MsgType::AppHello);
+    CHECK(link.handle(buf, n, keys, collarNonce, reply, sizeof(reply), rn, req) == AppLink::Outcome::Reply);
+    CHECK(hex(reply, rn) == "02114d3c2b1ac0c1c2c3c4c5c6c7c66cfaa9f4fe36cb");
+    CHECK(link.active());
+    uint8_t sk[kAppSessionKeyLen];
+    appSessionKey(keys.keys[0], appNonce, collarNonce, sk);
+    CHECK(hex(sk, sizeof(sk)) == "4b4ad99bb6e9aa4a581e9cc9defdb082abb994605cae8f691fde30c639488fce");
+
+    AppRequest ask;
+    ask.keyId = 0x1a2b3c4d;
+    ask.counter = 1;
+    ask.action = CommandAction::SilenceLost;
+    n = encodeAppRequest(buf, sizeof(buf), ask, sk);
+    CHECK(hex(buf, n) == "02124d3c2b1a010000000f000000d2b8917361311478");
+    CHECK(link.handle(buf, n, keys, collarNonce, reply, sizeof(reply), rn, req) == AppLink::Outcome::Request);
+    CHECK(req.keyId == 0x1a2b3c4d && req.counter == 1 && req.action == CommandAction::SilenceLost);
+    StatusReport s{3, 4, 87, 400001234, -750004321, 180, 9, -12, 1};
+    rn = link.status(reply, sizeof(reply), req, AppResult::Done, s, 42);
+    CHECK(rn == kAppStatusLength);
+    CHECK(hex(reply, rn) == "02134d3c2b1a010000000003000457d288d7179fd74bd3b40009f4ff012a0017682af07f6aecce");
+
+    // The same request again is a replay: refused, and the app is told to start over.
+    CHECK(link.handle(buf, n, keys, collarNonce, reply, sizeof(reply), rn, req) == AppLink::Outcome::Reply);
+    CHECK(hex(reply, rn) == "02144d3c2b1a02");
+    // A later counter is fine, and counters may skip.
+    ask.counter = 5;
+    ask.action = CommandAction::Vibrate;
+    ask.intensity = 40;
+    ask.durationMs = 1500;
+    n = encodeAppRequest(buf, sizeof(buf), ask, sk);
+    CHECK(link.handle(buf, n, keys, collarNonce, reply, sizeof(reply), rn, req) == AppLink::Outcome::Request);
+    CHECK(req.action == CommandAction::Vibrate && req.intensity == 40 && req.durationMs == 1500 && req.counter == 5);
+    ask.counter = 4; // older than one already used
+    n = encodeAppRequest(buf, sizeof(buf), ask, sk);
+    CHECK(link.handle(buf, n, keys, collarNonce, reply, sizeof(reply), rn, req) == AppLink::Outcome::Reply);
+
+    // One changed bit anywhere and the signature no longer fits. A bad request does not use up
+    // its counter, so the real one still goes through afterwards.
+    ask.counter = 6;
+    ask.action = CommandAction::Beep;
+    n = encodeAppRequest(buf, sizeof(buf), ask, sk);
+    for (size_t i = 0; i < n; i++) {
+        uint8_t bad[64];
+        memcpy(bad, buf, n);
+        bad[i] ^= 0x01;
+        CHECK(link.handle(bad, n, keys, collarNonce, reply, sizeof(reply), rn, req) != AppLink::Outcome::Request);
+    }
+    CHECK(link.handle(buf, n, keys, collarNonce, reply, sizeof(reply), rn, req) == AppLink::Outcome::Request);
+    CHECK(link.handle(buf, n - 1, keys, collarNonce, reply, sizeof(reply), rn, req) == AppLink::Outcome::Ignore);
+
+    // A new hello starts a new session with a new collar nonce: requests signed for the old
+    // session (a recording, say) are refused even with a counter the new session has not seen.
+    ask.counter = 7;
+    n = encodeAppRequest(buf, sizeof(buf), ask, sk); // signed with the old session key
+    uint8_t hello[kAppHelloLength];
+    encodeAppHello(hello, sizeof(hello), 0x1a2b3c4d, appNonce);
+    uint8_t collarNonce2[kAppNonceLen] = {1, 2, 3, 4, 5, 6, 7, 8};
+    CHECK(link.handle(hello, sizeof(hello), keys, collarNonce2, reply, sizeof(reply), rn, req) == AppLink::Outcome::Reply);
+    CHECK(reply[1] == static_cast<uint8_t>(MsgType::AppChallenge) && memcmp(reply + 6, collarNonce2, kAppNonceLen) == 0);
+    CHECK(link.handle(buf, n, keys, collarNonce2, reply, sizeof(reply), rn, req) == AppLink::Outcome::Reply);
+    CHECK(reply[1] == static_cast<uint8_t>(MsgType::AppError) && reply[6] == static_cast<uint8_t>(AppErrorCode::NoSession));
+    uint8_t sk2[kAppSessionKeyLen];
+    appSessionKey(keys.keys[0], appNonce, collarNonce2, sk2);
+    CHECK(memcmp(sk, sk2, sizeof(sk)) != 0);
+    ask.counter = 1; // counters start again with the session
+    n = encodeAppRequest(buf, sizeof(buf), ask, sk2);
+    CHECK(link.handle(buf, n, keys, collarNonce2, reply, sizeof(reply), rn, req) == AppLink::Outcome::Request);
+
+    // A phone the base never authorized, or one with the right number and the wrong key.
+    encodeAppHello(hello, sizeof(hello), 0x99999999, appNonce);
+    CHECK(link.handle(hello, sizeof(hello), keys, collarNonce, reply, sizeof(reply), rn, req) == AppLink::Outcome::Reply);
+    CHECK(hex(reply, rn) == "021499999999" "01");
+    CHECK(link.active()); // a stranger's hello does not end the owner's session
+    AppKey wrong = keys.keys[0];
+    wrong.key[0] ^= 0xff;
+    uint8_t skWrong[kAppSessionKeyLen];
+    appSessionKey(wrong, appNonce, collarNonce2, skWrong);
+    ask.counter = 2;
+    n = encodeAppRequest(buf, sizeof(buf), ask, skWrong);
+    CHECK(link.handle(buf, n, keys, collarNonce2, reply, sizeof(reply), rn, req) == AppLink::Outcome::Reply);
+
+    // The base removes the phone: its session ends at once and it cannot start another.
+    n = encodeAppRequest(buf, sizeof(buf), ask, sk2);
+    link.keysChanged(keys); // nothing changed for this phone: the session goes on
+    CHECK(link.active());
+    link.keysChanged(none);
+    CHECK(!link.active());
+    CHECK(link.handle(buf, n, none, collarNonce2, reply, sizeof(reply), rn, req) == AppLink::Outcome::Reply);
+    CHECK(reply[6] == static_cast<uint8_t>(AppErrorCode::UnknownKey));
+    CHECK(link.status(reply, sizeof(reply), req, AppResult::Done, s, 0) == 0);
+    encodeAppHello(hello, sizeof(hello), 0x1a2b3c4d, appNonce);
+    CHECK(link.handle(hello, sizeof(hello), none, collarNonce, reply, sizeof(reply), rn, req) == AppLink::Outcome::Reply);
+    CHECK(reply[1] == static_cast<uint8_t>(MsgType::AppError));
+    // The phone's key is replaced by another under the same number: the old session ends too.
+    CHECK(link.handle(hello, sizeof(hello), keys, collarNonce, reply, sizeof(reply), rn, req) == AppLink::Outcome::Reply);
+    CHECK(link.active());
+    AppKeySet changed = keys;
+    changed.keys[0].key[5] ^= 1;
+    link.keysChanged(changed);
+    CHECK(!link.active());
+
+    // Other GeoCollar messages are none of the app link's business.
+    Command c{CommandAction::Beep, 0, 500, 1};
+    n = encodeCommand(buf, sizeof(buf), c);
+    CHECK(link.handle(buf, n, keys, collarNonce, reply, sizeof(reply), rn, req) == AppLink::Outcome::Ignore);
+    CHECK(link.handle(buf, 1, keys, collarNonce, reply, sizeof(reply), rn, req) == AppLink::Outcome::Ignore);
+    // No room for the answer: nothing is written.
+    CHECK(link.handle(hello, sizeof(hello), keys, collarNonce, reply, 4, rn, req) == AppLink::Outcome::Ignore && rn == 0);
+}
+
 int main()
 {
     testCaiXianLin();
@@ -720,6 +943,8 @@ int main()
     testGpsPacing();
     testFixWatch();
     testProtocol();
+    testSha256();
+    testAppLink();
     std::printf("%d checks, %d failures\n", checks, failures);
     return failures ? 1 : 0;
 }

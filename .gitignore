@@ -6,3 +6,8 @@ __pycache__/
 .venv/
 base/data/
 dist/
+firmware/test/applink_collar
+
+# The companion app: installed packages and the built web part (npm run build)
+app/node_modules/
+app/www/

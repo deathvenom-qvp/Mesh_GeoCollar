@@ -50,4 +50,27 @@ postamble, and the "vibrate at 0" stop frame). No OpenShock source code is copie
 - Meshtastic's [ESP32 unified OTA loader](https://github.com/meshtastic/esp32-unified-ota)
   v1.0.1 (GPL-3.0) for Wi-Fi updates. `firmware/package.py` downloads its release image and ships
   it unchanged next to the GeoCollar firmware.
+- [qrcode-generator](https://github.com/kazuhikoarase/qrcode-generator) 2.0.4 (MIT), by Kazuhiko
+  Arase, for the base's **Connect app** QR code, vendored with its licence in
+  `base/geocollar_base/static/vendor/qrcode-generator/`. "QR Code" is a registered trademark of
+  DENSO WAVE INCORPORATED.
 - [FastAPI](https://fastapi.tiangolo.com) and [Uvicorn](https://www.uvicorn.org) for the base app.
+
+## The phone app
+
+`app/` is built with these, fetched by npm (`app/package.json` pins the versions) and not copied
+into this repository. Each build writes their licences into the app as `licenses.txt`.
+
+- [Capacitor](https://capacitorjs.com) 8 (MIT), by the Ionic team, wraps the app for Android and
+  iOS, with its [App](https://github.com/ionic-team/capacitor-plugins) and Preferences plugins.
+  The Android and iOS projects in `app/android` and `app/ios` started as Capacitor's templates.
+- [@capacitor-community/bluetooth-le](https://github.com/capacitor-community/bluetooth-le) 8.3.0
+  (MIT), by pwespi and contributors, for Bluetooth.
+- [jsQR](https://github.com/cozmo/jsQR) 1.4.0 (Apache-2.0), by Cosmo Wolfe, reads the QR code.
+- [Leaflet](https://leafletjs.com) 1.9.4 (BSD-2-Clause) for the map, with tiles from
+  [OpenStreetMap](https://www.openstreetmap.org/copyright) contributors and satellite imagery
+  from Esri World Imagery.
+- [esbuild](https://esbuild.github.io) (MIT) bundles it.
+- The app speaks Meshtastic's phone API to the collar. The few message fields it needs are
+  written out by hand from Meshtastic's
+  [protobuf definitions](https://github.com/meshtastic/protobufs) (GPL-3.0).

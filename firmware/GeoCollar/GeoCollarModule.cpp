@@ -13,6 +13,7 @@
 #include "GeoCollar.h"
 #include "GeoCollarConfig.h"
 
+#include "AppLink.h"
 #include "CaiXianLin.h"
 #include "Fence.h"
 #include "Protocol.h"
@@ -40,6 +41,7 @@
 #include <Arduino.h>
 #include <cstring>
 #include <esp32-hal-rmt.h>
+#include <esp_random.h>
 
 #if !defined(CONFIG_IDF_TARGET_ESP32S2) && !MESHTASTIC_EXCLUDE_BLUETOOTH
 #include "main.h"
@@ -58,9 +60,13 @@ namespace
 
 constexpr const char *kStateFile = "/prefs/geocollar.bin";
 constexpr uint32_t kStateMagic = 0x47434F4C; // "GCOL"
-constexpr uint16_t kStateFormat = 8; // 2: GPS pacing; 3: per-zone bands; 4: pulse intervals; 5: owner; 6: command seq;
-                                     // 7: report interval; 8: owner and config sequence numbers, owner's GPS interval
+constexpr uint16_t kStateFormat = 9; // 2: GPS pacing; 3: per-zone bands; 4: pulse intervals; 5: owner; 6: command seq;
+                                     // 7: report interval; 8: owner and config sequence numbers, owner's GPS interval;
+                                     // 9: companion app keys
 constexpr uint32_t kBeaconRefreshMs = 10 * 1000; // re-apply the beacon advertisement this often
+// With a companion app linked, the beacon's quiet half still advertises the collar's ordinary
+// name this often (2 s, in 0.625 ms units), so the owner's phone can connect at any moment.
+constexpr uint16_t kQuietAdvInterval = 3200;
 // Until a base adopts the collar it says hello on the primary channel, so the base app can list it:
 // every minute for the first 15 minutes after boot, then every 15 minutes.
 constexpr uint32_t kHelloFastMs = 60 * 1000, kHelloSlowMs = 15 * 60 * 1000, kHelloFastForMs = 15 * 60 * 1000;
@@ -201,14 +207,17 @@ class CollarTransmitter
 /// The Bluetooth half of the lost beacon. It borrows Meshtastic's own BLE advertising instead of
 /// starting a second stack: during the "on" phase the advertisement carries only the beacon name,
 /// sent once a second (the slowest usual interval, to save battery), and during the "off" phase
-/// advertising stops altogether. Meshtastic's normal advertising comes back when the beacon ends.
+/// advertising stops altogether, unless a companion app is linked: then the collar keeps
+/// advertising its ordinary name, slowly, so that the owner's phone can still connect and silence
+/// the beacon. Meshtastic's normal advertising comes back when the beacon ends.
 /// Needs Bluetooth enabled in the collar's Meshtastic settings: with it disabled, Meshtastic frees
 /// the Bluetooth memory at boot and it cannot be started again without a reboot.
 class BeaconAdvertiser
 {
   public:
-    /// Call every second or so with the wanted state (nullptr name = beacon off).
-    void update(const char *name, uint32_t nowMs)
+    /// Call every second or so with the wanted state (nullptr name = beacon off, "" = its quiet
+    /// half). connectable: stay reachable for the companion app during the quiet half.
+    void update(const char *name, uint32_t nowMs, bool connectable = false)
     {
 #if GEOCOLLAR_HAS_BLE
         const bool ble = nimbleBluetooth && nimbleBluetooth->isActive();
@@ -220,8 +229,10 @@ class BeaconAdvertiser
             mode_ = Mode::Normal;
             return;
         }
-        if (nimbleBluetooth->isConnected())
-            return; // the owner's phone is connected: leave Bluetooth alone
+        // A phone is connected (isConnected() says so only once it has paired): leave Bluetooth alone.
+        BLEServer *server = BLEDevice::getServer();
+        if (nimbleBluetooth->isConnected() || (server && server->getConnectedCount() > 0))
+            return;
         if (!name) {
             if (mode_ != Mode::Normal) {
                 // Meshtastic's own routine: it clears the beacon's name and interval and starts
@@ -235,9 +246,24 @@ class BeaconAdvertiser
             return;
         }
         if (name[0] == 0) { // the off half of the cycle
-            if (mode_ != Mode::Off) {
-                BLEDevice::getAdvertising()->stop();
-                mode_ = Mode::Off;
+            const Mode want = connectable ? Mode::Quiet : Mode::Off;
+            if (mode_ != want) {
+                BLEAdvertising *adv = BLEDevice::getAdvertising();
+                adv->stop();
+                if (connectable) {
+                    // What Meshtastic itself advertises (its service, and the name in the scan
+                    // response), only less often.
+                    adv->reset();
+                    adv->addServiceUUID(MESH_SERVICE_UUID);
+                    BLEAdvertisementData scan;
+                    scan.setName(getDeviceName());
+                    adv->setScanResponseData(scan);
+                    adv->setMinInterval(kQuietAdvInterval);
+                    adv->setMaxInterval(kQuietAdvInterval);
+                    if (!adv->start(0))
+                        LOG_ERROR("GeoCollar: quiet advertising failed");
+                }
+                mode_ = want;
             }
             return;
         }
@@ -278,7 +304,7 @@ class BeaconAdvertiser
     }
 
   private:
-    enum class Mode : uint8_t { Normal, Beacon, Off };
+    enum class Mode : uint8_t { Normal, Beacon, Off, Quiet };
     Mode mode_ = Mode::Normal;
     bool warned_ = false;
     char name_[32] = {};
@@ -308,8 +334,15 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
     // i.e. the owner's base station. Everything else on our port is ignored.
     ProcessMessage handleReceived(const meshtastic_MeshPacket &mp) override
     {
-        if (isFromUs(&mp))
-            return ProcessMessage::CONTINUE;
+        if (isFromUs(&mp)) {
+            // From a client plugged into this collar itself, which for a collar means the
+            // companion app over Bluetooth. Being connected proves nothing: handleApp() checks
+            // the app's key.
+            if (!isToUs(&mp))
+                return ProcessMessage::CONTINUE;
+            handleApp(mp);
+            return ProcessMessage::STOP;
+        }
         if (!mp.pki_encrypted || !AdminKeys::isAuthorized(mp.public_key.bytes)) {
             // Other collars' hellos land here too, so only a direct message is worth a warning.
             if (isToUs(&mp))
@@ -418,6 +451,22 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
                 reportS_ = c.reportS;
                 lastConfigSeq_ = seq;
                 LOG_INFO("GeoCollar: report every %u s", (unsigned)(reportS_ ? reportS_ : GEOCOLLAR_STATUS_INTERVAL_MS / 1000));
+            }
+        } else if (type == proto::MsgType::AppKeys) {
+            uint32_t seq = 0;
+            if (!proto::decodeAppKeys(buf, len, scratchKeys_, seq)) {
+                LOG_WARN("GeoCollar: malformed app key list");
+            } else if (seq <= lastAppKeysSeq_) {
+                // A recording of an older list could put a removed phone back.
+                LOG_WARN("GeoCollar: refusing app key list %u, not newer than %u (a replay?)", (unsigned)seq,
+                         (unsigned)lastAppKeysSeq_);
+            } else {
+                appKeys_ = scratchKeys_;
+                lastAppKeysSeq_ = seq;
+                app_.keysChanged(appKeys_); // a phone that was just removed is cut off now
+                save = true;
+                LOG_INFO("GeoCollar: %u companion app(s) authorized", (unsigned)appKeys_.count);
+                sendAppKeysAck();
             }
         }
         if (save)
@@ -634,7 +683,7 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
             beaconName(owner_.dog[0] ? owner_.dog : "Dog", owner_.phone, name, sizeof(name));
         else
             name[0] = 0;
-        ble_.update(name, now);
+        ble_.update(name, now, appKeys_.count > 0);
         if (beacon_.meshDue(now))
             sendPlea();
     }
@@ -829,10 +878,80 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
         service->sendToMesh(p, RX_SRC_LOCAL, false);
     }
 
-    void sendStatus(proto::MsgType type)
+    /// The companion app, connected to this collar as a local client. It may be anyone who
+    /// paired over Bluetooth, so nothing is done for it without its key's signature.
+    void handleApp(const meshtastic_MeshPacket &mp)
+    {
+        if (mp.which_payload_variant != meshtastic_MeshPacket_decoded_tag)
+            return;
+        uint8_t nonce[proto::kAppNonceLen];
+        esp_fill_random(nonce, sizeof(nonce));
+        uint8_t reply[proto::kAppStatusLength];
+        size_t n = 0;
+        proto::AppRequest req;
+        switch (app_.handle(mp.decoded.payload.bytes, mp.decoded.payload.size, appKeys_, nonce, reply, sizeof(reply), n, req)) {
+        case proto::AppLink::Outcome::Ignore:
+            return;
+        case proto::AppLink::Outcome::Reply:
+            break;
+        case proto::AppLink::Outcome::Request: {
+            proto::AppResult result = proto::AppResult::Done;
+            if (!proto::appActionAllowed(req.action)) {
+                result = proto::AppResult::NotAllowed;
+                LOG_WARN("GeoCollar: the app asked for action %u, which apps may not", (unsigned)req.action);
+            } else if (req.action != proto::CommandAction::RequestStatus) {
+                // The same path as a command from the base, which also tells the base what changed.
+                // A plain request for a report stays off the mesh: the app asks every few seconds.
+                LOG_INFO("GeoCollar: app command %u", (unsigned)req.action);
+                proto::Command cmd{req.action, req.intensity, req.durationMs, 0};
+                handleCommand(cmd);
+                if (req.action == proto::CommandAction::CorrectionsOff || req.action == proto::CommandAction::CorrectionsOn)
+                    saveState();
+                if (tx_.busy())
+                    setIntervalFromNow(0); // send the first frame now
+            }
+            n = app_.status(reply, sizeof(reply), req, result, currentStatus(), fixAgeSecs());
+            break;
+        }
+        }
+        if (!n)
+            return;
+        meshtastic_MeshPacket *p = allocDataPacket();
+        if (!p)
+            return;
+        p->to = nodeDB->getNodeNum(); // from this collar to itself: handed to the phone, never sent on the air
+        p->want_ack = false;
+        memcpy(p->decoded.payload.bytes, reply, n);
+        p->decoded.payload.size = n;
+        service->sendToPhone(p);
+    }
+
+    /// Seconds since the position in the report was taken; kAppNoFixAge if there has been none.
+    uint16_t fixAgeSecs() const
+    {
+        if (lastFixTimestamp_ == 0)
+            return proto::kAppNoFixAge;
+        const uint32_t age = (millis() - lastFix_.nowMs) / 1000;
+        return age >= proto::kAppNoFixAge ? proto::kAppNoFixAge - 1 : static_cast<uint16_t>(age);
+    }
+
+    /// Tell the base which list of app keys is in force.
+    void sendAppKeysAck()
     {
         if (!baseNode_)
             return;
+        meshtastic_MeshPacket *p = allocDataPacket();
+        if (!p)
+            return;
+        p->to = baseNode_;
+        p->want_ack = true;
+        p->decoded.payload.size =
+            proto::encodeAppKeysAck(p->decoded.payload.bytes, sizeof(p->decoded.payload.bytes), lastAppKeysSeq_, appKeys_.count);
+        service->sendToMesh(p, RX_SRC_LOCAL, false);
+    }
+
+    proto::StatusReport currentStatus() const
+    {
         proto::StatusReport s{};
         s.fenceVersion = engine_.fences().version;
         s.state = static_cast<uint8_t>(engine_.state());
@@ -846,7 +965,15 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
         s.flags = (engine_.settings().correctionsEnabled ? proto::kFlagCorrections : 0) |
                   (engine_.settings().shockEnabled ? proto::kFlagShock : 0) | (beacon_.active() ? proto::kFlagBeacon : 0) |
                   (beacon_.silenced() ? proto::kFlagBeaconSilenced : 0) | (fixWatch_.noFix() ? proto::kFlagNoFix : 0) |
-                  proto::kFlagNumbered;
+                  proto::kFlagNumbered | (appKeys_.count ? proto::kFlagApps : 0);
+        return s;
+    }
+
+    void sendStatus(proto::MsgType type)
+    {
+        if (!baseNode_)
+            return;
+        const proto::StatusReport s = currentStatus();
 
         meshtastic_MeshPacket *p = allocDataPacket();
         if (!p)
@@ -863,7 +990,7 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
 
     // Persistence: [magic u32][format u16][base node u32][fence version u16][blob len u16][blob][Settings]
     // [OwnerInfo][command seq u32][report interval s u16][owner seq u32][config seq u32]
-    // [owner's GPS interval s u32][that value is known u8]
+    // [owner's GPS interval s u32][that value is known u8][app keys seq u32][AppKeySet]
     void saveState()
     {
         const size_t blobLen = proto::encodeFenceSet(blob_, sizeof(blob_), engine_.fences());
@@ -889,6 +1016,8 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
         const uint8_t gpsKnown = ownerGpsKnown_;
         f.write((const uint8_t *)&ownerGpsSecs_, sizeof(ownerGpsSecs_));
         f.write(&gpsKnown, sizeof(gpsKnown));
+        f.write((const uint8_t *)&lastAppKeysSeq_, sizeof(lastAppKeysSeq_));
+        f.write((const uint8_t *)&appKeys_, sizeof(appKeys_));
         if (!f.close())
             LOG_ERROR("GeoCollar: failed to save %s", kStateFile);
     }
@@ -906,7 +1035,8 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
         uint32_t base = 0;
         Settings settings;
         proto::OwnerInfo owner;
-        uint32_t seq = 0, ownerSeq = 0, configSeq = 0, gpsSecs = 0;
+        uint32_t seq = 0, ownerSeq = 0, configSeq = 0, gpsSecs = 0, appSeq = 0;
+        proto::AppKeySet appKeys;
         uint16_t reportS = 0;
         uint8_t gpsKnown = 0;
         bool ok = f.read((uint8_t *)&magic, sizeof(magic)) == sizeof(magic) && magic == kStateMagic &&
@@ -921,7 +1051,10 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
                   (format < 8 || (f.read((uint8_t *)&ownerSeq, sizeof(ownerSeq)) == sizeof(ownerSeq) &&
                                   f.read((uint8_t *)&configSeq, sizeof(configSeq)) == sizeof(configSeq) &&
                                   f.read((uint8_t *)&gpsSecs, sizeof(gpsSecs)) == sizeof(gpsSecs) &&
-                                  f.read(&gpsKnown, sizeof(gpsKnown)) == sizeof(gpsKnown)));
+                                  f.read(&gpsKnown, sizeof(gpsKnown)) == sizeof(gpsKnown))) &&
+                  (format < 9 || (f.read((uint8_t *)&appSeq, sizeof(appSeq)) == sizeof(appSeq) &&
+                                  f.read((uint8_t *)&appKeys, sizeof(appKeys)) == sizeof(appKeys) &&
+                                  appKeys.count <= proto::kMaxAppKeys));
         f.close();
         if (ok && proto::decodeFenceSet(blob_, len16, version, scratch_)) {
             engine_.setFences(scratch_);
@@ -936,6 +1069,8 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
             ownerGpsSecs_ = gpsSecs;
             ownerGpsKnown_ = gpsKnown != 0;
             reportS_ = (reportS == 0 || (reportS >= proto::kMinReportS && reportS <= proto::kMaxReportS)) ? reportS : 0;
+            lastAppKeysSeq_ = appSeq;
+            appKeys_ = appKeys;
         } else {
             LOG_WARN("GeoCollar: saved state unreadable, starting without fences");
         }
@@ -947,6 +1082,9 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
     LostBeacon beacon_;
     BeaconAdvertiser ble_;
     proto::OwnerInfo owner_;
+    proto::AppKeySet appKeys_;     // the phones the base has authorized (saved)
+    proto::AppKeySet scratchKeys_; // a list being decoded
+    proto::AppLink app_;           // the session with the phone that is connected, if any
     proto::FenceAssembler assembler_;
     // Work space for a fence set being decoded and for the saved-state file. Members, not locals:
     // together they are over 2 kB, too much for the main loop's stack on top of Meshtastic's own
@@ -981,6 +1119,7 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
     uint32_t lastCmdSeq_ = 0;    // newest command accepted; older or repeated ones are replays
     uint32_t lastOwnerSeq_ = 0;  // the same for Owner messages (0: none numbered yet)
     uint32_t lastConfigSeq_ = 0; // and for Config messages
+    uint32_t lastAppKeysSeq_ = 0; // and for the list of app keys
     uint16_t reportS_ = 0;       // report interval from the base, s; 0 = GEOCOLLAR_STATUS_INTERVAL_MS
 };
 
