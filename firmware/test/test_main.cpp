@@ -220,6 +220,26 @@ static void testGpsPacing()
     s.gpsPacing = true;
     s.dogSpeedMps = 0;
     CHECK(gpsIntervalSecs(s, CollarState::Inside, 1000, 10) == 5); // nonsense settings: stay safe
+
+    // What Meshtastic is given so that, with its hold after each lock, fixes come as wanted.
+    CHECK(gpsSettingSecs(0) == 0);
+    CHECK(gpsSettingSecs(5) == 5);   // GPS always on: unchanged
+    CHECK(gpsSettingSecs(10) == 10);
+    CHECK(gpsSettingSecs(11) == 10); // 10.5 rounds down to always on
+    CHECK(gpsSettingSecs(12) == 11); // 11 s + a 1 s hold
+    CHECK(gpsSettingSecs(15) == 12); // lost: 12 s + 2 s, a fix every 14 s
+    CHECK(gpsSettingSecs(30) == 20); // beacon: 20 s + 10 s
+    CHECK(gpsSettingSecs(50) == 30); // 30 s + the full 20 s
+    CHECK(gpsSettingSecs(60) == 40); // deep inside: 40 s + 20 s
+    bool late = false, early = false;
+    for (uint32_t want = 1; want <= 3600; want++) {
+        const uint32_t set = gpsSettingSecs(want);
+        const uint32_t hold = set <= 10 ? 0 : (set - 10 < 20 ? set - 10 : 20);
+        late = late || set + hold > want;                    // never later than wanted
+        early = early || (want > 10 && set + hold + 1 < want); // and at most a second early
+    }
+    CHECK(!late);
+    CHECK(!early);
 }
 
 static void testFixWatch()

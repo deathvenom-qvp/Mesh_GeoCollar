@@ -63,21 +63,88 @@ keep arriving, and the collar's battery voltage.
 - Private primary channel with a random 256-bit key, shared by collars and the base.
 - The base node's public key in each collar's **Security > Admin keys**, so the collar accepts
   GeoCollar commands and remote admin from the base only.
-- Role CLIENT (or CLIENT_MUTE) rather than TRACKER, because the collar must listen for fence
-  updates and commands. Measure battery life early.
-- GPS update interval: GeoCollar paces the GPS itself while fences are loaded (5 s near the line,
-  up to 60 s deep inside, 15 s while lost) and puts your configured interval back when there are
-  no fences. Meshtastic saves the paced value with the rest of its config when it shuts down or a
-  setting changes, so the collar keeps your own interval in its state file and puts that back
-  after a restart. Change the interval in the Meshtastic app while the collar is running and it
-  becomes the new value to put back.
-- GPS power: on the Wireless Tracker V1.1 and V2 one switch (Vext, GPIO 3) powers the GPS, its
-  antenna amplifier and the screen, and Meshtastic leaves it on, so the GPS chip draws current
-  whenever the collar is on, whatever the interval. Setting the Position option **GPS EN GPIO** to 3
-  lets Meshtastic switch Vext off between fixes when the interval is over 10 s (deep inside the
-  fences). The screen goes off with it, and the GPS may start cold each time. Untested with
-  GeoCollar: measure the time to a fix and the battery current before relying on it.
-- Screen: GeoCollar shortens Meshtastic's default screen timeout (10 minutes) to 30 seconds. A
-  timeout you set yourself is kept.
+- Role: leave it at Meshtastic's default, Client. GeoCollar runs it as **Client Mute**, which
+  sends and receives as usual but does not relay other nodes' packets (see Battery life). Do not
+  pick Tracker or Sensor: they are meant to sleep between reports, and the collar must listen for fence updates and commands.
+- GPS update interval: GeoCollar paces the GPS itself while fences are loaded (a fix every 5 s
+  near the line, up to every 60 s deep inside, every 15 s while lost) and puts your configured
+  interval back when there are no fences. Meshtastic saves the paced value with the rest of its
+  config when it shuts down or a setting changes, so the collar keeps your own interval in its
+  state file and puts that back after a restart. Change the interval in the Meshtastic app while
+  the collar is running and it becomes the new value to put back.
+- GPS power: on the Wireless Tracker one switch (Vext, GPIO 3) powers the GPS, its antenna
+  amplifier and the screen. Meshtastic 2.8 switches it off whenever the screen is dark and the
+  GPS is asleep, which it is between fixes more than 10 s apart (deep inside the fences). Leave
+  **GPS EN GPIO** at 0: the board support already drives Vext, and a second driver on GPIO 3 would
+  fight it.
+- Screen: GeoCollar shortens Meshtastic's default screen timeout (10 minutes) to 1 second. A
+  timeout you set yourself is kept, except 30 s, which earlier GeoCollar versions set.
+- Leave **Power saving** off: GeoCollar turns it off anyway (see Battery life).
 - Turn off position broadcasts on any public channel; the collar reports its position to the base
   by encrypted direct message.
+
+## Battery life
+
+Nothing below has been measured on a collar yet. The currents are typical figures from the
+chips' datasheets and from reading Meshtastic 2.8's code, to show where the battery goes.
+
+| What | Typical draw | What GeoCollar does |
+| --- | --- | --- |
+| GPS (UC6580, dual band) and its antenna amplifier | Tens of mA while on: the largest single draw | Paces it: always on near the line, asleep between fixes deep inside (above). |
+| ESP32-S3 | About 20 to 30 mA at 80 MHz | Meshtastic already runs it at 80 MHz. Keeping Wi-Fi off keeps it there. |
+| Wi-Fi | Around 100 mA, and the CPU at 240 MHz | Kept off (below). |
+| Screen backlight | Tens of mA while lit | Lit for 1 s instead of 30 s after a boot, button press or text message. |
+| Bluetooth advertising | A few mA at Meshtastic's 30 to 60 ms interval | Every second instead, while no phone is connected. |
+| LoRa receive (SX1262) | About 5 mA, all the time | Unchanged: the collar has to hear the base. |
+| LoRa transmit | About 120 mA for each packet's airtime (around a second at the default preset) | No relaying of other nodes' packets. |
+
+What GeoCollar changes on the collar, and why (each can be turned off with a build flag in
+`firmware/GeoCollar/GeoCollarConfig.h`):
+
+- **Wi-Fi off** (`GEOCOLLAR_WIFI_OFF`). Nothing on a collar has used Wi-Fi since 0.17.0, and the
+  base removes the network it saved for Wi-Fi updates. With Wi-Fi on, Meshtastic runs the CPU at
+  240 MHz, keeps the Wi-Fi radio from sleeping, and cannot start Bluetooth, so the lost beacon
+  would have no Bluetooth name. A collar that still has Wi-Fi on has it turned off and saved at
+  boot, and restarts once so Bluetooth can start.
+- **No relaying** (`GEOCOLLAR_NO_RELAY`). With the default Client role a node repeats every packet
+  it hears, at full power. On a busy public mesh that can be many transmissions an hour; on a
+  quiet one it costs nothing. As Client Mute the collar still sends its reports, the lost-dog
+  message and its replies, and other nodes still relay for it. Only the default role is changed.
+  If you have two collars and one reaches the base only through the other, set that one to a
+  role other than Client in the Meshtastic app, or build with `GEOCOLLAR_NO_RELAY=0`.
+- **Screen** (`GEOCOLLAR_SCREEN_ON_SECS`). The screen is dark except for a second after a boot, a
+  button press or a text message on any of the collar's channels. Plugged into USB with the base
+  app connected, Meshtastic keeps it lit as before.
+- **Slower Bluetooth advertising** (`GEOCOLLAR_BLE_ADV_MS`). The Meshtastic app and the GeoCollar
+  app still find the collar within a second or two. While a phone is connected, and while the
+  lost beacon runs, Bluetooth is left as it was.
+- **Meshtastic power saving forced off.** On an ESP32 it sleeps for minutes at a time (5 by
+  default) with Bluetooth off. The GPS is not read and the fence is not checked in that time, so
+  a dog could walk out without a single correction. Not configurable.
+- **GPS fixes on time.** For an interval over 10 s Meshtastic holds the GPS on for up to 20 s
+  after each lock before it reports the fix, and counts the interval from then. GeoCollar now
+  asks for an interval that much shorter, so fixes really come as often as the pacing promises
+  (every 60 s deep inside, not every 80 s). This keeps the GPS on a little more than before: it
+  is a fix for correction timing, not a saving.
+
+Left as they are, and why:
+
+- **The GPS rate near the line.** It is what makes corrections arrive in time. Deep inside, the
+  pacing already waits as long as a dog running at 6 m/s needs to reach the outermost band, up to
+  60 s.
+- **CPU below 80 MHz, or automatic light sleep.** Bluetooth, the GPS serial port and the
+  correction transmitter's timing rely on it. Untestable without hardware.
+- **Duty-cycled LoRa receive.** It would miss fence updates and commands from the base.
+- **Bluetooth off.** The lost beacon and the phone app need it.
+- **Fewer GPS bands or satellite systems.** It would save some GPS current but cost accuracy near
+  trees and buildings, which is where false corrections come from. Worth trying on the bench.
+- **Meshtastic's own position and telemetry broadcasts.** A few short transmissions an hour.
+
+### Measuring on the bench
+
+1. Power the collar through a USB power meter or a bench supply with a current readout, with no
+   USB data connection (a data connection keeps Meshtastic awake and the screen lit).
+2. Note the current deep inside the fences (fixes every 60 s) and near the line (GPS always on).
+3. In a serial log, `Took Ns to get lock` after each GPS wake-up says whether the UC6580 restarts
+   warm (a few seconds) or cold (30 s or more) once Vext has been off. If it is cold, deep-inside
+   pacing saves little, and the GPS could as well stay on.
