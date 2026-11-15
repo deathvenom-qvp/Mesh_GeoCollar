@@ -138,6 +138,14 @@ static Fix fixAt(double northM, double eastM, uint32_t t, uint16_t pdop = 150, u
     return Fix{latAt(northM), lonAt(eastM), pdop, sats, t};
 }
 
+/// Two readings at the same place, a second apart: the first only starts the wait, the second is
+/// the second look. Returns what the second one decides.
+static Decision twice(FenceEngine &e, double northM, double eastM, uint32_t &t)
+{
+    e.onFix(fixAt(northM, eastM, t += 1000));
+    return e.onFix(fixAt(northM, eastM, t += 1000));
+}
+
 static void testStateMachine()
 {
     FenceEngine e;
@@ -157,11 +165,16 @@ static void testStateMachine()
     Decision d = e.onFix(fixAt(100, 100, t += 1000));
     CHECK(d.correction == Correction::None && e.state() == CollarState::Inside);
 
-    // 8 m from the line: attention band, beep.
+    // 8 m from the line: attention band. The first reading only starts the wait; the second,
+    // a second later, beeps.
     d = e.onFix(fixAt(8, 100, t += 1000));
-    CHECK(d.correction == Correction::Beep && e.state() == CollarState::Warning && d.sendStatus);
+    CHECK(d.correction == Correction::None && d.verify && e.state() == CollarState::Warning && d.sendStatus);
+    d = e.onFix(fixAt(8, 100, t += 1000));
+    CHECK(d.correction == Correction::Beep && !d.verify && !d.sendStatus);
 
-    // 3 m from the line: warning band, vibrate.
+    // 3 m from the line: warning band. Still a beep until the second look, then vibrate.
+    d = e.onFix(fixAt(3, 100, t += 1000));
+    CHECK(d.correction == Correction::Beep && d.verify);
     d = e.onFix(fixAt(3, 100, t += 1000));
     CHECK(d.correction == Correction::Vibrate);
 
@@ -200,7 +213,7 @@ static void testStateMachine()
     CHECK(d.correction == Correction::None);
     d = e.onFix(fixAt(30, 100, t += 1000)); // clear: re-armed
     CHECK(e.state() == CollarState::Inside);
-    d = e.onFix(fixAt(8, 100, t += 1000));
+    d = twice(e, 8, 100, t);
     CHECK(d.correction == Correction::Beep);
 }
 
@@ -302,9 +315,11 @@ static void testShockCaps()
     s.maxShocksPerBreach = 2;
     s.maxShocksPerHour = 3;
 
-    // 1.5 m inside the line: in the danger band.
+    // 1.5 m inside the line: in the danger band. One reading there never shocks.
     uint32_t t = 0;
     Decision d = e.onFix(fixAt(1.5, 100, t += 1000));
+    CHECK(d.correction == Correction::None && d.verify);
+    d = e.onFix(fixAt(1.5, 100, t += 1000));
     CHECK(d.correction == Correction::Shock && d.intensity == 30); // capped level
     d = e.onFix(fixAt(1.5, 100, t += 1000));
     CHECK(d.correction == Correction::Shock);
@@ -313,15 +328,15 @@ static void testShockCaps()
 
     // Back clear resets the per-breach count, but the hourly cap (3) still applies.
     e.onFix(fixAt(100, 100, t += 1000));
-    d = e.onFix(fixAt(1.5, 100, t += 1000));
+    d = twice(e, 1.5, 100, t);
     CHECK(d.correction == Correction::Shock);
     e.onFix(fixAt(100, 100, t += 1000));
-    d = e.onFix(fixAt(1.5, 100, t += 1000));
+    d = twice(e, 1.5, 100, t);
     CHECK(d.correction == Correction::Vibrate); // 3 shocks in the last hour
 
     // An hour later shocks are allowed again.
     e.onFix(fixAt(100, 100, t += 3600000));
-    d = e.onFix(fixAt(1.5, 100, t += 1000));
+    d = twice(e, 1.5, 100, t);
     CHECK(d.correction == Correction::Shock);
 
     // Never a shock past the line.
@@ -331,8 +346,8 @@ static void testShockCaps()
     // Corrections off: nothing at all.
     s.correctionsEnabled = false;
     e.onFix(fixAt(100, 100, t += 1000));
-    d = e.onFix(fixAt(1.5, 100, t += 1000));
-    CHECK(d.correction == Correction::None);
+    d = twice(e, 1.5, 100, t);
+    CHECK(d.correction == Correction::None && !d.verify);
 }
 
 static void testBands()
@@ -346,9 +361,9 @@ static void testBands()
     e.setFences(f);
     uint32_t t = 0;
     CHECK(e.onFix(fixAt(20, 100, t += 1000)).correction == Correction::None);
-    CHECK(e.onFix(fixAt(10, 100, t += 1000)).correction == Correction::Beep);
-    CHECK(e.onFix(fixAt(5, 100, t += 1000)).correction == Correction::Vibrate);
-    Decision d = e.onFix(fixAt(1.5, 100, t += 1000));
+    CHECK(twice(e, 10, 100, t).correction == Correction::Beep);
+    CHECK(twice(e, 5, 100, t).correction == Correction::Vibrate);
+    Decision d = twice(e, 1.5, 100, t);
     CHECK(d.correction == Correction::Shock && e.state() == CollarState::Warning); // danger band, still inside
     CHECK(bandFor(f.zones[0], 12.9f) == Band::Attention && bandFor(f.zones[0], 13.1f) == Band::Clear);
     CHECK(bandFor(f.zones[0], -0.1f) == Band::Outside && bandFor(f.zones[0], 2.9f) == Band::Danger);
@@ -360,14 +375,14 @@ static void testBands()
     soft.settings().lostConfirmFixes = 10;
     f.zones[0] = square(ZoneKind::KeepIn, 0, 4, 6);
     soft.setFences(f);
-    CHECK(soft.onFix(fixAt(1, 100, t += 1000)).correction == Correction::Vibrate);
+    CHECK(twice(soft, 1, 100, t).correction == Correction::Vibrate);
     CHECK(soft.onFix(fixAt(-3, 100, t += 1000)).correction == Correction::None);
 
     // Shock disabled on the collar: a danger band vibrates instead.
     FenceEngine off;
     f.zones[0] = square(ZoneKind::KeepIn, 3, 4, 6);
     off.setFences(f);
-    CHECK(off.onFix(fixAt(1, 100, t += 1000)).correction == Correction::Vibrate);
+    CHECK(twice(off, 1, 100, t).correction == Correction::Vibrate);
 
     // Several zones: the most severe band wins. A keep-out pond's bands lie outside the pond.
     FenceEngine two;
@@ -381,8 +396,156 @@ static void testBands()
     }
     two.setFences(g);
     CHECK(two.onFix(fixAt(110, 30, t += 1000)).correction == Correction::None); // 30 m from both
-    CHECK(two.onFix(fixAt(110, 52, t += 1000)).correction == Correction::Beep);  // 8 m from the pond
-    CHECK(two.onFix(fixAt(110, 57, t += 1000)).correction == Correction::Vibrate);
+    CHECK(twice(two, 110, 52, t).correction == Correction::Beep); // 8 m from the pond
+    CHECK(twice(two, 110, 57, t).correction == Correction::Vibrate);
+}
+
+// The second look: no correction on the strength of one GPS reading.
+static void testSecondLook()
+{
+    FenceSet f;
+    f.zoneCount = 1;
+    f.zones[0] = square(ZoneKind::KeepIn, 3, 4, 6); // shock 0-3 m, vibrate 3-7 m, beep 7-13 m
+    const double kBeep = 10, kBuzz = 5, kShock = 1.5, kClear = 50;
+    auto fresh = [&f]() {
+        FenceEngine e;
+        e.settings().shockEnabled = true;
+        e.settings().lostConfirmFixes = 10;
+        e.setFences(f);
+        return e;
+    };
+
+    // The first reading in a band starts the wait; a reading before the second is over does not
+    // end it; the first one after it does.
+    FenceEngine e = fresh();
+    uint32_t t = 5000;
+    Decision d = e.onFix(fixAt(kBeep, 100, t));
+    CHECK(d.correction == Correction::None && d.verify && d.verifyAtMs == t + kVerifyMs);
+    CHECK(e.state() == CollarState::Warning); // the state says where the dog is, the wait or not
+    d = e.onFix(fixAt(kBeep, 100, t + 600));
+    CHECK(d.correction == Correction::None && d.verify && d.verifyAtMs == t + kVerifyMs);
+    d = e.onFix(fixAt(kBeep, 100, t + kVerifyMs));
+    CHECK(d.correction == Correction::Beep && !d.verify);
+    // After that every reading in the band corrects at once, however close together.
+    d = e.onFix(fixAt(kBeep, 100, t + kVerifyMs + 100));
+    CHECK(d.correction == Correction::Beep && !d.verify);
+
+    // The second look finds the dog clear of the bands: no correction, and the next time in a
+    // band waits again.
+    e = fresh();
+    t = 5000;
+    CHECK(e.onFix(fixAt(kShock, 100, t)).verify);
+    d = e.onFix(fixAt(kClear, 100, t += 1000));
+    CHECK(d.correction == Correction::None && !d.verify && e.state() == CollarState::Inside);
+    d = e.onFix(fixAt(kShock, 100, t += 1000));
+    CHECK(d.correction == Correction::None && d.verify);
+    // Also when a reading before the second was over had it clear.
+    d = e.onFix(fixAt(kClear, 100, t += 300));
+    CHECK(!d.verify);
+    d = e.onFix(fixAt(kShock, 100, t += 700));
+    CHECK(d.correction == Correction::None && d.verify && d.verifyAtMs == t + kVerifyMs);
+
+    // The second look finds the dog past the line: nothing, as always out there.
+    e = fresh();
+    t = 5000;
+    e.onFix(fixAt(kBuzz, 100, t));
+    d = e.onFix(fixAt(-2, 100, t += 1000));
+    CHECK(d.correction == Correction::None && !d.verify && e.state() == CollarState::Outside);
+    d = e.onFix(fixAt(kBuzz, 100, t += 1000)); // on the way back in: silent, and no wait running
+    CHECK(d.correction == Correction::None && !d.verify);
+
+    // A step up to a stronger correction takes a second look too. Meanwhile the correction that
+    // is already agreed on goes on.
+    e = fresh();
+    t = 5000;
+    CHECK(twice(e, kBeep, 100, t).correction == Correction::Beep);
+    d = e.onFix(fixAt(kBuzz, 100, t += 1000));
+    CHECK(d.correction == Correction::Beep && d.verify && d.verifyAtMs == t + kVerifyMs);
+    d = e.onFix(fixAt(kBuzz, 100, t += 1000));
+    CHECK(d.correction == Correction::Vibrate && !d.verify);
+    d = e.onFix(fixAt(kShock, 100, t += 1000));
+    CHECK(d.correction == Correction::Vibrate && d.verify);
+    d = e.onFix(fixAt(kShock, 100, t += 1000));
+    CHECK(d.correction == Correction::Shock && !d.verify);
+    // A step down counts at once, and then going deeper again is checked again.
+    d = e.onFix(fixAt(kBeep, 100, t += 1000));
+    CHECK(d.correction == Correction::Beep && !d.verify);
+    d = e.onFix(fixAt(kShock, 100, t += 1000));
+    CHECK(d.correction == Correction::Beep && d.verify);
+
+    // Two readings in different bands agree on the milder one. Straight into the danger band,
+    // then the warning band: vibrate, and nothing left to wait for.
+    e = fresh();
+    t = 5000;
+    e.onFix(fixAt(kShock, 100, t));
+    d = e.onFix(fixAt(kBuzz, 100, t += 1000));
+    CHECK(d.correction == Correction::Vibrate && !d.verify);
+    // The other way round: vibrate, and the danger band still needs its own second look.
+    e = fresh();
+    t = 5000;
+    e.onFix(fixAt(kBuzz, 100, t));
+    d = e.onFix(fixAt(kShock, 100, t += 1000));
+    CHECK(d.correction == Correction::Vibrate && d.verify && d.verifyAtMs == t + kVerifyMs);
+    d = e.onFix(fixAt(kShock, 100, t += 1000));
+    CHECK(d.correction == Correction::Shock);
+    // A milder reading during the wait counts as well: danger, warning, danger within the second
+    // is only agreed on the warning band.
+    e = fresh();
+    t = 5000;
+    e.onFix(fixAt(kShock, 100, t));
+    e.onFix(fixAt(kBuzz, 100, t + 400));
+    d = e.onFix(fixAt(kShock, 100, t + 1000));
+    CHECK(d.correction == Correction::Vibrate && d.verify);
+
+    // A reading too poor to use is no second look, and the wait stays open.
+    e = fresh();
+    t = 5000;
+    e.onFix(fixAt(kBuzz, 100, t));
+    d = e.onFix(fixAt(kBuzz, 100, t += 1000, 900, 9));
+    CHECK(d.fixRejected && d.correction == Correction::None && d.verify && d.verifyAtMs == 5000 + kVerifyMs);
+    d = e.onFix(fixAt(kBuzz, 100, t += 1000));
+    CHECK(d.correction == Correction::Vibrate);
+
+    // A first reading that has got old is not agreed with: the wait starts again.
+    e = fresh();
+    t = 5000;
+    e.onFix(fixAt(kBuzz, 100, t));
+    d = e.onFix(fixAt(kBuzz, 100, t += kVerifyStaleMs + 1));
+    CHECK(d.correction == Correction::None && d.verify && d.verifyAtMs == t + kVerifyMs);
+    d = e.onFix(fixAt(kBuzz, 100, t += kVerifyStaleMs)); // just young enough
+    CHECK(d.correction == Correction::Vibrate);
+
+    // With corrections off there is nothing to wait for, but the readings still count, so
+    // turning corrections back on does not start from a band agreed on long ago.
+    e = fresh();
+    t = 5000;
+    twice(e, kShock, 100, t); // shocked once
+    e.settings().correctionsEnabled = false;
+    d = e.onFix(fixAt(kBeep, 100, t += 1000));
+    CHECK(d.correction == Correction::None && !d.verify);
+    e.settings().correctionsEnabled = true;
+    d = e.onFix(fixAt(kShock, 100, t += 1000));
+    CHECK(d.correction == Correction::Beep && d.verify);
+
+    // New fences, and the owner's lost and found commands, start afresh.
+    e = fresh();
+    t = 5000;
+    twice(e, kBuzz, 100, t);
+    e.setFences(f);
+    CHECK(e.onFix(fixAt(kBuzz, 100, t += 1000)).correction == Correction::None);
+    twice(e, kBuzz, 100, t);
+    e.forceLost();
+    e.clearLost();
+    d = e.onFix(fixAt(kBuzz, 100, t += 1000));
+    CHECK(d.correction == Correction::None && d.verify);
+
+    // The millisecond clock wrapping round during the wait changes nothing.
+    e = fresh();
+    t = UINT32_MAX - 400;
+    d = e.onFix(fixAt(kBuzz, 100, t));
+    CHECK(d.verify && d.verifyAtMs == 599);
+    CHECK(e.onFix(fixAt(kBuzz, 100, 100)).correction == Correction::None); // 501 ms later
+    CHECK(e.onFix(fixAt(kBuzz, 100, 599)).correction == Correction::Vibrate);
 }
 
 static void testPulser()
@@ -715,6 +878,7 @@ int main()
     testStateMachine();
     testShockCaps();
     testBands();
+    testSecondLook();
     testPulser();
     testBeacon();
     testGpsPacing();

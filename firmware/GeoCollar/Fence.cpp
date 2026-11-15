@@ -163,6 +163,7 @@ void FenceEngine::setFences(const FenceSet &fences)
     rearmCount_ = 0;
     shocksThisBreach_ = 0;
     quiet_ = false;
+    resetSecondLook();
     state_ = fences_.zoneCount ? CollarState::Inside : CollarState::NoFence;
 }
 
@@ -170,6 +171,7 @@ void FenceEngine::forceLost()
 {
     state_ = CollarState::Lost;
     rearmCount_ = 0;
+    resetSecondLook();
 }
 
 void FenceEngine::clearLost()
@@ -180,6 +182,7 @@ void FenceEngine::clearLost()
     rearmCount_ = 0;
     shocksThisBreach_ = 0;
     quiet_ = false;
+    resetSecondLook();
 }
 
 bool FenceEngine::fixIsGood(const Fix &fix) const
@@ -213,7 +216,53 @@ void FenceEngine::setState(CollarState s, Decision &d)
     }
 }
 
+void FenceEngine::resetSecondLook()
+{
+    agreed_ = Band::Clear;
+    verifying_ = false;
+}
+
+void FenceEngine::secondLook(Band band, uint32_t nowMs)
+{
+    if (band <= agreed_) {
+        // No deeper than the readings have agreed on already, so there is nothing to wait for.
+        // A milder band counts at once: going deeper again is then checked again.
+        agreed_ = band;
+        verifying_ = false;
+        return;
+    }
+    const uint32_t waited = nowMs - verifyMs_;
+    if (!verifying_ || waited > kVerifyStaleMs) {
+        // The first reading this deep: wait, then look again.
+        verifying_ = true;
+        verifyMs_ = nowMs;
+        verifyBand_ = band;
+        return;
+    }
+    if (band < verifyBand_)
+        verifyBand_ = band; // what all the readings since the first agree on
+    if (waited < kVerifyMs)
+        return; // too soon after the first to count as a second look
+    agreed_ = verifyBand_;
+    verifying_ = band > agreed_;
+    if (verifying_) {
+        // Deeper still than what was agreed: that takes a second look of its own.
+        verifyMs_ = nowMs;
+        verifyBand_ = band;
+    }
+}
+
 Decision FenceEngine::onFix(const Fix &fix)
+{
+    Decision d = evaluate(fix);
+    if (verifying_ && !quiet_ && settings_.correctionsEnabled && state_ == CollarState::Warning) {
+        d.verify = true;
+        d.verifyAtMs = verifyMs_ + kVerifyMs;
+    }
+    return d;
+}
+
+Decision FenceEngine::evaluate(const Fix &fix)
 {
     Decision d;
     if (state_ == CollarState::NoFence)
@@ -226,7 +275,6 @@ Decision FenceEngine::onFix(const Fix &fix)
     // Every zone has its own bands; the most severe band over all zones decides.
     float c = 1e9f;
     Band band = Band::Clear;
-    bool shockBand = false; // in the danger band of a zone that has one
     for (size_t i = 0; i < fences_.zoneCount && i < kMaxZones; i++) {
         const Zone &z = fences_.zones[i];
         const float zd = signedDistanceM(z, fix.latI, fix.lonI);
@@ -235,8 +283,6 @@ Decision FenceEngine::onFix(const Fix &fix)
         const Band b = bandFor(z, zd);
         if (b > band)
             band = b;
-        if (b == Band::Danger && z.dangerM > 0)
-            shockBand = true;
     }
     d.clearanceM = c;
 
@@ -260,6 +306,7 @@ Decision FenceEngine::onFix(const Fix &fix)
         // Past the line: stop correcting at once. Correcting a dog that is out (or on its way
         // back) teaches the wrong thing. Stay quiet until it is clear of every band again.
         quiet_ = true;
+        resetSecondLook();
         outsideCount_++;
         if (outsideCount_ >= settings_.lostConfirmFixes) {
             setState(CollarState::Lost, d);
@@ -274,22 +321,30 @@ Decision FenceEngine::onFix(const Fix &fix)
     if (band == Band::Clear) {
         shocksThisBreach_ = 0;
         quiet_ = false;
+        resetSecondLook();
         setState(CollarState::Inside, d);
         return d;
     }
 
-    // Inside, in a band: beep, then vibrate, then (danger band) shock. Silent while coming back
-    // in after being past the line.
+    // Inside, in a band: beep, then vibrate, then (danger band) shock, each only for a band that
+    // a second look has agreed on. Silent while coming back in after being past the line.
     setState(CollarState::Warning, d);
+    secondLook(band, fix.nowMs); // also with corrections off, so that it is up to date when they come back on
     if (quiet_ || !settings_.correctionsEnabled)
         return d;
-    if (band == Band::Attention) {
+    switch (agreed_) {
+    case Band::Attention:
         d.correction = Correction::Beep;
-    } else if (band == Band::Danger && shockBand) {
-        correctHard(d, fix.nowMs);
-    } else {
+        break;
+    case Band::Warning:
         d.correction = Correction::Vibrate;
         d.intensity = settings_.vibrateLevel;
+        break;
+    case Band::Danger: // only a zone with a danger band has one
+        correctHard(d, fix.nowMs);
+        break;
+    default: // nothing agreed yet: the first reading in a band
+        break;
     }
     return d;
 }

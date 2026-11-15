@@ -1,5 +1,31 @@
 # Changelog
 
+## 0.19.1
+
+The collar looks at the GPS a second time before it corrects. New collar firmware. Tested with
+the firmware's PC tests and the app's own tests, which run simulated collars. **Not on a real
+collar:** how soon the GPS hands over the second reading comes from reading Meshtastic's code,
+not from measuring it.
+
+- **A second look before a correction starts.** When a fix puts the dog in a band, the collar
+  waits 1 second, takes a new GPS reading, and corrects only if the dog is still in a band. One
+  reading on its own, such as a GPS jump, no longer beeps, vibrates or shocks.
+- **And before a correction steps up.** Going from beep to vibrate, or from vibrate to shock, is
+  checked the same way, and the correction that is already going carries on meanwhile. A shock
+  therefore takes two readings in the danger band, at least a second apart. If the two readings
+  are in different bands, the milder band counts. A reading in a milder band, or clear of the
+  bands, counts at once.
+- While the dog stays in a band, beeps and vibrations repeat as before. Past the line every
+  correction still stops at once.
+- Near a line the GPS is on all the time, so the second reading comes about a second after the
+  first. If the GPS was asleep (the dog reached a band faster than the GPS pacing allows for, or
+  pacing is off), the collar wakes it, and the second reading can take about 5 seconds.
+- **What it costs:** every correction starts at least a second later than before. A running dog
+  covers 5 m or more in that time, so wider bands give it more warning.
+- Simulated collars follow the same rule, and say in their events when they are waiting for the
+  second look.
+- Flash collars again to get it. The base and older collar firmware keep working together.
+
 ## 0.19.0
 
 A log of where each collar has been, and a way to clear the path on the map. Only the base app

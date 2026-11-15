@@ -36,10 +36,15 @@ The line you draw is the outer edge of three bands inside it, each with its own 
 
 Beeps and vibrations can repeat every 2 to 10 seconds while the dog stays in a band.
 
+No correction starts on a single GPS reading. When a fix first puts the dog in a band, the collar
+waits 1 second, takes a new fix, and corrects only if the dog is still in a band. Each step up to
+a stronger correction is checked the same way, so a shock takes two fixes in the danger band, at
+least a second apart; if the two fixes are in different bands, the milder one counts.
+
 | State | Collar does |
 | --- | --- |
 | Inside, clear of every band | Nothing; reports status every 10 minutes. |
-| Warning (inside, in any band) | The band's correction, above. |
+| Warning (inside, in any band) | The band's correction, above, once a second fix has agreed. |
 | Outside (not yet confirmed) | **Stops all corrections** at once. They stay off, even through the bands on the way back, until the dog is inside and clear of every band. |
 | Lost (3 good fixes outside) | **Stops all corrections**, sends a breach alert, reports position every 30 s. |
 | Outside for 90 s | **Lost beacon**: Bluetooth name "Rex is lost 5551234567" 90 s on / 90 s off, a plain-text "Please help get Rex home. Call …" on the public mesh channel every 5 minutes, GPS at half the lost rate. Until back inside or silenced from the base. |
