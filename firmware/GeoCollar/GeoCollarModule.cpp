@@ -25,10 +25,10 @@
 #include "PowerStatus.h"
 #include "SPILock.h"
 #include "SafeFile.h"
-#include "main.h"
 #include "SinglePortModule.h"
 #include "concurrency/LockGuard.h"
 #include "concurrency/OSThread.h"
+#include "main.h" // rebootAtMsec
 #include "mesh/AdminKeys.h"
 
 #if !MESHTASTIC_EXCLUDE_GPS
@@ -77,14 +77,13 @@ constexpr uint32_t kGpsLockWaitMs = 30 * 1000;
 constexpr uint32_t kNoFixReportMs = 5 * 60 * 1000;
 // The first report after boot goes out this long after power-up, once the radio has settled.
 constexpr uint32_t kBootReportMs = 15 * 1000;
-// Nobody watches a collar's screen. With Meshtastic's screen timeout left at its default (10
-// minutes after every button press, boot or text message on the mesh) the backlight is lit for
-// GEOCOLLAR_SCREEN_ON_SECS instead. 30 s is what versions 0.16 to 0.19 set, so it counts as the
-// default too. Any other timeout the owner sets in the Meshtastic app is left alone.
-constexpr uint32_t kOldScreenOnSecs = 30;
 // Bluetooth advertising, slowed (GEOCOLLAR_BLE_ADV_MS), is applied again this often, in case
 // Meshtastic restarted its own fast advertising in the meantime.
 constexpr uint32_t kSlowAdvRefreshMs = 60 * 1000;
+// Nobody watches a collar's screen. Versions 0.16 to 0.19 cut Meshtastic's default timeout (10
+// minutes after every button press, boot or text message) to this; it now counts as a default
+// too, and both give way to GEOCOLLAR_SCREEN_ON_SECS (see applyPowerSettings).
+constexpr uint32_t kScreenOnSecs = 30;
 
 uint16_t clampU16(uint32_t v)
 {
@@ -873,7 +872,7 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
         // Set in RAM only: Meshtastic writes it with the rest of its settings the next time it
         // saves them, which changes nothing, since it is replaced here only while it is a default.
         if (GEOCOLLAR_SCREEN_ON_SECS &&
-            (config.display.screen_on_secs == 0 || config.display.screen_on_secs == kOldScreenOnSecs))
+            (config.display.screen_on_secs == 0 || config.display.screen_on_secs == kScreenOnSecs))
             config.display.screen_on_secs = GEOCOLLAR_SCREEN_ON_SECS;
     }
 
