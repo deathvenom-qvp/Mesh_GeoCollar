@@ -1,30 +1,28 @@
 # Changelog
 
-## 0.20.0
+## 0.19.2
 
-A phone app for Android and iOS, and what the base and the collar need for it. New collar
-firmware. Tested with the PC tests of all three parts, with the app's own messages run against
-the collar's code built for a PC, and in a browser with a simulated and a demo collar. **Nothing
-of it has run on a real collar or a real phone yet.**
+Collar firmware that uses less battery. Only the collar firmware changed. Tested with the
+firmware's PC tests and the firmware build check, not on a real collar: no current has been
+measured yet. Details, with what each setting costs and saves, are in
+[docs/hardware.md](../docs/hardware.md#battery-life).
 
-- **Connect app**, in a collar's new **Phone app** panel, links a phone to that collar. It makes
-  a key for the phone and shows it once as a QR code for the app to scan (or as text to paste).
-  The base sends the key to the collar over the mesh, and the panel says when the collar has
-  confirmed it. Up to 4 phones per collar, each with its own key, each removable on its own.
-- The app talks to the collar over Bluetooth, with no mesh or internet in between. It shows the
-  collar on a map next to the phone's own position, with the distance and direction, the state,
-  the battery and the GPS fix, and it can **mute the lost alert**, make the collar beep or
-  vibrate, and pause and resume corrections. A phone can never shock or change fences: the collar
-  refuses that from a phone, whatever it is sent.
-- A lost collar with a linked phone stays reachable on Bluetooth during the quiet half of its
-  lost beacon, by showing its ordinary name every 2 seconds. A collar with no linked phone is
-  silent in that half, as before.
-- Collar firmware 0.20: checks every request from a phone against that phone's key
-  (HMAC-SHA256, a fresh session each time, a counter against replays), keeps the keys in flash,
-  and tells the base in its reports whether it holds any. Flash collars again to use the app.
-  Older firmware ignores the key list, and the panel keeps saying it is waiting.
-- The app itself is in `app/` in the repository. Each build of main publishes an Android build to
-  install by hand; the iOS app has to be built and signed with your own Apple developer account.
+- **Wi-Fi stays off.** A collar that still has Wi-Fi on (from Wi-Fi updates before 0.17.0) turns
+  it off, saves that, and restarts once so Bluetooth can start. Wi-Fi kept the CPU at 240 MHz
+  instead of 80 and stopped the lost beacon's Bluetooth name.
+- **The screen stays dark.** It lights for 1 second, not 30, after a boot, a button press or a
+  text message. A screen timeout set in the Meshtastic app is kept, other than the 30 s earlier
+  versions set.
+- **No relaying.** A collar with Meshtastic's default role, Client, now runs as Client Mute: it
+  sends and receives its own messages as before but no longer repeats other nodes' packets. Other
+  roles are left alone.
+- **Slower Bluetooth advertising** while no phone is connected: every second, not every 30 to 60
+  ms. Phones still find the collar within a second or two. The lost beacon is unchanged.
+- **Meshtastic's power saving is turned off** if it was on. On an ESP32 it sleeps for minutes at a
+  time, with the fence unwatched.
+- **GPS fixes come as often as the pacing says.** Meshtastic holds the GPS on for up to 20 s after
+  each lock before reporting the fix, so deep inside the fences a fix came every 80 s instead of
+  60. The collar now allows for that. This costs a little GPS time; it is a fix, not a saving.
 
 ## 0.19.0
 
