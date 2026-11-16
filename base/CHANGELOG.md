@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.19.2
+
+Collar firmware that uses less battery. Only the collar firmware changed. Tested with the
+firmware's PC tests and the firmware build check, not on a real collar: no current has been
+measured yet. Details, with what each setting costs and saves, are in
+[docs/hardware.md](../docs/hardware.md#battery-life).
+
+- **Wi-Fi stays off.** A collar that still has Wi-Fi on (from Wi-Fi updates before 0.17.0) turns
+  it off, saves that, and restarts once so Bluetooth can start. Wi-Fi kept the CPU at 240 MHz
+  instead of 80 and stopped the lost beacon's Bluetooth name.
+- **The screen stays dark.** It lights for 1 second, not 30, after a boot, a button press or a
+  text message. A screen timeout set in the Meshtastic app is kept, other than the 30 s earlier
+  versions set.
+- **No relaying.** A collar with Meshtastic's default role, Client, now runs as Client Mute: it
+  sends and receives its own messages as before but no longer repeats other nodes' packets. Other
+  roles are left alone.
+- **Slower Bluetooth advertising** while no phone is connected: every second, not every 30 to 60
+  ms. Phones still find the collar within a second or two. The lost beacon is unchanged.
+- **Meshtastic's power saving is turned off** if it was on. On an ESP32 it sleeps for minutes at a
+  time, with the fence unwatched.
+- **GPS fixes come as often as the pacing says.** Meshtastic holds the GPS on for up to 20 s after
+  each lock before reporting the fix, so deep inside the fences a fix came every 80 s instead of
+  60. The collar now allows for that. This costs a little GPS time; it is a fix, not a saving.
+
 ## 0.19.0
 
 A log of where each collar has been, and a way to clear the path on the map. Only the base app

@@ -28,6 +28,7 @@
 #include "SinglePortModule.h"
 #include "concurrency/LockGuard.h"
 #include "concurrency/OSThread.h"
+#include "main.h" // rebootAtMsec
 #include "mesh/AdminKeys.h"
 
 #if !MESHTASTIC_EXCLUDE_GPS
@@ -76,9 +77,12 @@ constexpr uint32_t kGpsLockWaitMs = 30 * 1000;
 constexpr uint32_t kNoFixReportMs = 5 * 60 * 1000;
 // The first report after boot goes out this long after power-up, once the radio has settled.
 constexpr uint32_t kBootReportMs = 15 * 1000;
-// Nobody watches a collar's screen. With Meshtastic's screen timeout left at its default (10
-// minutes after every button press, boot or text message on the mesh) the backlight is lit for
-// this long instead. A timeout the owner sets in the Meshtastic app is left alone.
+// Bluetooth advertising, slowed (GEOCOLLAR_BLE_ADV_MS), is applied again this often, in case
+// Meshtastic restarted its own fast advertising in the meantime.
+constexpr uint32_t kSlowAdvRefreshMs = 60 * 1000;
+// Nobody watches a collar's screen. Versions 0.16 to 0.19 cut Meshtastic's default timeout (10
+// minutes after every button press, boot or text message) to this; it now counts as a default
+// too, and both give way to GEOCOLLAR_SCREEN_ON_SECS (see applyPowerSettings).
 constexpr uint32_t kScreenOnSecs = 30;
 
 uint16_t clampU16(uint32_t v)
@@ -285,6 +289,66 @@ class BeaconAdvertiser
     uint32_t appliedMs_ = 0;
 };
 
+/// Slower Bluetooth advertising while the lost beacon is off. Meshtastic advertises every 30 to
+/// 60 ms (its BLE library's default), which keeps the radio busy all day for a phone that is
+/// rarely near. Every GEOCOLLAR_BLE_ADV_MS is still quick to find for the Meshtastic app (and the
+/// GeoCollar app), and it is what the beacon itself uses. Nothing is changed while a phone is
+/// connected. Meshtastic starts its fast advertising again after every disconnect and when the
+/// beacon ends; this notices within kSlowAdvRefreshMs and slows it down again.
+class SlowAdvertiser
+{
+  public:
+    /// Call about once a second while the lost beacon is off.
+    void update(uint32_t nowMs)
+    {
+#if GEOCOLLAR_HAS_BLE
+        if (GEOCOLLAR_BLE_ADV_MS == 0)
+            return;
+        // Not called for a while (the beacon was on, with its own advertising): look afresh.
+        if (nowMs - calledMs_ > 5000)
+            applied_ = false;
+        calledMs_ = nowMs;
+        if (!nimbleBluetooth || !nimbleBluetooth->isActive()) {
+            applied_ = false;
+            return;
+        }
+        BLEServer *server = BLEDevice::getServer();
+        if (nimbleBluetooth->isConnected() || (server && server->getConnectedCount() > 0)) {
+            applied_ = false; // a phone is connected: leave Bluetooth alone
+            return;
+        }
+        BLEAdvertising *adv = BLEDevice::getAdvertising();
+        if (!adv->isAdvertising()) {
+            applied_ = false; // Meshtastic is about to start it again (after a disconnect)
+            return;
+        }
+        if (applied_ && nowMs - appliedMs_ < kSlowAdvRefreshMs)
+            return;
+        // Same advertisement, only less often: stop and start keep Meshtastic's data.
+        const uint16_t units = (uint32_t)GEOCOLLAR_BLE_ADV_MS * 1000 / 625; // 0.625 ms units
+        adv->stop();
+        adv->setMinInterval(units);
+        adv->setMaxInterval(units);
+        if (!adv->start(0)) {
+            LOG_ERROR("GeoCollar: slow advertising failed"); // Meshtastic's own may be restarting
+            applied_ = false;
+            return;
+        }
+        if (!applied_)
+            LOG_DEBUG("GeoCollar: Bluetooth advertising every %u ms", (unsigned)GEOCOLLAR_BLE_ADV_MS);
+        applied_ = true;
+        appliedMs_ = nowMs;
+#else
+        (void)nowMs;
+#endif
+    }
+
+  private:
+    bool applied_ = false;
+    uint32_t appliedMs_ = 0;
+    uint32_t calledMs_ = 0;
+};
+
 class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
 {
   public:
@@ -295,11 +359,7 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
             pinMode(GEOCOLLAR_DISABLE_PIN, INPUT_PULLUP);
         tx_.begin();
         loadState();
-        // Runs before Meshtastic sets up its screen timer, so this is the timeout it uses. Set in
-        // RAM; Meshtastic writes it to flash the next time it saves its settings, which changes
-        // nothing: it is replaced here only while it is still the default.
-        if (config.display.screen_on_secs == 0)
-            config.display.screen_on_secs = kScreenOnSecs;
+        applyPowerSettings();
         LOG_INFO("GeoCollar: ready, fence v%u, %u zones", engine_.fences().version, engine_.fences().zoneCount);
     }
 
@@ -432,6 +492,7 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
         if (!named_) {
             named_ = true;
             nameFreshCollar();
+            savePowerSettings();
         }
         watchForFixes();
 
@@ -546,9 +607,9 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
     /// keeps the GPS searching. Meshtastic gives up after 15 minutes without a lock and then
     /// looks again only once per position broadcast interval (15 minutes by default, an hour at
     /// most), which would leave a dog that has come back out from under a roof unfenced for that
-    /// long. With fences loaded the search is restarted every minute instead. Where Meshtastic can
-    /// switch the GPS off, that keeps it powered while the dog is indoors; on the Wireless Tracker
-    /// the GPS is powered all the time anyway.
+    /// long. With fences loaded the search is restarted every minute instead, which keeps the GPS
+    /// powered while the dog is indoors. (On the Wireless Tracker Meshtastic powers the GPS down
+    /// between fixes more than 10 s apart, by switching off Vext while the screen is dark too.)
     void watchGps(uint32_t now)
     {
         const bool noFix = fixWatch_.tick(now, config.position.gps_update_interval);
@@ -604,7 +665,9 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
         }
         const uint32_t want = gpsIntervalSecs(engine_.settings(), engine_.state(), lastClearance_,
                                               alertWidthM(engine_.fences()), beacon_.active());
-        const uint32_t target = want ? want : ownerGpsSecs_;
+        // Meshtastic adds a wait after each lock to the interval it is given (gpsSettingSecs), so
+        // it is given less, to make the fixes come every `want` seconds.
+        const uint32_t target = want ? gpsSettingSecs(want) : ownerGpsSecs_;
         if (current != target) {
             LOG_DEBUG("GeoCollar: GPS interval %us -> %us", (unsigned)current, (unsigned)target);
             current = target;
@@ -627,6 +690,7 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
         }
         if (!active) {
             ble_.update(nullptr, now);
+            slowAdv_.update(now);
             return;
         }
         char name[30];
@@ -771,6 +835,58 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
             break;
         }
         sendStatus(statusType());
+    }
+
+    /// Meshtastic settings that cost battery and do nothing for a collar, put right in RAM. Runs
+    /// from the constructor: before Meshtastic starts Wi-Fi, sets up its power states (screen
+    /// timeout, light sleep) and picks the CPU speed, so they all see these values. The changed
+    /// settings are saved from the first runOnce() (savePowerSettings).
+    void applyPowerSettings()
+    {
+#if GEOCOLLAR_WIFI_OFF
+        if (config.network.wifi_enabled) {
+            // Bluetooth was already left out of this boot if a network was set (Meshtastic
+            // decides that before modules start), so restart once the setting is saved.
+            powerRestart_ = config.network.wifi_ssid[0] != 0;
+            config.network.wifi_enabled = false;
+            powerSave_ = true;
+            LOG_WARN("GeoCollar: Wi-Fi turned off, to save battery and keep Bluetooth for the lost beacon");
+        }
+#endif
+        // Meshtastic's power saving puts an ESP32 into light sleep for minutes at a time (ls_secs,
+        // 5 minutes by default) with Bluetooth off: no GPS readings, no fence and no corrections
+        // in that time. On a collar that costs more than it saves.
+        if (config.power.is_power_saving) {
+            config.power.is_power_saving = false;
+            powerSave_ = true;
+            LOG_WARN("GeoCollar: Meshtastic power saving turned off: its light sleep would leave the fence unwatched");
+        }
+#if GEOCOLLAR_NO_RELAY
+        if (config.device.role == meshtastic_Config_DeviceConfig_Role_CLIENT) {
+            // Still sends and receives its own messages; other nodes still relay for it.
+            config.device.role = meshtastic_Config_DeviceConfig_Role_CLIENT_MUTE;
+            powerSave_ = true;
+            LOG_INFO("GeoCollar: role Client Mute, so the collar does not relay other nodes' packets");
+        }
+#endif
+        // Set in RAM only: Meshtastic writes it with the rest of its settings the next time it
+        // saves them, which changes nothing, since it is replaced here only while it is a default.
+        if (GEOCOLLAR_SCREEN_ON_SECS &&
+            (config.display.screen_on_secs == 0 || config.display.screen_on_secs == kScreenOnSecs))
+            config.display.screen_on_secs = GEOCOLLAR_SCREEN_ON_SECS;
+    }
+
+    /// Save what applyPowerSettings() changed, so a restart does not start Wi-Fi again.
+    void savePowerSettings()
+    {
+        if (!powerSave_ || !nodeDB)
+            return;
+        powerSave_ = false;
+        nodeDB->saveToDisk(SEGMENT_CONFIG);
+        if (powerRestart_) {
+            LOG_WARN("GeoCollar: restarting in 5 s, to start Bluetooth without Wi-Fi");
+            rebootAtMsec = millis() + 5000;
+        }
     }
 
     /// A freshly installed collar has Meshtastic's default name, "Meshtastic 1a2b". Call it
@@ -969,6 +1085,9 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
     uint32_t lastGpsKickMs_ = 0;
     bool kickWaited_ = false; // the last restart was put off because the GPS had a lock
     float lastClearance_ = 0;
+    SlowAdvertiser slowAdv_;
+    bool powerSave_ = false;    // applyPowerSettings() changed a setting that has to be saved
+    bool powerRestart_ = false; // and Bluetooth needs a restart to come back
     bool autoCorrection_ = false; // the correction playing came from the fence, not from the owner
     uint32_t ownerGpsSecs_ = 0;   // the owner's own GPS interval, put back when the fences do not pace it
     bool ownerGpsKnown_ = false;  // read from the state file, or recorded on the first pass

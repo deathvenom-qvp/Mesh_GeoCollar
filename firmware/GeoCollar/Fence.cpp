@@ -348,6 +348,17 @@ uint32_t fixOverdueMs(uint32_t gpsIntervalSecs)
     return (secs + 60) * 1000;
 }
 
+uint32_t gpsSettingSecs(uint32_t fixEverySecs)
+{
+    constexpr uint32_t kAlwaysOnSecs = 10, kMaxHoldSecs = 20;
+    if (fixEverySecs <= kAlwaysOnSecs)
+        return fixEverySecs;
+    if (fixEverySecs >= 2 * kMaxHoldSecs + kAlwaysOnSecs)
+        return fixEverySecs - kMaxHoldSecs; // a hold of the full 20 s
+    // interval + (interval - 10) = fixEverySecs, rounded down so the fixes come a little early
+    return (fixEverySecs + kAlwaysOnSecs) / 2;
+}
+
 bool FixWatch::tick(uint32_t nowMs, uint32_t gpsIntervalSecs)
 {
     if (!started_ || gpsIntervalSecs != intervalSecs_) {
