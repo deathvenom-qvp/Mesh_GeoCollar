@@ -28,6 +28,7 @@ from . import geo
 from . import protocol
 from . import radio
 from .mesh import MeshLink
+from . import sim as simmod
 from .sim import Simulator
 from .store import Store
 
@@ -63,6 +64,20 @@ class CollarPatch(BaseModel):
 class ContactIn(BaseModel):
     name: str = ""
     phone: str = ""
+
+
+ANCHOR_KINDS = {"off": protocol.AnchorKind.NONE, "beacon": protocol.AnchorKind.BEACON,
+                "base": protocol.AnchorKind.BASE_RADIO}
+GPS_RESTART_CHOICES = (10, 30, 60)  # seconds the collar's GPS may take to fix after home mode
+
+
+class HomeAnchorIn(BaseModel):
+    kind: str = "off"  # off, beacon (a Bluetooth beacon by its address) or base (the base radio)
+    address: str = ""  # the beacon's Bluetooth address
+    rssi: int = -75  # how strong the anchor must be heard, dBm: how close counts as home
+    lat: float | None = None  # where the anchor stands; left out: the base's home location
+    lon: float | None = None
+    gps_restart_s: int = 30  # for the room check only
 
 
 class RadioIn(BaseModel):
@@ -277,25 +292,63 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
         store.set_collar_info(node_id, "owner_seq", seq or None)
         return True
 
+    def home_anchor() -> protocol.HomeAnchor | None:
+        """The home anchor the owner chose (kind NONE: home mode off), None if never set."""
+        a = store.setting("home_anchor")
+        if not a:
+            return None
+        return protocol.HomeAnchor(ANCHOR_KINDS.get(a.get("kind"), protocol.AnchorKind.NONE),
+                                   a.get("address", ""), int(a.get("rssi", -75)))
+
+    home_cache: dict = {}
+
+    def anchor_position() -> tuple[float, float] | None:
+        """Where the anchor stands: where the owner put it, else the base's home location."""
+        a = store.setting("home_anchor") or {}
+        if a.get("kind", "off") == "off":
+            return None
+        if a.get("lat") is not None and a.get("lon") is not None:
+            return float(a["lat"]), float(a["lon"])
+        if "home" not in home_cache:
+            h = geo.parse_home(settings.get("home", "")) or geo.ha_home()
+            if not h:
+                return None  # asked again next time: Home Assistant may not be up yet
+            home_cache["home"] = (float(h["lat"]), float(h["lon"]))
+        return home_cache["home"]
+
+    def config_for(node_id: str):
+        """What the collar should have been sent: its report interval and, once the owner has set
+        one (on or off), the home anchor. None: nothing to send."""
+        report_s = (store.collar(node_id) or {}).get("report_s")
+        a = store.setting("home_anchor")
+        if not a:
+            return report_s or None  # a bare number, as bases before 0.19.2 stored it
+        anchor = home_anchor()
+        return [report_s or 0, int(anchor.kind), anchor.address, anchor.rssi]
+
     def push_config(node_id: str) -> bool:
-        """The collar's report interval, if the owner set one."""
+        """The collar's report interval, if the owner set one, and the home anchor."""
         c = store.collar(node_id) or {}
-        report_s = c.get("report_s")
-        if not report_s:
+        want = config_for(node_id)
+        if want is None:
             return False
+        report_s = c.get("report_s") or 0
+        anchor = home_anchor()
         seq = 0
         if node_id in sim:
-            sim.update(node_id, {"report_s": min(report_s, 600)})
+            if report_s:
+                sim.update(node_id, {"report_s": min(report_s, 600)})
+            sim.set_anchor(node_id, anchor, anchor_position())
         elif link.connected:
             seq = store.next_command_seq()  # always numbered: firmware 0.15 skips the number
             try:
-                link.send_config(node_id, report_s, seq)
+                link.send_config(node_id, report_s, seq, anchor)
             except Exception as e:  # noqa: BLE001 - retried on the collar's next report
-                log.warning("could not send the report interval to %s: %s", node_id, e)
+                log.warning("could not send the collar settings to %s: %s", node_id, e)
                 return False
         else:
             return False
-        store.set_collar_info(node_id, "config_sent", report_s)
+        store.set_collar_info(node_id, "config_sent", want)
         store.set_collar_info(node_id, "config_seq", seq or None)
         return True
 
@@ -400,7 +453,8 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
         # message arrives, it would still accept a recording of an old one.
         if c.get("owner_sent") != owner_for(node_id) or (numbered and not c.get("owner_seq")):
             push_owner(node_id)
-        if c.get("report_s") and (c.get("config_sent") != c["report_s"] or (numbered and not c.get("config_seq"))):
+        want = config_for(node_id)
+        if want is not None and (c.get("config_sent") != want or (numbered and not c.get("config_seq"))):
             push_config(node_id)
         # The list of companion app keys goes again until the collar has confirmed it. So it does
         # when the collar's report disagrees with the base about holding any: a collar that was
@@ -530,6 +584,7 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
         if c.get("sim"):
             sim.add(node_id, c["sim"])
             sim.set_owner(node_id, *owner_for(node_id))
+            sim.set_anchor(node_id, home_anchor(), anchor_position())
             if c.get("fences"):
                 try:
                     sim.set_fences(node_id, protocol.zones_from_geojson(c["fences"]), c.get("fence_version", 0),
@@ -686,9 +741,8 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
             store.upsert_collar(node_id, name)
             out["owner_sent"] = push_owner(node_id)
         if body.report_s is not None:
-            changed = (store.collar(node_id) or {}).get("config_sent") != body.report_s
             store.set_collar_info(node_id, "report_s", body.report_s)
-            if changed:
+            if (store.collar(node_id) or {}).get("config_sent") != config_for(node_id):
                 out["config_sent"] = push_config(node_id)
         return {**(public_collar(store.collar(node_id)) or {}), **out}
 
@@ -708,6 +762,74 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
         store.set_setting("contact", {"name": name, "phone": phone})
         sent = [node_id for node_id in store.collars() if push_owner(node_id)]
         return {"name": name, "phone": phone, "sent_to": sent}
+
+    def home_anchor_view() -> dict:
+        """The home anchor setting, with what stands in its way: per collar, whether a running dog
+        would get its first fix before reaching the bands; for the base radio, its Bluetooth."""
+        a = dict(store.setting("home_anchor") or {"kind": "off", "address": "", "rssi": -75})
+        a.setdefault("gps_restart_s", 30)
+        kind = ANCHOR_KINDS.get(a.get("kind"), protocol.AnchorKind.NONE)
+        at = anchor_position()
+        out = {**a, "position": list(at) if at else None, "position_set": a.get("lat") is not None,
+               "range_m": simmod.anchor_range_m(kind, int(a.get("rssi", -75))), "collars": [], "warnings": []}
+        if kind == protocol.AnchorKind.NONE:
+            return out
+        need = simmod.home_room_needed_m(kind, int(a.get("rssi", -75)), a["gps_restart_s"])
+        out["need_m"] = need
+        for node_id, c in store.collars().items():
+            row = {"node_id": node_id, "name": c.get("name") or node_id,
+                   "home": bool((c.get("status") or {}).get("home"))}
+            if c.get("fences") and at:
+                try:
+                    zones = protocol.zones_from_geojson(c["fences"])
+                except (KeyError, ValueError):
+                    zones = []
+                if zones:
+                    room = simmod.room_from_anchor_m(zones, *at)
+                    row["room_m"] = round(room)
+                    row["ok"] = room >= need
+            out["collars"].append(row)
+        if not at:
+            out["warnings"].append("Set the base's home location (or place the anchor on the map) so the distance to "
+                                   "the fences can be checked.")
+        if kind == protocol.AnchorKind.BASE_RADIO:
+            info = link.base_info() if link.connected and hasattr(link, "base_info") else {}
+            if info.get("bluetooth") is False:
+                out["warnings"].append("Bluetooth is off on the base radio, so collars cannot hear it. Turn it on in "
+                                       "the Meshtastic app (Settings > Bluetooth), or use a beacon.")
+            if str(info.get("connection", "")).startswith("network"):
+                out["warnings"].append("The base radio is connected over the network. Meshtastic turns Bluetooth off "
+                                       "while Wi-Fi is on, so collars cannot hear it. Connect it by USB, or use a beacon.")
+        return out
+
+    @app.get("/api/home-anchor")
+    def get_home_anchor():
+        return home_anchor_view()
+
+    @app.put("/api/home-anchor")
+    def put_home_anchor(body: HomeAnchorIn):
+        """Home mode: while a collar hears this anchor strongly enough, and its last fix was inside,
+        clear of every band, it turns its GPS off. Sent to every collar."""
+        if body.kind not in ANCHOR_KINDS:
+            raise HTTPException(400, f"kind is one of {', '.join(ANCHOR_KINDS)}")
+        if not protocol.MIN_ANCHOR_RSSI <= body.rssi <= protocol.MAX_ANCHOR_RSSI:
+            raise HTTPException(400, f"the signal threshold is {protocol.MIN_ANCHOR_RSSI} to "
+                                     f"{protocol.MAX_ANCHOR_RSSI} dBm")
+        address = ""
+        if body.kind == "beacon":
+            try:
+                address = protocol.format_bt_address(protocol.parse_bt_address(body.address))
+            except ValueError as e:
+                raise HTTPException(400, str(e)) from e
+        if (body.lat is None) != (body.lon is None) or (
+                body.lat is not None and not (-90 <= body.lat <= 90 and -180 <= body.lon <= 180)):
+            raise HTTPException(400, "give the anchor's position as both lat and lon, or neither")
+        if body.gps_restart_s not in GPS_RESTART_CHOICES:
+            raise HTTPException(400, f"the GPS restart time is one of {', '.join(map(str, GPS_RESTART_CHOICES))} s")
+        store.set_setting("home_anchor", {"kind": body.kind, "address": address, "rssi": body.rssi,
+                                          "lat": body.lat, "lon": body.lon, "gps_restart_s": body.gps_restart_s})
+        sent = [node_id for node_id in store.collars() if push_config(node_id)]
+        return {**home_anchor_view(), "sent_to": sent}
 
     @app.delete("/api/collars/{node_id}")
     def remove_collar(node_id: str):

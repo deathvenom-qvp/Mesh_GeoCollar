@@ -2,10 +2,21 @@
 
 ## 0.19.2
 
-Collar firmware that uses less battery. Only the collar firmware changed. Tested with the
-firmware's PC tests and the firmware build check, not on a real collar: no current has been
-measured yet. Details, with what each setting costs and saves, are in
+Collars that use less battery: leaner firmware settings, and a new home mode that turns the GPS
+off while the dog is near the house. Tested with the firmware's PC tests, the firmware build
+check, the app's own tests and simulated collars in a browser, not on a real collar: no current
+has been measured yet. Details, with what each setting costs and saves, are in
 [docs/hardware.md](../docs/hardware.md#battery-life).
+
+- **Home mode** (Settings > Home mode). Pick what the collars listen for: **the base station's
+  radio** over Bluetooth, or **a Bluetooth beacon** by its address, and how close counts as home.
+  While a collar hears it that strongly for 20 s, and its last fix showed the dog inside and
+  clear of every band, it turns its GPS off, with a fix about once an hour to check. Once the
+  anchor has faded for 7 s the GPS comes back on and fixes as often as near the line. The GPS is
+  most of a collar's battery, so a dog that spends most of its day indoors should run much
+  longer. The card shows, for each collar, whether a running dog would have a fix again before
+  it reaches the bands, and the collar list says "home, GPS off". Off until you turn it on.
+  Needs this collar firmware; older collars ignore it.
 
 - **Wi-Fi stays off.** A collar that still has Wi-Fi on (from Wi-Fi updates before 0.17.0) turns
   it off, saves that, and restarts once so Bluetooth can start. Wi-Fi kept the CPU at 240 MHz

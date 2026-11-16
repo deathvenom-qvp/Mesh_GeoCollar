@@ -34,6 +34,8 @@ APP_KEY_LEN = 16
 APP_NONCE_LEN = 8
 APP_TAG_LEN = 8
 APP_NO_FIX_AGE = 0xFFFF
+MIN_ANCHOR_RSSI = -100  # home anchor signal threshold limits, dBm (kMinAnchorRssi..kMaxAnchorRssi)
+MAX_ANCHOR_RSSI = -30
 
 
 class MsgType(IntEnum):
@@ -73,6 +75,39 @@ APP_ACTIONS = frozenset({
     CommandAction.REQUEST_STATUS, CommandAction.SILENCE_LOST, CommandAction.BEEP, CommandAction.VIBRATE,
     CommandAction.CORRECTIONS_OFF, CommandAction.CORRECTIONS_ON,
 })
+
+
+class AnchorKind(IntEnum):
+    """What the collar listens for to know it is home (firmware: enum class AnchorKind)."""
+
+    NONE = 0  # home mode off
+    BEACON = 1  # a Bluetooth beacon, by its address
+    BASE_RADIO = 2  # the base station's Meshtastic radio, by its Bluetooth name
+
+
+@dataclass
+class HomeAnchor:
+    """Home mode: while the collar hears this anchor at rssi dBm or stronger (and its last fix was
+    inside, clear of every band), it turns its GPS off. address is the beacon's Bluetooth address,
+    "AA:BB:CC:DD:EE:FF"; unused for the base radio, which the collar knows as the node that
+    sends it fences."""
+
+    kind: AnchorKind = AnchorKind.NONE
+    address: str = ""
+    rssi: int = -75
+
+
+def parse_bt_address(text: str) -> bytes:
+    """A Bluetooth address, "AA:BB:CC:DD:EE:FF" (or with - or nothing between), most significant
+    byte first."""
+    hexits = "".join(ch for ch in (text or "") if ch not in ":- ").lower()
+    if len(hexits) != 12 or any(ch not in "0123456789abcdef" for ch in hexits):
+        raise ValueError("a Bluetooth address is six pairs of hex digits, like AA:BB:CC:DD:EE:FF")
+    return bytes.fromhex(hexits)
+
+
+def format_bt_address(data: bytes) -> str:
+    return ":".join(f"{b:02X}" for b in data)
 
 
 class CollarState(IntEnum):
@@ -131,6 +166,7 @@ class Status:
     no_fix: bool = False  # no current GPS fix: lat / lon are the last position the collar knew
     numbered: bool = False  # the collar's firmware reads sequence numbers on Owner and Config
     apps: bool = False  # the collar holds the key of at least one companion app
+    home: bool = False  # near the home anchor with the GPS off: lat / lon are the last position
 
 
 _STATUS = struct.Struct("<BBHBBiiHBhB")
@@ -201,22 +237,45 @@ def mesh_names(dog: str) -> tuple[str, str]:
     return _cut_utf8(name, 39), short
 
 
-def encode_config(report_s: int, seq: int = 0) -> bytes:
-    """How often the collar reports, in seconds (MIN_REPORT_S..MAX_REPORT_S). While lost it
-    reports at least every 30 s whatever this says. Collar firmware before 0.15 ignores it.
+def encode_config(report_s: int, seq: int = 0, anchor: HomeAnchor | None = None) -> bytes:
+    """How often the collar reports, in seconds (MIN_REPORT_S..MAX_REPORT_S, or 0 for the
+    firmware's default). While lost it reports at least every 30 s whatever this says. Collar
+    firmware before 0.15 ignores it.
 
     seq is a sequence number as for encode_owner (0 leaves it out). Firmware 0.15 reads the
-    interval and ignores the number."""
-    if not MIN_REPORT_S <= report_s <= MAX_REPORT_S:
+    interval and ignores the number.
+
+    anchor sets home mode (firmware 0.19.2 on; older firmware ignores it). It needs a sequence
+    number. AnchorKind.NONE turns home mode off."""
+    if report_s != 0 and not MIN_REPORT_S <= report_s <= MAX_REPORT_S:
         raise ValueError(f"report interval must be {MIN_REPORT_S}..{MAX_REPORT_S} s")
     out = bytes([VERSION, MsgType.CONFIG]) + struct.pack("<H", report_s)
-    return out + struct.pack("<I", seq & 0xFFFFFFFF) if seq else out
+    if not seq:
+        if anchor is not None:
+            raise ValueError("the home anchor needs a sequence number")
+        return out
+    out += struct.pack("<I", seq & 0xFFFFFFFF)
+    if anchor is not None:
+        if not MIN_ANCHOR_RSSI <= anchor.rssi <= MAX_ANCHOR_RSSI:
+            raise ValueError(f"the anchor's signal threshold must be {MIN_ANCHOR_RSSI}..{MAX_ANCHOR_RSSI} dBm")
+        addr = parse_bt_address(anchor.address) if anchor.kind == AnchorKind.BEACON else bytes(6)
+        out += bytes([AnchorKind(anchor.kind)]) + addr + struct.pack("<b", anchor.rssi)
+    return out
 
 
 def decode_config(data: bytes) -> int:
     if len(data) < 4 or data[0] != VERSION or data[1] != MsgType.CONFIG:
         raise ValueError("not a GeoCollar config message")
     return struct.unpack_from("<H", data, 2)[0]
+
+
+def decode_config_anchor(data: bytes) -> HomeAnchor | None:
+    """The home anchor on a config message, None if it has none."""
+    decode_config(data)
+    if len(data) < 8 + 8:
+        return None
+    kind, rssi = data[8], struct.unpack_from("<b", data, 15)[0]
+    return HomeAnchor(AnchorKind(kind), format_bt_address(data[9:15]) if kind == AnchorKind.BEACON else "", rssi)
 
 
 def decode_config_seq(data: bytes) -> int:
@@ -286,6 +345,7 @@ def decode_status(data: bytes) -> Status:
         no_fix=bool(flags & 0x10),
         numbered=bool(flags & 0x20),
         apps=bool(flags & 0x40),
+        home=bool(flags & 0x80),
     )
 
 
@@ -294,7 +354,7 @@ def encode_status(s: Status) -> bytes:
     flags = (
         (1 if s.corrections_enabled else 0) | (2 if s.shock_enabled else 0)
         | (4 if s.beacon_active else 0) | (8 if s.beacon_silenced else 0)
-        | (0x10 if s.no_fix else 0) | (0x20 if s.numbered else 0) | (0x40 if s.apps else 0)
+        | (0x10 if s.no_fix else 0) | (0x20 if s.numbered else 0) | (0x40 if s.apps else 0) | (0x80 if s.home else 0)
     )
     return _STATUS.pack(
         VERSION, s.msg_type, s.fence_version, s.state, s.battery_pct, _to_i(s.lat), _to_i(s.lon),

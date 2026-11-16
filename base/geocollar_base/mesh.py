@@ -293,6 +293,10 @@ class MeshLink:
             # as the preset's) shares the slot with strangers on the default channel.
             lora = getattr(cfg, "lora", None)
             out["default_slot"] = not primary.name and not (lora and (lora.channel_num or lora.override_frequency))
+        try:  # home mode with the base radio as the anchor needs its Bluetooth on
+            out["bluetooth"] = bool(cfg.bluetooth.enabled) if cfg is not None else None
+        except AttributeError:
+            out["bluetooth"] = None
         if user.get("isLicensed"):
             issues.append("Licensed (ham) mode is on, which turns off encryption; collars cannot trust this base.")
         if not key:
@@ -311,9 +315,9 @@ class MeshLink:
         protocol.encode_owner: 0 for collar firmware that does not read it."""
         self._send(node_id, protocol.encode_owner(dog, owner, phone, seq))
 
-    def send_config(self, node_id: str, report_s: int, seq: int = 0) -> None:
-        """How often the collar reports."""
-        self._send(node_id, protocol.encode_config(report_s, seq))
+    def send_config(self, node_id: str, report_s: int, seq: int = 0, anchor: protocol.HomeAnchor | None = None) -> None:
+        """How often the collar reports (0: the firmware's default), and the home anchor."""
+        self._send(node_id, protocol.encode_config(report_s, seq, anchor))
 
     def send_app_keys(self, node_id: str, keys: list[tuple[int, bytes]], seq: int) -> None:
         """The phones that may connect to the collar with the companion app (the whole list)."""

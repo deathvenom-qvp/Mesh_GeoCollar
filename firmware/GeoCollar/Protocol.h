@@ -122,6 +122,8 @@ constexpr uint8_t kFlagNoFix = 0x10;          // no current GPS fix: the positio
 constexpr uint8_t kFlagNumbered = 0x20;       // this firmware reads sequence numbers on Owner and Config
 constexpr uint8_t kFlagApps = 0x40;           // the collar holds the key of at least one companion app
 
+constexpr uint8_t kFlagHome = 0x80; // near the home anchor, with the GPS off (the position is the last one known)
+
 constexpr size_t kMaxDogName = 24;
 constexpr size_t kMaxOwnerName = 24;
 constexpr size_t kMaxPhone = 20;
@@ -155,12 +157,16 @@ constexpr uint16_t kMinReportS = 30;
 constexpr uint16_t kMaxReportS = 3600;
 
 /// Collar settings from the base: [version][7][report interval s, u16], then an optional sequence
-/// number (u32, never 0; `seq` = 0 means none). Later fields may follow, so a longer message is
-/// accepted.
+/// number (u32, never 0; `seq` = 0 means none), then (only after a sequence number) the home
+/// anchor: [kind u8][Bluetooth address, 6 bytes, most significant first][RSSI threshold dBm, i8].
+/// Later fields may follow, so a longer message is accepted.
 struct CollarConfig {
     uint16_t reportS = 0;
+    bool hasAnchor = false; // the message carried the anchor (kind None turns home mode off)
+    HomeAnchor anchor;
 };
 constexpr size_t kConfigLength = 2 + 2;
+constexpr size_t kAnchorLength = 1 + 6 + 1;
 size_t encodeConfig(uint8_t *out, size_t cap, const CollarConfig &c, uint32_t seq = 0);
 bool decodeConfig(const uint8_t *buf, size_t len, CollarConfig &c, uint32_t &seq);
 

@@ -49,6 +49,11 @@
 #include "nimble/NimbleBluetooth.h"
 #include <BLEAdvertising.h>
 #include <BLEDevice.h>
+#include <atomic>
+#include <climits>
+#include "host/ble_gap.h"
+#include "host/ble_hs.h"
+#include "host/ble_hs_adv.h"
 #define GEOCOLLAR_HAS_BLE 1
 #else
 #define GEOCOLLAR_HAS_BLE 0
@@ -60,6 +65,13 @@ namespace
 {
 
 constexpr const char *kStateFile = "/prefs/geocollar.bin";
+// The home anchor, in a file of its own: [magic u32][format u8][kind u8][address 6][RSSI dBm i8]
+constexpr const char *kHomeFile = "/prefs/geocollar-home.bin";
+constexpr uint32_t kHomeMagic = 0x4D484347; // "GCHM"
+constexpr uint8_t kHomeFormat = 1;
+// Listening for the anchor: a 100 ms window every 2 s while home (so leaving is noticed within
+// HomeWatch::kLeaveMs), every 5 s while away. In 0.625 ms units.
+constexpr uint16_t kScanWindow = 160, kScanHomeItvl = 3200, kScanAwayItvl = 8000;
 constexpr uint32_t kStateMagic = 0x47434F4C; // "GCOL"
 constexpr uint16_t kStateFormat = 9; // 2: GPS pacing; 3: per-zone bands; 4: pulse intervals; 5: owner; 6: command seq;
                                      // 7: report interval; 8: owner and config sequence numbers, owner's GPS interval;
@@ -375,6 +387,112 @@ class SlowAdvertiser
     uint32_t calledMs_ = 0;
 };
 
+/// Listens for the home anchor's Bluetooth: a beacon by its address, or the base radio by the end
+/// of its Meshtastic Bluetooth name ("Meshtastic_1a2b", where 1a2b ends its node ID). Uses
+/// NimBLE's scanning directly, which the Bluetooth controller runs by itself between windows:
+/// the scan callback runs in NimBLE's task and only keeps the strongest reading for poll().
+/// Bluetooth must be on in the collar's Meshtastic settings, as for the lost beacon.
+class AnchorScanner
+{
+  public:
+    /// Call about once a second. Starts, adjusts or stops the scan, and returns the strongest
+    /// reading of the anchor since the last call (INT_MIN: none).
+    int poll(const HomeAnchor &anchor, uint32_t baseNode, bool home)
+    {
+#if GEOCOLLAR_HAS_BLE
+        const bool want = anchor.kind != AnchorKind::None && nimbleBluetooth && nimbleBluetooth->isActive() &&
+                          (anchor.kind != AnchorKind::BaseRadio || baseNode != 0);
+        char suffix[6];
+        snprintf(suffix, sizeof(suffix), "_%04x", (unsigned)(baseNode & 0xFFFF));
+        const bool same = anchor.kind == kind_ && memcmp(anchor.address, address_, sizeof(address_)) == 0 &&
+                          memcmp(suffix, suffix_, sizeof(suffix_)) == 0;
+        const uint16_t itvl = home ? kScanHomeItvl : kScanAwayItvl;
+        if (!want || !same || itvl != itvl_) {
+            stop();
+            if (!want)
+                return INT_MIN;
+            // Stopped, so the callback is not reading these while they change.
+            kind_ = anchor.kind;
+            memcpy(address_, anchor.address, sizeof(address_));
+            memcpy(suffix_, suffix, sizeof(suffix_));
+            matched_ = false;
+            itvl_ = itvl;
+        }
+        if (!ble_gap_disc_active()) {
+            ble_gap_disc_params p = {};
+            p.itvl = itvl_;
+            p.window = kScanWindow;
+            p.filter_policy = 0; // everyone: the callback picks the anchor
+            p.limited = 0;
+            p.passive = kind_ == AnchorKind::Beacon; // the base radio's name is in its scan response
+            p.filter_duplicates = 0;                  // every reading, for its signal strength
+            const int rc = ble_gap_disc(BLE_OWN_ADDR_PUBLIC, BLE_HS_FOREVER, &p, onGapEvent, this);
+            if (rc != 0 && !warned_) {
+                LOG_WARN("GeoCollar: cannot listen for the home anchor (NimBLE %d), trying again", rc);
+                warned_ = true;
+            } else if (rc == 0) {
+                warned_ = false;
+            }
+        }
+        return best_.exchange(INT_MIN);
+#else
+        (void)anchor;
+        (void)baseNode;
+        (void)home;
+        return INT_MIN;
+#endif
+    }
+
+  private:
+#if GEOCOLLAR_HAS_BLE
+    void stop()
+    {
+        if (ble_gap_disc_active())
+            ble_gap_disc_cancel();
+        best_.store(INT_MIN);
+    }
+
+    static int onGapEvent(struct ble_gap_event *event, void *arg)
+    {
+        if (event->type != BLE_GAP_EVENT_DISC)
+            return 0;
+        AnchorScanner *self = static_cast<AnchorScanner *>(arg);
+        const auto &d = event->disc;
+        bool match = false;
+        if (self->kind_ == AnchorKind::Beacon) {
+            match = true; // NimBLE keeps the address least significant byte first
+            for (int i = 0; i < 6; i++)
+                match = match && d.addr.val[5 - i] == self->address_[i];
+        } else if (self->matched_ && memcmp(d.addr.val, self->matchedAddr_, 6) == 0) {
+            match = true; // the base radio, found by its name before: its advertisements count too
+        } else {
+            ble_hs_adv_fields f;
+            if (ble_hs_adv_parse_fields(&f, d.data, d.length_data) == 0 && f.name && f.name_len >= 5 &&
+                memcmp(f.name + f.name_len - 5, self->suffix_, 5) == 0) {
+                memcpy(self->matchedAddr_, d.addr.val, 6);
+                self->matched_ = true;
+                match = true;
+            }
+        }
+        if (match) {
+            int prev = self->best_.load();
+            while (d.rssi > prev && !self->best_.compare_exchange_weak(prev, d.rssi)) {
+            }
+        }
+        return 0;
+    }
+
+    AnchorKind kind_ = AnchorKind::None;
+    uint8_t address_[6] = {};
+    char suffix_[6] = {};
+    uint8_t matchedAddr_[6] = {};
+    volatile bool matched_ = false;
+    uint16_t itvl_ = 0;
+    bool warned_ = false;
+    std::atomic<int> best_{INT_MIN};
+#endif
+};
+
 class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
 {
   public:
@@ -385,6 +503,7 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
             pinMode(GEOCOLLAR_DISABLE_PIN, INPUT_PULLUP);
         tx_.begin();
         loadState();
+        loadHome();
         applyPowerSettings();
         LOG_INFO("GeoCollar: ready, fence v%u, %u zones", engine_.fences().version, engine_.fences().zoneCount);
     }
@@ -510,6 +629,8 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
                     save = true;
                 reportS_ = c.reportS;
                 lastConfigSeq_ = seq;
+                if (c.hasAnchor)
+                    setAnchor(c.anchor);
                 LOG_INFO("GeoCollar: report every %u s", (unsigned)(reportS_ ? reportS_ : GEOCOLLAR_STATUS_INTERVAL_MS / 1000));
             }
         } else if (type == proto::MsgType::AppKeys) {
@@ -552,6 +673,7 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
             runBeacon();
             const uint32_t now = millis();
             watchGps(now);
+            runHome(now);
             applyGpsPacing();
             report(now);
         }
@@ -638,6 +760,8 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
         lastClearance_ = d.clearanceM; // 0 for a fix too poor to use, which also makes the GPS fix often
         if (!d.fixRejected)
             beacon_.onFix(engine_.state() != CollarState::NoFence && d.clearanceM < 0, fix.nowMs);
+        if (!d.fixRejected) // clear of every band, or not: home mode starts only from a clear fix
+            home_.onFix(engine_.state() == CollarState::Inside, fix.nowMs);
         // Past the line every correction stops at once, including one that is still playing.
         const CollarState st = engine_.state();
         if (autoCorrection_ && tx_.busy() && (st == CollarState::Outside || st == CollarState::Lost)) {
@@ -676,7 +800,7 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
         if (!noFix) {
             kickWaited_ = false;
         } else if (gps && config.position.gps_mode == meshtastic_Config_PositionConfig_GpsMode_ENABLED &&
-                   !config.position.fixed_position && now - lastGpsKickMs_ >= kGpsKickMs) {
+                   !config.position.fixed_position && !home_.home() && now - lastGpsKickMs_ >= kGpsKickMs) {
             if (gps->hasLock() && !kickWaited_) {
                 // The GPS has just locked and is about to report the fix. A restart in the moment
                 // it finishes would make Meshtastic count the search as failed and put the GPS
@@ -716,12 +840,107 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
                                               alertWidthM(engine_.fences()), beacon_.active());
         // Meshtastic adds a wait after each lock to the interval it is given (gpsSettingSecs), so
         // it is given less, to make the fixes come every `want` seconds.
-        const uint32_t target = want ? gpsSettingSecs(want) : ownerGpsSecs_;
+        // Home: as slow as Meshtastic goes, and powered down below.
+        const uint32_t target = home_.home() ? kHomeGpsSecs : want ? gpsSettingSecs(want) : ownerGpsSecs_;
         if (current != target) {
             LOG_DEBUG("GeoCollar: GPS interval %us -> %us", (unsigned)current, (unsigned)target);
             current = target;
         }
         lastPacedSecs_ = current;
+#if GEOCOLLAR_HAS_GPS
+        // Home mode switches the GPS off and on here, after the interval is set: Meshtastic reads
+        // it to decide how long the GPS sleeps, and that it reports a fix at once when it wakes.
+        if (home_.home() != gpsHome_) {
+            gpsHome_ = home_.home();
+            if (gps && config.position.gps_mode == meshtastic_Config_PositionConfig_GpsMode_ENABLED &&
+                !config.position.fixed_position) {
+                if (gpsHome_)
+                    gps->down(); // asleep, with Vext off while the screen is dark, for up to an hour
+                else
+                    gps->up(); // a fix as soon as it has one
+            }
+        }
+#endif
+    }
+
+    /// Home mode: the GPS off while the collar is close to the anchor (see HomeWatch).
+    void runHome(uint32_t now)
+    {
+        if (engine_.fences().version != homeFenceVersion_) {
+            homeFenceVersion_ = engine_.fences().version;
+            home_.reset(); // new fences: a fix must show the dog clear of them first
+        }
+        const int rssi = scanner_.poll(anchor_, baseNode_, home_.home());
+        if (rssi != INT_MIN)
+            home_.onSighting(rssi, now);
+        const bool allowed = anchor_.kind != AnchorKind::None && engine_.state() == CollarState::Inside && !beacon_.active();
+        if (!home_.tick(now, allowed))
+            return;
+        if (home_.home()) {
+            LOG_INFO("GeoCollar: home, near the anchor: GPS off");
+        } else {
+            LOG_INFO("GeoCollar: away from the anchor: GPS on");
+            lastClearance_ = 0; // fix often until a fix says where the dog is
+        }
+        sendStatus(statusType());
+    }
+
+    void setAnchor(const HomeAnchor &a)
+    {
+        if (a.kind == anchor_.kind && memcmp(a.address, anchor_.address, sizeof(a.address)) == 0 &&
+            a.rssiDbm == anchor_.rssiDbm)
+            return;
+        anchor_ = a;
+        home_.setThreshold(a.rssiDbm);
+        home_.reset();
+        saveHome();
+        LOG_INFO("GeoCollar: home anchor %s, %d dBm",
+                 a.kind == AnchorKind::Beacon ? "beacon" : a.kind == AnchorKind::BaseRadio ? "base radio" : "off",
+                 (int)a.rssiDbm);
+    }
+
+    void saveHome()
+    {
+        {
+            concurrency::LockGuard g(spiLock);
+            FSCom.mkdir("/prefs");
+        }
+        SafeFile f(kHomeFile, true);
+        const uint8_t kind = static_cast<uint8_t>(anchor_.kind);
+        const int8_t rssi = anchor_.rssiDbm;
+        f.write((const uint8_t *)&kHomeMagic, sizeof(kHomeMagic));
+        f.write(&kHomeFormat, 1);
+        f.write(&kind, 1);
+        f.write(anchor_.address, sizeof(anchor_.address));
+        f.write((const uint8_t *)&rssi, 1);
+        if (!f.close())
+            LOG_ERROR("GeoCollar: failed to save %s", kHomeFile);
+    }
+
+    void loadHome()
+    {
+        concurrency::LockGuard g(spiLock);
+        if (!FSCom.exists(kHomeFile))
+            return;
+        auto f = FSCom.open(kHomeFile, FILE_O_READ);
+        if (!f)
+            return;
+        uint32_t magic = 0;
+        uint8_t format = 0, kind = 0;
+        HomeAnchor a;
+        int8_t rssi = 0;
+        const bool ok = f.read((uint8_t *)&magic, sizeof(magic)) == sizeof(magic) && magic == kHomeMagic &&
+                        f.read(&format, 1) == 1 && format == kHomeFormat && f.read(&kind, 1) == 1 &&
+                        kind <= static_cast<uint8_t>(AnchorKind::BaseRadio) &&
+                        f.read(a.address, sizeof(a.address)) == sizeof(a.address) && f.read((uint8_t *)&rssi, 1) == 1 &&
+                        rssi >= kMinAnchorRssi && rssi <= kMaxAnchorRssi;
+        f.close();
+        if (!ok)
+            return; // no anchor: home mode stays off
+        a.kind = static_cast<AnchorKind>(kind);
+        a.rssiDbm = rssi;
+        anchor_ = a;
+        home_.setThreshold(rssi);
     }
 
     /// The lost-dog beacon: Bluetooth name on and off in 90 s turns, and a plain-text plea on the
@@ -1081,7 +1300,8 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
         s.flags = (engine_.settings().correctionsEnabled ? proto::kFlagCorrections : 0) |
                   (engine_.settings().shockEnabled ? proto::kFlagShock : 0) | (beacon_.active() ? proto::kFlagBeacon : 0) |
                   (beacon_.silenced() ? proto::kFlagBeaconSilenced : 0) | (fixWatch_.noFix() ? proto::kFlagNoFix : 0) |
-                  proto::kFlagNumbered | (appKeys_.count ? proto::kFlagApps : 0);
+                  proto::kFlagNumbered | (appKeys_.count ? proto::kFlagApps : 0) |
+                  (home_.home() ? proto::kFlagHome : 0);
         return s;
     }
 
@@ -1224,6 +1444,11 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
     bool kickWaited_ = false; // the last restart was put off because the GPS had a lock
     float lastClearance_ = 0;
     SlowAdvertiser slowAdv_;
+    AnchorScanner scanner_;
+    HomeAnchor anchor_;            // from the base (kHomeFile); kind None: home mode off
+    HomeWatch home_;
+    uint16_t homeFenceVersion_ = 0; // the fences home_ last saw
+    bool gpsHome_ = false;          // applyGpsPacing() has powered the GPS down for home mode
     bool powerSave_ = false;    // applyPowerSettings() changed a setting that has to be saved
     bool powerRestart_ = false; // and Bluetooth needs a restart to come back
     bool autoCorrection_ = false; // the correction playing came from the fence, not from the owner

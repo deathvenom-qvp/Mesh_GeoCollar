@@ -13,6 +13,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <new>
 #include <string>
 
 using namespace geocollar;
@@ -495,6 +496,35 @@ static void testProtocol()
     CHECK(decodeConfig(buf, n + 1, cfg2, seq) && seq == 1763085600);
     CHECK(!decodeConfig(buf, n - 2, cfg2, seq)); // a cut-off number
     cfg.reportS = 10;
+    // The home anchor, after the number.
+    {
+        CollarConfig a;
+        a.reportS = 0;
+        a.hasAnchor = true;
+        a.anchor.kind = AnchorKind::Beacon;
+        const uint8_t mac[6] = {0xAA, 0xBB, 0xCC, 0x01, 0x02, 0x03};
+        memcpy(a.anchor.address, mac, 6);
+        a.anchor.rssiDbm = -72;
+        n = encodeConfig(buf, sizeof(buf), a, 77);
+        CHECK(n == 2 + 2 + 4 + kAnchorLength);
+        CHECK(hex(buf, n) == "020700004d000000" "01aabbcc010203b8");
+        CollarConfig b;
+        CHECK(decodeConfig(buf, n, b, seq) && seq == 77 && b.reportS == 0 && b.hasAnchor);
+        CHECK(b.anchor.kind == AnchorKind::Beacon && memcmp(b.anchor.address, mac, 6) == 0 && b.anchor.rssiDbm == -72);
+        CHECK(decodeConfig(buf, n + 3, b, seq) && b.hasAnchor); // later fields after it
+        CHECK(encodeConfig(buf, sizeof(buf), a, 0) == 4);      // no number, no anchor
+        n = encodeConfig(buf, sizeof(buf), a, 77);
+        buf[8] = 3; // no such kind
+        CHECK(!decodeConfig(buf, n, b, seq));
+        buf[8] = 2;
+        buf[15] = static_cast<uint8_t>(-20); // threshold out of range
+        CHECK(!decodeConfig(buf, n, b, seq));
+        buf[15] = static_cast<uint8_t>(-100);
+        CHECK(decodeConfig(buf, n, b, seq) && b.anchor.kind == AnchorKind::BaseRadio && b.anchor.rssiDbm == -100);
+        CollarConfig plain;
+        n = encodeConfig(buf, sizeof(buf), plain, 9);
+        CHECK(decodeConfig(buf, n, b, seq) && !b.hasAnchor); // a base without home mode
+    }
     n = encodeConfig(buf, sizeof(buf), cfg, 5);
     CHECK(!decodeConfig(buf, n, cfg2, seq)); // below the shortest interval
 
@@ -545,7 +575,9 @@ static void testProtocol()
         CHECK(bad.maxShockLevel == 99 && bad.shockLevel == 99 && bad.vibrateLevel == 99 && bad.maxShocksPerHour == 16);
         CHECK(bad.lostConfirmFixes == 3 && bad.rearmFixes == 3 && bad.correctionMs == 1000 && bad.gpsFastSecs == 5 &&
               bad.gpsSlowSecs == 5 && bad.gpsLostSecs == 15 && bad.dogSpeedMps == 6);
-        Settings good, same;
+        // Built in zeroed memory, so the padding between fields compares equal too.
+        alignas(Settings) unsigned char goodMem[sizeof(Settings)] = {}, sameMem[sizeof(Settings)] = {};
+        Settings &good = *new (goodMem) Settings, &same = *new (sameMem) Settings;
         sanitizeSettings(good);
         CHECK(std::memcmp(&good, &same, sizeof(good)) == 0); // the defaults pass through untouched
     }
@@ -612,6 +644,133 @@ static void testProtocol()
     CHECK(!decodeFenceSet(buf, n, 1, g)); // too many zones
     const uint8_t junk[] = {1, 4, 0, 0}; // version 1 had a different fence format
     CHECK(!messageType(junk, sizeof(junk), type)); // wrong protocol version
+}
+
+static void testHomeWatch()
+{
+    // Readings every 2 s at -60 dBm (threshold -70), after a clear fix: home after 20 s.
+    {
+        HomeWatch h;
+        h.setThreshold(-70);
+        h.onFix(true, 1000);
+        bool changed = false;
+        uint32_t t = 2000;
+        for (; t < 2000 + HomeWatch::kEnterMs; t += 2000) {
+            h.onSighting(-60, t);
+            changed = h.tick(t, true) || changed;
+        }
+        CHECK(!changed && !h.home()); // not yet: the run is just short of 20 s
+        h.onSighting(-60, t);
+        CHECK(h.tick(t, true) && h.home());
+        CHECK(!h.tick(t + 500, true)); // reported once
+        // Weaker but within the margin: stays home.
+        h.onSighting(-74, t + 2000);
+        CHECK(!h.tick(t + 2000 + HomeWatch::kLeaveMs, true) && h.home());
+        // Then nothing strong enough for longer than kLeaveMs: away.
+        h.onSighting(-80, t + 4000);
+        CHECK(h.tick(t + 2000 + HomeWatch::kLeaveMs + 1, true) && !h.home());
+        // Back near within 10 minutes: home again without a new fix (the anchor kept proving it).
+        const uint32_t back = t + 60000;
+        for (uint32_t u = back; u <= back + HomeWatch::kEnterMs; u += 2000) {
+            h.onSighting(-60, u);
+            h.tick(u, true);
+        }
+        CHECK(h.home());
+        // A fix in a band ends home at once.
+        h.onFix(false, back + 30000);
+        CHECK(h.tick(back + 30000, true) && !h.home());
+        // And then the anchor alone cannot bring it back: the newest fix was not clear.
+        for (uint32_t u = back + 32000; u <= back + 32000 + 2 * HomeWatch::kEnterMs; u += 2000) {
+            h.onSighting(-55, u);
+            h.tick(u, true);
+        }
+        CHECK(!h.home());
+    }
+    // No clear fix at all, or an old one: never home.
+    {
+        HomeWatch h;
+        h.setThreshold(-70);
+        for (uint32_t t = 0; t <= 60000; t += 2000) {
+            h.onSighting(-50, t);
+            h.tick(t, true);
+        }
+        CHECK(!h.home());
+        h.onFix(true, 100000);
+        const uint32_t late = 100000 + HomeWatch::kFreshMs + 1000;
+        for (uint32_t t = late; t <= late + 60000; t += 2000) {
+            h.onSighting(-50, t);
+            h.tick(t, true);
+        }
+        CHECK(!h.home());
+    }
+    // One weak reading restarts the 20 s; a gap longer than kLeaveMs does too.
+    {
+        HomeWatch h;
+        h.setThreshold(-70);
+        h.onFix(true, 0);
+        for (uint32_t t = 2000; t <= 18000; t += 2000) {
+            h.onSighting(-60, t);
+            h.tick(t, true);
+        }
+        h.onSighting(-71, 20000);
+        h.onSighting(-60, 22000);
+        CHECK(!h.tick(30000, true));
+        h.onSighting(-60, 40000); // gap of 18 s
+        h.onSighting(-60, 42000);
+        CHECK(!h.tick(42000, true) && !h.home());
+        for (uint32_t t = 44000; t <= 62000; t += 2000) {
+            h.onSighting(-60, t);
+            h.tick(t, true);
+        }
+        CHECK(h.home()); // 40 s to 60 s: 20 s unbroken
+    }
+    // Not allowed (lost, no fences, no anchor): never home, and home ends at once.
+    {
+        HomeWatch h;
+        h.setThreshold(-70);
+        h.onFix(true, 0);
+        for (uint32_t t = 2000; t <= 30000; t += 2000) {
+            h.onSighting(-60, t);
+            h.tick(t, false);
+        }
+        CHECK(!h.home());
+        for (uint32_t t = 32000; t <= 54000; t += 2000) {
+            h.onSighting(-60, t);
+            h.tick(t, true);
+        }
+        CHECK(h.home());
+        CHECK(h.tick(55000, false) && !h.home());
+    }
+    // A reset (new fences or a new anchor) forgets the clear fix.
+    {
+        HomeWatch h;
+        h.setThreshold(-70);
+        h.onFix(true, 0);
+        for (uint32_t t = 2000; t <= 24000; t += 2000) {
+            h.onSighting(-60, t);
+            h.tick(t, true);
+        }
+        CHECK(h.home());
+        h.reset();
+        CHECK(h.tick(25000, true) && !h.home());
+        for (uint32_t t = 26000; t <= 60000; t += 2000) {
+            h.onSighting(-60, t);
+            h.tick(t, true);
+        }
+        CHECK(!h.home());
+    }
+    // The millisecond clock wrapping does not matter.
+    {
+        HomeWatch h;
+        h.setThreshold(-70);
+        const uint32_t base = 0xFFFFFFFFu - 10000;
+        h.onFix(true, base);
+        for (uint32_t i = 1; i <= 12; i++) {
+            h.onSighting(-60, base + i * 2000);
+            h.tick(base + i * 2000, true);
+        }
+        CHECK(h.home());
+    }
 }
 
 static void testBeacon()
@@ -960,6 +1119,7 @@ int main()
     testBands();
     testPulser();
     testBeacon();
+    testHomeWatch();
     testGpsPacing();
     testFixWatch();
     testProtocol();
