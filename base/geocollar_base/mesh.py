@@ -37,6 +37,8 @@ class MeshLink:
         # in its node list to PKI-encrypt anything to the collar.
         self.key_for = key_for
         self.on_send_error = on_send_error
+        # A collar's answer to the list of companion app keys: (node ID, {seq, count, pki, sender_key}).
+        self.on_app_ack: Callable[[str, dict], None] | None = None
         self.serial_port = serial_port
         self.host = host
         self.iface = None
@@ -115,6 +117,15 @@ class MeshLink:
             hello.update(long_name=user.get("longName", ""), short_name=user.get("shortName", ""),
                          rssi=packet.get("rxRssi"), snr=packet.get("rxSnr"), hops=_hops(packet))
             self.on_hello(node_id, hello)
+            return
+        if kind == protocol.MsgType.APP_KEYS_ACK and self.on_app_ack:
+            try:
+                ack = protocol.decode_app_keys_ack(data)
+            except ValueError:
+                return
+            # Checked like a report: it must be a PKI message from the collar's own key.
+            ack.update(pki=bool(packet.get("pkiEncrypted")), sender_key=packet.get("publicKey") or "")
+            self.on_app_ack(packet.get("fromId") or f"!{packet['from']:08x}", ack)
             return
         if kind not in (protocol.MsgType.STATUS, protocol.MsgType.BREACH):
             return
@@ -303,6 +314,10 @@ class MeshLink:
     def send_config(self, node_id: str, report_s: int, seq: int = 0) -> None:
         """How often the collar reports."""
         self._send(node_id, protocol.encode_config(report_s, seq))
+
+    def send_app_keys(self, node_id: str, keys: list[tuple[int, bytes]], seq: int) -> None:
+        """The phones that may connect to the collar with the companion app (the whole list)."""
+        self._send(node_id, protocol.encode_app_keys(keys, seq))
 
     def send_command(self, node_id: str, action: protocol.CommandAction, intensity: int = 0, duration_ms: int = 1000,
                      seq: int = 0):

@@ -194,3 +194,33 @@ def test_radio_gets_the_collars_key_and_reports_failed_sends(monkeypatch):
     assert isinstance(data, mesh_pb2.User) and data.id == "!0badbase"
     assert data.hw_model == mesh_pb2.HardwareModel.HELTEC_WIRELESS_TRACKER
     assert isinstance(m, admin_pb2.AdminMessage)
+
+
+def test_app_key_answers_are_handed_on_with_who_sent_them():
+    from geocollar_base import protocol
+
+    acks, statuses, sent = [], [], []
+
+    class Iface:
+        nodes = {}
+
+        def sendData(self, data, **kw):
+            sent.append((data, kw))
+
+    link = MeshLink(lambda n, s: statuses.append((n, s)))
+    link.on_app_ack = lambda n, a: acks.append((n, a))
+    link.iface = Iface()
+    link.ensure_contact = lambda node_id: False
+    packet = {"from": 0xA1B2C3D4, "fromId": "!a1b2c3d4", "pkiEncrypted": True, "publicKey": "a2V5",
+              "decoded": {"portnum": protocol.PORT_NUM, "payload": protocol.encode_app_keys_ack(77, 2)}}
+    link._on_receive(packet)
+    assert acks == [("!a1b2c3d4", {"seq": 77, "count": 2, "pki": True, "sender_key": "a2V5"})] and not statuses
+    packet["decoded"]["payload"] += b"\x00"  # malformed: dropped
+    link._on_receive(packet)
+    assert len(acks) == 1
+
+    # The list goes to the collar as a PKI direct message, like everything else from the base.
+    link.send_app_keys("!a1b2c3d4", [(5, bytes(16))], 9)
+    data, kw = sent[0]
+    assert data == protocol.encode_app_keys([(5, bytes(16))], 9)
+    assert kw["destinationId"] == "!a1b2c3d4" and kw["pkiEncrypted"] is True and kw["portNum"] == protocol.PORT_NUM

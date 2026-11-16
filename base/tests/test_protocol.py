@@ -160,3 +160,70 @@ def test_status_fix_and_firmware_flags():
     # Firmware before 0.16 sets neither bit.
     old = p.decode_status(raw[:-1] + bytes([0x03]))
     assert not old.no_fix and not old.numbered and old.shock_enabled
+
+
+# -- The companion app: the same golden bytes as firmware/test/test_main.cpp and app/test ---------
+APP_KEY, APP_KEY_ID = bytes(range(16)), 0x1A2B3C4D
+APP_NONCE, COLLAR_NONCE = bytes(range(0xA0, 0xA8)), bytes(range(0xC0, 0xC8))
+
+
+def test_app_keys_golden_and_limits():
+    raw = p.encode_app_keys([(APP_KEY_ID, APP_KEY)], 1763085600)
+    assert raw.hex() == "0208208d1669014d3c2b1a000102030405060708090a0b0c0d0e0f"
+    assert p.message_type(raw) == p.MsgType.APP_KEYS
+    assert p.decode_app_keys(raw) == ([(APP_KEY_ID, APP_KEY)], 1763085600)
+    assert p.encode_app_keys([], 7).hex() == "02080700000000"  # every phone removed
+    assert len(p.encode_app_keys([(i + 1, APP_KEY) for i in range(4)], 7)) == 87
+    for bad in ([(i + 1, APP_KEY) for i in range(5)], [(0, APP_KEY)], [(1, APP_KEY), (1, APP_KEY)], [(1, b"short")]):
+        with pytest.raises(ValueError):
+            p.encode_app_keys(bad, 7)
+    with pytest.raises(ValueError):
+        p.encode_app_keys([], 0)  # unnumbered: a recording could bring a removed phone back
+
+    ack = p.encode_app_keys_ack(1763085600, 1)
+    assert ack.hex() == "0209208d166901" and p.decode_app_keys_ack(ack) == {"seq": 1763085600, "count": 1}
+    assert p.message_type(ack) == p.MsgType.APP_KEYS_ACK
+    with pytest.raises(ValueError):
+        p.decode_app_keys_ack(ack + b"\x00")
+
+
+def test_app_session_golden():
+    assert p.encode_app_hello(APP_KEY_ID, APP_NONCE).hex() == "02104d3c2b1aa0a1a2a3a4a5a6a7"
+    assert p.app_challenge_tag(APP_KEY, APP_KEY_ID, APP_NONCE, COLLAR_NONCE).hex() == "c66cfaa9f4fe36cb"
+    sk = p.app_session_key(APP_KEY, APP_KEY_ID, APP_NONCE, COLLAR_NONCE)
+    assert sk.hex() == "4b4ad99bb6e9aa4a581e9cc9defdb082abb994605cae8f691fde30c639488fce"
+    req = p.encode_app_request(sk, APP_KEY_ID, 1, p.CommandAction.SILENCE_LOST)
+    assert req.hex() == "02124d3c2b1a010000000f000000d2b8917361311478"
+    raw = bytes.fromhex("02134d3c2b1a010000000003000457d288d7179fd74bd3b40009f4ff012a0017682af07f6aecce")
+    s = p.decode_app_status(sk, raw)
+    assert s["key_id"] == APP_KEY_ID and s["counter"] == 1 and s["done"] and s["fix_age_s"] == 42
+    assert s["status"].state == p.CollarState.LOST and s["status"].clearance_m == -12
+    assert abs(s["status"].lat - 40.0001234) < 1e-9
+    with pytest.raises(ValueError):
+        p.decode_app_status(sk, raw[:-1] + bytes([raw[-1] ^ 1]))
+    with pytest.raises(ValueError):
+        p.decode_app_status(bytes(32), raw)
+    assert p.CommandAction.SHOCK not in p.APP_ACTIONS and p.CommandAction.SHOCK_ON not in p.APP_ACTIONS
+
+
+def test_status_says_whether_the_collar_holds_app_keys():
+    raw = bytearray.fromhex("020303000457d288d7179fd74bd3b40009f4ff01")
+    assert p.decode_status(bytes(raw)).apps is False
+    raw[-1] |= 0x40
+    s = p.decode_status(bytes(raw))
+    assert s.apps is True and p.encode_status(s) == bytes(raw)
+
+
+def test_pairing_code_round_trip():
+    code = p.pairing_code("!a1b2c3d4", APP_KEY_ID, APP_KEY, dog="Zo\u00eb & Max", pin=4821, ble_name="Z&M")
+    assert code == ("geocollar://pair?v=1&n=a1b2c3d4&i=1a2b3c4d&k=AAECAwQFBgcICQoLDA0ODw"
+                    "&p=004821&b=Z%26M&d=Zo%C3%AB%20%26%20Max")
+    back = p.parse_pairing_code(code)
+    assert back == {"node_id": "!a1b2c3d4", "key_id": APP_KEY_ID, "key": APP_KEY, "pin": "004821",
+                    "ble_name": "Z&M", "dog": "Zo\u00eb & Max", "sim": False}
+    bare = p.pairing_code("!a1b2c3d4", APP_KEY_ID, APP_KEY, sim=True)
+    assert bare == "geocollar://pair?v=1&n=a1b2c3d4&i=1a2b3c4d&k=AAECAwQFBgcICQoLDA0ODw&s=1"
+    assert p.parse_pairing_code(bare)["pin"] is None and p.parse_pairing_code(bare)["sim"] is True
+    for bad in ("https://example.com/pair?v=1", "geocollar://pair?v=2&n=a1b2c3d4&i=1&k=AAECAwQFBgcICQoLDA0ODw"):
+        with pytest.raises(ValueError):
+            p.parse_pairing_code(bad)

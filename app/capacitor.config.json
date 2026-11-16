@@ -1,0 +1,15 @@
+{
+  "appId": "io.github.deathvenomqvp.geocollar",
+  "appName": "GeoCollar",
+  "webDir": "www",
+  "plugins": {
+    "BluetoothLe": {
+      "displayStrings": {
+        "scanning": "Looking for the collar...",
+        "cancel": "Cancel",
+        "availableDevices": "Collars nearby",
+        "noDeviceFound": "No collar found"
+      }
+    }
+  }
+}

@@ -68,6 +68,95 @@ jobs:
           gh release upload firmware-latest dist/manifest.json --clobber
           gh release edit firmware-latest --notes "Built automatically from main at ${GITHUB_SHA}. The base app downloads it from here."
 
+  app-tests:
+    name: Phone app tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      # The app's tests talk to the collar's own session code, built for the PC.
+      - run: make -C firmware/test applink_collar
+      - run: npm ci
+        working-directory: app
+      - run: npm test
+        working-directory: app
+      - run: npm run build
+        working-directory: app
+
+  app-android:
+    name: Phone app build (Android)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # to publish the app-latest release
+    concurrency:
+      group: app-android-${{ github.ref }}
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: gradle
+      - run: npm ci
+        working-directory: app
+      - run: npm run build
+        working-directory: app
+      - run: npx cap sync android
+        working-directory: app
+      - run: ./gradlew --no-daemon assembleDebug
+        working-directory: app/android
+      - run: mkdir -p dist-app && cp app/android/app/build/outputs/apk/debug/app-debug.apk dist-app/geocollar-app.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: geocollar-app-android
+          path: dist-app/
+          if-no-files-found: error
+      # Each build of main replaces the file on the "app-latest" pre-release, where app/README.md
+      # sends people to install it from.
+      - name: Publish to the app-latest release
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release view app-latest >/dev/null 2>&1 || gh release create app-latest --prerelease \
+            --title "Latest phone app (Android)" --notes "Built automatically from main."
+          gh release upload app-latest dist-app/geocollar-app.apk --clobber
+          gh release edit app-latest --notes "Built automatically from main at ${GITHUB_SHA}. A debug build to install by hand: see app/README.md."
+
+  app-ios:
+    name: Phone app build (iOS simulator)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - run: npm ci
+        working-directory: app
+      - run: npm run build
+        working-directory: app
+      - run: npx cap sync ios
+        working-directory: app
+      # Only that it compiles: an app for a real iPhone has to be signed with an Apple developer
+      # account, which this repository does not have.
+      - run: >
+          xcodebuild -project App.xcodeproj -scheme App -configuration Debug
+          -sdk iphonesimulator -destination 'generic/platform=iOS Simulator'
+          CODE_SIGNING_ALLOWED=NO build
+        working-directory: app/ios/App
+
   base-image:
     name: Base app image (amd64 + arm64) and Home Assistant app lint
     runs-on: ubuntu-latest
