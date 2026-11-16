@@ -81,7 +81,12 @@ bool header(Reader &r, MsgType expect)
 
 bool messageType(const uint8_t *buf, size_t len, MsgType &type)
 {
-    if (len < 2 || buf[0] != kVersion || buf[1] < 1 || buf[1] > static_cast<uint8_t>(MsgType::Config))
+    if (len < 2 || buf[0] != kVersion)
+        return false;
+    const uint8_t t = buf[1];
+    const bool known = (t >= 1 && t <= static_cast<uint8_t>(MsgType::AppKeysAck)) ||
+                       (t >= static_cast<uint8_t>(MsgType::AppHello) && t <= static_cast<uint8_t>(MsgType::AppError));
+    if (!known)
         return false;
     type = static_cast<MsgType>(buf[1]);
     return true;

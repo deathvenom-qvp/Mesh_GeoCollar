@@ -6,10 +6,12 @@ A geofence dog collar that runs on the [Meshtastic](https://meshtastic.org) LoRa
 keeps its own fences, warns the dog near the line using an off-the-shelf training collar's beep,
 vibrate and (optionally) shock, and, if the dog does get out, stops correcting and switches to
 lost mode so the dog is easy to find over the mesh. A base station app, which runs in Docker or as
-a Home Assistant app, manages fences and collars and shows where each dog is.
+a Home Assistant app, manages fences and collars and shows where each dog is. A phone app for
+Android and iOS connects straight to a collar over Bluetooth, to show where it is and mute its
+lost alert once you have found the dog.
 
-> **Status: early skeleton.** The fence logic, collar protocol and base app are written and tested
-> on a PC. Nothing has run on real hardware yet. See [What is not done yet](#what-is-not-done-yet).
+> **Status: early skeleton.** The fence logic, collar protocol, base app and phone app are written
+> and tested on a PC. Nothing has run on real hardware yet. See [What is not done yet](#what-is-not-done-yet).
 
 **Built on Meshtastic. Collar protocol by OpenShock.** See [Credits](#credits).
 
@@ -63,7 +65,8 @@ The collar also paces its own GPS: every 5 s near the line, slowing to once a mi
 | `firmware/build.sh` | Checks out the latest Meshtastic patch release of the series in `firmware/MESHTASTIC_VERSION`, drops the module into `src/modules/optional/`, builds. |
 | `firmware/test/` | PC tests for everything that does not need hardware (`make -C firmware/test`). |
 | `base/` | Base station app (Python, FastAPI, Leaflet map), Dockerfile, and Home Assistant app manifest. |
-| `docs/protocol.md` | Message format between collars and base. |
+| `app/` | Phone app for Android and iOS ([Capacitor](https://capacitorjs.com), plain JavaScript, Leaflet map). See [app/README.md](app/README.md). |
+| `docs/protocol.md` | Message format between collars and base, and between a collar and the phone app. |
 | `docs/hardware.md` | Wiring the Tracker into the training collar, power, antennas, Meshtastic settings. |
 | `reference/` | Meshtastic and OpenShock firmware as git submodules, for reading only. Not used by the build. |
 
@@ -127,8 +130,30 @@ to collar**; the page shows when the collar reports the new fence version. It wa
 send fences that the dog's last position already breaks. The map libraries are bundled, so only
 the map tiles need internet.
 
+## The phone app
+
+The base station needs the mesh to reach a collar. The phone app does not: it talks to the collar
+directly over Bluetooth, from a few dozen metres away, wherever you are. It is meant for the walk
+to fetch a lost dog.
+
+1. In the base app, pick the collar and press **Connect app**. Name the phone, and a QR code appears.
+2. In the phone app, tap **Add a collar** and scan the code. That is the phone's key to this one
+   collar. The base hands the same key to the collar over the mesh.
+3. Near the collar, the app connects by itself and shows the collar on a map next to your own
+   position, with the distance and direction, its state, battery and GPS fix.
+4. **Mute lost alert** stops the collar's lost beacon, the same as *Silence lost alert* on the
+   base. The app can also make the collar beep or vibrate, and pause and resume its corrections.
+   It can never shock.
+
+Remove a phone under **Connect app** on the base and the collar stops accepting it. Up to four
+phones can be linked to a collar. How to install the app, and what it does and does not protect
+against, is in [app/README.md](app/README.md). There is a demo collar in the app to try it without
+any hardware.
+
 ## Safety
 
+- The phone app cannot shock, turn shock on, or change fences. The collar refuses those from a
+  phone whatever the app sends.
 - Shock is **off by default**. The owner turns it on per collar in the base app, after confirming.
   When enabled it is capped in level, count per breach and count per hour, and never fires on a poor GPS fix or in lost mode.
 - Corrections stop as soon as the dog is confirmed outside: correcting a dog that is trying to come
@@ -148,6 +173,15 @@ the map tiles need internet.
 - The firmware changes in 0.16.0 (fixes taken straight from the GPS, the "no GPS fix" report,
   numbered settings messages, the correction timing) pass the PC tests and compile, and are
   untested on hardware.
+- The phone app has never met a real collar. Its messages are tested against the collar's own
+  code built for a PC, the base's QR code has been scanned through the app's scanner in a desktop
+  browser, and the screens have been tried there with the demo collar. The Bluetooth part
+  (finding the collar, pairing with its PIN, Meshtastic's phone API over Bluetooth) and the
+  collar's side of it (answering a phone, staying connectable during the lost beacon's quiet
+  half) compile but are untested on hardware, on Android and on iOS. See
+  [app/README.md](app/README.md#what-is-tested-and-what-is-not).
+- The Android app is a debug build to install by hand, and the iOS app has to be built and signed
+  with your own Apple developer account. Neither is in an app store.
 - Home Assistant entities (device trackers, breach notifications) are not wired up yet; the app
   has its own map for now. The official Meshtastic Home Assistant integration can show nodes
   meanwhile.

@@ -1,0 +1,96 @@
+<!doctype html>
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="referrer" content="strict-origin-when-cross-origin">
+<meta name="color-scheme" content="light dark">
+<title>GeoCollar</title>
+<link rel="stylesheet" href="vendor/leaflet/leaflet.css">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<div id="home" class="screen">
+  <header class="bar"><h1>GeoCollar</h1></header>
+  <div class="scroll">
+    <ul id="collars" class="collars"></ul>
+    <div id="empty" class="empty" hidden>
+      <h2>Link this phone to a collar</h2>
+      <ol>
+        <li>Open the GeoCollar base station on a computer or tablet.</li>
+        <li>Pick the collar and press <b>Connect app</b>.</li>
+        <li>Scan the code it shows with the button below.</li>
+      </ol>
+      <p class="muted">A linked phone talks to the collar directly over Bluetooth, away from home too. It can show
+        where the collar is, mute its lost alert, and make it beep or vibrate. It can never shock.</p>
+    </div>
+  </div>
+  <footer class="foot">
+    <button id="add" class="primary">Add a collar</button>
+    <button id="demo" class="quiet">Try a demo collar</button>
+    <p class="about muted">Free software, GPL-3.0-or-later. Source and licences:
+      <a href="https://github.com/deathvenom-qvp/Mesh_GeoCollar" target="_blank" rel="noopener">github.com/deathvenom-qvp/Mesh_GeoCollar</a></p>
+  </footer>
+</div>
+
+<div id="addScreen" class="screen" hidden>
+  <header class="bar">
+    <button class="back" data-back aria-label="Back">&#8249;</button>
+    <h1>Add a collar</h1>
+  </header>
+  <div class="scroll pad">
+    <p>On the base station, pick the collar, press <b>Connect app</b>, and point this phone at the code.</p>
+    <div id="camera" class="camera">
+      <video id="video" muted playsinline></video>
+      <div class="frame" aria-hidden="true"></div>
+      <p id="camMsg" class="cammsg">Starting the camera&hellip;</p>
+    </div>
+    <p id="addMsg" class="error" role="alert" hidden></p>
+    <details id="pasteBox">
+      <summary>Type or paste the code instead</summary>
+      <p class="muted">Under the QR code the base station has a <b>Copy the code as text</b> button. Send the text to this phone and paste it here. It is the key to the collar, so send it somewhere private and delete the message afterwards.</p>
+      <textarea id="code" rows="3" autocapitalize="off" autocomplete="off" spellcheck="false" placeholder="geocollar://pair?..."></textarea>
+      <button id="useCode" class="primary">Link this phone</button>
+    </details>
+  </div>
+</div>
+
+<div id="collarScreen" class="screen" hidden>
+  <header class="bar">
+    <button class="back" data-back aria-label="Back">&#8249;</button>
+    <h1 id="dogName"></h1>
+    <span id="pill" class="pill"></span>
+  </header>
+  <div id="alert" class="alert" hidden>
+    <div>
+      <b id="alertTitle"></b>
+      <span id="alertText"></span>
+    </div>
+    <button id="mute" class="primary">Mute lost alert</button>
+  </div>
+  <div class="mapwrap">
+    <div id="map"></div>
+    <div id="where" class="where" hidden></div>
+    <button id="recenter" class="recenter" aria-label="Show the collar and me">&#8982;</button>
+  </div>
+  <section class="panel">
+    <p id="linkMsg" class="linkmsg" hidden></p>
+    <dl id="facts" class="facts"></dl>
+    <div class="actions">
+      <button id="beep">Beep</button>
+      <button id="vibrate">Vibrate</button>
+      <button id="corrections">Pause corrections</button>
+    </div>
+    <div class="more">
+      <a id="openMaps" target="_blank" rel="noopener">Open in maps</a>
+      <button id="remove" class="quiet danger">Remove from this phone</button>
+    </div>
+  </section>
+</div>
+
+<div id="toast" class="toast" role="status" hidden></div>
+<script src="main.js"></script>
+</body>
+</html>

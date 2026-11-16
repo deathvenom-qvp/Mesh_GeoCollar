@@ -76,6 +76,10 @@ class FakeLink:
         self.sent.append((node_id, protocol.encode_config(report_s)))
         self.config_seqs = getattr(self, "config_seqs", []) + [seq]
 
+    def send_app_keys(self, node_id, keys, seq):
+        self.sent.append((node_id, protocol.encode_app_keys(keys, seq)))
+        self.app_keys = getattr(self, "app_keys", []) + [(node_id, list(keys), seq)]
+
     def send_owner(self, node_id, dog, owner, phone, seq=0):
         self.sent.append((node_id, protocol.encode_owner(dog, owner, phone)))
         self.owner_seqs = getattr(self, "owner_seqs", []) + [seq]
@@ -684,3 +688,147 @@ def test_collar_log_file(tmp_path):
             clog.add(bad, {"t": 1})
         with pytest.raises(ValueError):
             clog.read(bad)
+
+
+# -- The companion app -------------------------------------------------------------------------
+def test_linking_a_phone_makes_a_key_for_it_and_for_the_collar(tmp_path):
+    client, link = make(tmp_path)
+    client.post("/api/collars", json={"node_id": "!a1b2c3d4", "name": "Rex"})
+    client.app.state.store.set_collar_info("!a1b2c3d4", "ble_pin", 482913)
+    assert client.get("/api/collars/!a1b2c3d4/apps").json() == {
+        "apps": [], "synced": True, "max": 4, "pin_known": True, "sim": False}
+
+    r = client.post("/api/collars/!a1b2c3d4/apps", json={"name": "  Ken's   phone "})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["app"]["name"] == "Ken's phone" and body["synced"] is False and len(body["apps"]) == 1
+    # The QR code says how to find the collar and carries the phone's key; the collar got the same key.
+    code = protocol.parse_pairing_code(body["code"])
+    assert code["node_id"] == "!a1b2c3d4" and code["dog"] == "Rex" and code["ble_name"] == "REX"
+    assert code["pin"] == "482913" and code["sim"] is False
+    assert f"{code['key_id']:08x}" == body["app"]["id"]
+    node, keys, seq = link.app_keys[-1]
+    assert node == "!a1b2c3d4" and keys == [(code["key_id"], code["key"])] and seq > 1_700_000_000
+    assert link.sent[-1][1][:2] == b"\x02\x08"
+
+    # The key is given out that once: nothing the page can ask for carries it afterwards.
+    secret, b64 = code["key"].hex(), body["code"].split("k=")[1].split("&")[0]
+    for path in ("/api/collars", "/api/collars/!a1b2c3d4/apps"):
+        text = client.get(path).text
+        assert secret not in text and b64 not in text
+    assert secret not in client.patch("/api/collars/!a1b2c3d4", json={"report_s": 300}).text
+    c = client.get("/api/collars").json()["!a1b2c3d4"]
+    assert c["apps"] == [body["app"]] and c["apps_synced"] is False
+
+    # The collar confirms the list by its number, in a message that must really be the collar's.
+    ack = client.app.state.on_app_ack
+    client.app.state.on_status("!a1b2c3d4", {**GOOD, "apps": True})  # the base learns the collar's key
+    ack("!a1b2c3d4", {"seq": seq, "count": 1, "pki": False, "sender_key": "a2V5"})  # not PKI: anyone could send it
+    ack("!a1b2c3d4", {"seq": seq, "count": 1, "pki": True, "sender_key": "T1RIRVI="})  # another node's key
+    ack("!a1b2c3d4", {"seq": seq - 5, "count": 1, "pki": True, "sender_key": "a2V5"})  # an older list
+    ack("!99999999", {"seq": seq, "count": 1, "pki": True, "sender_key": "a2V5"})  # not a collar here
+    assert client.get("/api/collars/!a1b2c3d4/apps").json()["synced"] is False
+    ack("!a1b2c3d4", {"seq": seq, "count": 1, "pki": True, "sender_key": "a2V5"})
+    assert client.get("/api/collars/!a1b2c3d4/apps").json()["synced"] is True
+    assert client.get("/api/collars").json()["!a1b2c3d4"]["apps_synced"] is True
+
+    # Once confirmed, reports that agree send nothing more.
+    sent = len(link.app_keys)
+    client.app.state.on_status("!a1b2c3d4", {**GOOD, "apps": True})
+    assert len(link.app_keys) == sent
+
+    # A second phone gets its own key and the collar gets both.
+    r2 = client.post("/api/collars/!a1b2c3d4/apps", json={})
+    code2 = protocol.parse_pairing_code(r2.json()["code"])
+    assert r2.json()["app"]["name"] == "Phone 2" and code2["key"] != code["key"] and code2["key_id"] != code["key_id"]
+    assert link.app_keys[-1][1] == [(code["key_id"], code["key"]), (code2["key_id"], code2["key"])]
+
+    # Removing the first phone sends the list without it: that is what revokes it on the collar.
+    r = client.delete(f"/api/collars/!a1b2c3d4/apps/{body['app']['id']}")
+    assert r.status_code == 200 and [a["id"] for a in r.json()["apps"]] == [r2.json()["app"]["id"]]
+    assert link.app_keys[-1][1] == [(code2["key_id"], code2["key"])] and link.app_keys[-1][2] > seq
+    assert client.delete(f"/api/collars/!a1b2c3d4/apps/{body['app']['id']}").status_code == 404
+    # Removing the last one sends an empty list, and the base waits for the collar to confirm that too.
+    r = client.delete(f"/api/collars/!a1b2c3d4/apps/{r2.json()['app']['id']}")
+    assert r.json()["apps"] == [] and r.json()["synced"] is False and link.app_keys[-1][1] == []
+    ack("!a1b2c3d4", {"seq": link.app_keys[-1][2], "count": 0, "pki": True, "sender_key": "a2V5"})
+    assert client.get("/api/collars/!a1b2c3d4/apps").json()["synced"] is True
+
+    assert client.get("/api/collars/!nope/apps").status_code == 404
+    assert client.post("/api/collars/!nope/apps", json={}).status_code == 404
+    assert client.post("/api/collars/!a1b2c3d4/apps", json={"name": "x" * 41}).status_code == 400
+
+
+def test_at_most_four_phones_per_collar(tmp_path):
+    client, link = make(tmp_path)
+    client.post("/api/collars", json={"node_id": "!a1b2c3d4", "name": "Rex"})
+    for _ in range(4):
+        assert client.post("/api/collars/!a1b2c3d4/apps", json={}).status_code == 200
+    assert client.post("/api/collars/!a1b2c3d4/apps", json={}).status_code == 409
+    assert len(link.app_keys[-1][1]) == 4
+    protocol.decode_app_keys(link.sent[-1][1])  # and it still fits one message
+
+
+def test_app_keys_are_sent_again_until_the_collar_has_them(tmp_path, monkeypatch):
+    client, link = make(tmp_path)
+    client.post("/api/collars", json={"node_id": "!a1b2c3d4", "name": "Rex"})
+    now = [time.time()]
+    monkeypatch.setattr(time, "time", lambda: now[0])
+
+    # Made while the radio was unplugged: nothing could be sent, so the phone counts as not on the collar.
+    link.connected = False
+    r = client.post("/api/collars/!a1b2c3d4/apps", json={"name": "Phone"})
+    assert r.status_code == 200 and r.json()["synced"] is False and not getattr(link, "app_keys", [])
+    link.connected = True
+    client.app.state.on_status("!a1b2c3d4", GOOD)
+    assert len(link.app_keys) == 1
+
+    # No answer (collar firmware before 0.20 never gives one): again on later reports, further and
+    # further apart, not with every report.
+    client.app.state.on_status("!a1b2c3d4", GOOD)
+    assert len(link.app_keys) == 1
+    now[0] += 61
+    client.app.state.on_status("!a1b2c3d4", GOOD)
+    assert len(link.app_keys) == 2
+    now[0] += 61
+    client.app.state.on_status("!a1b2c3d4", GOOD)
+    assert len(link.app_keys) == 2
+    now[0] += 60
+    client.app.state.on_status("!a1b2c3d4", GOOD)
+    assert len(link.app_keys) == 3
+    assert [k[2] for k in link.app_keys] == sorted({k[2] for k in link.app_keys})  # each with a larger number
+
+    # Confirmed. Later the collar is erased by a full install and reports that it holds no keys:
+    # it gets them again without anyone asking.
+    client.app.state.on_app_ack("!a1b2c3d4", {"seq": link.app_keys[-1][2], "count": 1, "pki": True, "sender_key": "a2V5"})
+    client.app.state.on_status("!a1b2c3d4", {**GOOD, "apps": True})
+    assert len(link.app_keys) == 3
+    now[0] += 5
+    client.app.state.on_status("!a1b2c3d4", {**GOOD, "apps": False})
+    assert len(link.app_keys) == 4 and link.app_keys[-1][1] == link.app_keys[0][1]
+
+
+def test_a_collar_holding_keys_this_base_never_gave_it_is_told_to_drop_them(tmp_path):
+    client, link = make(tmp_path)
+    client.post("/api/collars", json={"node_id": "!a1b2c3d4", "name": "Rex"})
+    client.app.state.on_status("!a1b2c3d4", GOOD)
+    assert not getattr(link, "app_keys", [])  # no phones, and the collar agrees
+    client.app.state.on_status("!a1b2c3d4", {**GOOD, "apps": True})  # set up on another base before
+    assert link.app_keys[-1][1] == []
+
+
+def test_removing_a_collar_takes_its_phones_off_it(tmp_path):
+    client, link = make(tmp_path)
+    client.post("/api/collars", json={"node_id": "!a1b2c3d4", "name": "Rex"})
+    client.post("/api/collars/!a1b2c3d4/apps", json={})
+    assert client.delete("/api/collars/!a1b2c3d4").status_code == 200
+    assert link.app_keys[-1] == ("!a1b2c3d4", [], link.app_keys[-1][2]) and len(link.app_keys) == 2
+
+
+def test_a_simulated_collar_can_be_linked_for_trying_the_app(tmp_path):
+    client, link = make(tmp_path)
+    node_id = client.post("/api/sim", json={"name": "Sim", "lat": 40.0, "lon": -75.0}).json()["node_id"]
+    r = client.post(f"/api/collars/{node_id}/apps", json={"name": "Phone"})
+    assert r.status_code == 200 and r.json()["synced"] is True and r.json()["sim"] is True
+    assert protocol.parse_pairing_code(r.json()["code"])["sim"] is True
+    assert not getattr(link, "app_keys", [])  # nothing goes on the air for a simulated collar

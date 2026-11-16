@@ -1,30 +1,28 @@
 # Changelog
 
-## 0.19.1
+## 0.19.2
 
-The collar looks at the GPS a second time before it corrects. New collar firmware. Tested with
-the firmware's PC tests and the app's own tests, which run simulated collars. **Not on a real
-collar:** how soon the GPS hands over the second reading comes from reading Meshtastic's code,
-not from measuring it.
+Collar firmware that uses less battery. Only the collar firmware changed. Tested with the
+firmware's PC tests and the firmware build check, not on a real collar: no current has been
+measured yet. Details, with what each setting costs and saves, are in
+[docs/hardware.md](../docs/hardware.md#battery-life).
 
-- **A second look before a correction starts.** When a fix puts the dog in a band, the collar
-  waits 1 second, takes a new GPS reading, and corrects only if the dog is still in a band. One
-  reading on its own, such as a GPS jump, no longer beeps, vibrates or shocks.
-- **And before a correction steps up.** Going from beep to vibrate, or from vibrate to shock, is
-  checked the same way, and the correction that is already going carries on meanwhile. A shock
-  therefore takes two readings in the danger band, at least a second apart. If the two readings
-  are in different bands, the milder band counts. A reading in a milder band, or clear of the
-  bands, counts at once.
-- While the dog stays in a band, beeps and vibrations repeat as before. Past the line every
-  correction still stops at once.
-- Near a line the GPS is on all the time, so the second reading comes about a second after the
-  first. If the GPS was asleep (the dog reached a band faster than the GPS pacing allows for, or
-  pacing is off), the collar wakes it, and the second reading can take about 5 seconds.
-- **What it costs:** every correction starts at least a second later than before. A running dog
-  covers 5 m or more in that time, so wider bands give it more warning.
-- Simulated collars follow the same rule, and say in their events when they are waiting for the
-  second look.
-- Flash collars again to get it. The base and older collar firmware keep working together.
+- **Wi-Fi stays off.** A collar that still has Wi-Fi on (from Wi-Fi updates before 0.17.0) turns
+  it off, saves that, and restarts once so Bluetooth can start. Wi-Fi kept the CPU at 240 MHz
+  instead of 80 and stopped the lost beacon's Bluetooth name.
+- **The screen stays dark.** It lights for 1 second, not 30, after a boot, a button press or a
+  text message. A screen timeout set in the Meshtastic app is kept, other than the 30 s earlier
+  versions set.
+- **No relaying.** A collar with Meshtastic's default role, Client, now runs as Client Mute: it
+  sends and receives its own messages as before but no longer repeats other nodes' packets. Other
+  roles are left alone.
+- **Slower Bluetooth advertising** while no phone is connected: every second, not every 30 to 60
+  ms. Phones still find the collar within a second or two. The lost beacon is unchanged.
+- **Meshtastic's power saving is turned off** if it was on. On an ESP32 it sleeps for minutes at a
+  time, with the fence unwatched.
+- **GPS fixes come as often as the pacing says.** Meshtastic holds the GPS on for up to 20 s after
+  each lock before reporting the fix, so deep inside the fences a fix came every 80 s instead of
+  60. The collar now allows for that. This costs a little GPS time; it is a fix, not a saving.
 
 ## 0.19.0
 

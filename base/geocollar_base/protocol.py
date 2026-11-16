@@ -3,11 +3,15 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
+import hmac
 import math
 import struct
 from dataclasses import dataclass
 from enum import IntEnum
 from typing import Iterable
+from urllib.parse import parse_qs, quote, urlsplit
 
 PORT_NUM = 300
 VERSION = 2  # 2: zones carry danger / warning / attention band widths
@@ -25,6 +29,11 @@ MAX_SHOCK_LEVEL = 30  # the collar firmware's cap (Settings::maxShockLevel)
 MIN_REPORT_S = 30  # how often a collar may be asked to report (kMinReportS..kMaxReportS)
 MAX_REPORT_S = 3600
 DEFAULT_REPORT_S = 600  # the firmware's GEOCOLLAR_STATUS_INTERVAL_MS
+MAX_APP_KEYS = 4  # phones with the companion app per collar (firmware kMaxAppKeys)
+APP_KEY_LEN = 16
+APP_NONCE_LEN = 8
+APP_TAG_LEN = 8
+APP_NO_FIX_AGE = 0xFFFF
 
 
 class MsgType(IntEnum):
@@ -35,6 +44,14 @@ class MsgType(IntEnum):
     OWNER = 5  # base -> collar: the dog's name and the owner's contact, for the lost beacon
     HELLO = 6  # collar -> broadcast: runs GeoCollar, not adopted by a base yet
     CONFIG = 7  # base -> collar: how often to report
+    APP_KEYS = 8  # base -> collar: the phones that may connect to the collar with the companion app
+    APP_KEYS_ACK = 9  # collar -> base: that list is in force
+    # Between the companion app and the collar, over the collar's own Bluetooth (never on the mesh).
+    APP_HELLO = 16
+    APP_CHALLENGE = 17
+    APP_REQUEST = 18
+    APP_STATUS = 19
+    APP_ERROR = 20
 
 
 class CommandAction(IntEnum):
@@ -49,6 +66,13 @@ class CommandAction(IntEnum):
     SILENCE_LOST = 15  # stop the lost beacon until the dog is next back inside
     SHOCK_ON = 16  # allow shock at level `intensity`, capped by the collar's maximum
     SHOCK_OFF = 17
+
+
+# What the companion app may ask a collar for (firmware appActionAllowed). Never shock.
+APP_ACTIONS = frozenset({
+    CommandAction.REQUEST_STATUS, CommandAction.SILENCE_LOST, CommandAction.BEEP, CommandAction.VIBRATE,
+    CommandAction.CORRECTIONS_OFF, CommandAction.CORRECTIONS_ON,
+})
 
 
 class CollarState(IntEnum):
@@ -106,6 +130,7 @@ class Status:
     beacon_silenced: bool = False
     no_fix: bool = False  # no current GPS fix: lat / lon are the last position the collar knew
     numbered: bool = False  # the collar's firmware reads sequence numbers on Owner and Config
+    apps: bool = False  # the collar holds the key of at least one companion app
 
 
 _STATUS = struct.Struct("<BBHBBiiHBhB")
@@ -260,6 +285,7 @@ def decode_status(data: bytes) -> Status:
         beacon_silenced=bool(flags & 8),
         no_fix=bool(flags & 0x10),
         numbered=bool(flags & 0x20),
+        apps=bool(flags & 0x40),
     )
 
 
@@ -268,7 +294,7 @@ def encode_status(s: Status) -> bytes:
     flags = (
         (1 if s.corrections_enabled else 0) | (2 if s.shock_enabled else 0)
         | (4 if s.beacon_active else 0) | (8 if s.beacon_silenced else 0)
-        | (0x10 if s.no_fix else 0) | (0x20 if s.numbered else 0)
+        | (0x10 if s.no_fix else 0) | (0x20 if s.numbered else 0) | (0x40 if s.apps else 0)
     )
     return _STATUS.pack(
         VERSION, s.msg_type, s.fence_version, s.state, s.battery_pct, _to_i(s.lat), _to_i(s.lon),
@@ -370,3 +396,133 @@ def pulses_from_geojson(geojson: dict) -> Pulses:
             raise ValueError(f"pulse.{key} must be 0 (off) or {MIN_PULSE_S}..{MAX_PULSE_S} seconds")
         values.append(v)
     return Pulses(*values)
+
+
+# -------------------------------------------------------------------------------------------------
+# The companion app. The base gives each phone a key (in a QR code) and sends the collar the list
+# of keys; the phone then talks to the collar over the collar's own Bluetooth. See docs/protocol.md
+# and firmware/GeoCollar/AppLink.h.
+# -------------------------------------------------------------------------------------------------
+def encode_app_keys(keys: Iterable[tuple[int, bytes]], seq: int) -> bytes:
+    """The whole list of phones authorized for a collar, as (key id, 16-byte key). A phone left
+    out is revoked. seq grows with every message (Store.next_command_seq), so a recording of an
+    older list cannot put a removed phone back."""
+    keys = list(keys)
+    if len(keys) > MAX_APP_KEYS:
+        raise ValueError(f"at most {MAX_APP_KEYS} apps per collar")
+    if not 0 < seq <= 0xFFFFFFFF:
+        raise ValueError("the app key list needs a sequence number")
+    out = bytearray([VERSION, MsgType.APP_KEYS]) + struct.pack("<IB", seq, len(keys))
+    seen = set()
+    for key_id, key in keys:
+        if not 0 < key_id <= 0xFFFFFFFF or key_id in seen or len(key) != APP_KEY_LEN:
+            raise ValueError("an app key is a number of its own (not 0) and 16 bytes")
+        seen.add(key_id)
+        out += struct.pack("<I", key_id) + key
+    return bytes(out)
+
+
+def decode_app_keys(data: bytes) -> tuple[list[tuple[int, bytes]], int]:
+    """For tests and simulators: the list and its sequence number."""
+    if len(data) < 7 or data[0] != VERSION or data[1] != MsgType.APP_KEYS:
+        raise ValueError("not a GeoCollar app key list")
+    seq, count = struct.unpack_from("<IB", data, 2)
+    if count > MAX_APP_KEYS or len(data) != 7 + count * (4 + APP_KEY_LEN) or not seq:
+        raise ValueError("bad app key list")
+    keys = []
+    for i in range(count):
+        at = 7 + i * (4 + APP_KEY_LEN)
+        keys.append((struct.unpack_from("<I", data, at)[0], data[at + 4:at + 4 + APP_KEY_LEN]))
+    return keys, seq
+
+
+def encode_app_keys_ack(seq: int, count: int) -> bytes:
+    """For tests and simulators: the collar is what sends these."""
+    return bytes([VERSION, MsgType.APP_KEYS_ACK]) + struct.pack("<IB", seq & 0xFFFFFFFF, count)
+
+
+def decode_app_keys_ack(data: bytes) -> dict:
+    if len(data) != 7 or data[0] != VERSION or data[1] != MsgType.APP_KEYS_ACK:
+        raise ValueError("not a GeoCollar app key acknowledgement")
+    seq, count = struct.unpack_from("<IB", data, 2)
+    return {"seq": seq, "count": count}
+
+
+PAIRING_SCHEME = "geocollar"
+
+
+def pairing_code(node_id: str, key_id: int, key: bytes, dog: str = "", pin: int | None = None,
+                 ble_name: str = "", sim: bool = False) -> str:
+    """What the "Connect app" QR code says: everything a phone needs to find one collar and be
+    believed by it.
+
+    geocollar://pair?v=1&n=<node, 8 hex>&i=<key id, 8 hex>&k=<key, base64url>[&p=<Bluetooth PIN>]
+    [&b=<start of the collar's Bluetooth name>][&d=<dog's name>][&s=1 for a simulated collar]"""
+    if len(key) != APP_KEY_LEN or not 0 < key_id <= 0xFFFFFFFF:
+        raise ValueError("bad app key")
+    parts = ["v=1", f"n={node_id.lstrip('!')}", f"i={key_id:08x}",
+             "k=" + base64.urlsafe_b64encode(key).decode().rstrip("=")]
+    if pin:
+        parts.append(f"p={int(pin):06d}")
+    if ble_name:
+        parts.append("b=" + quote(ble_name, safe=""))
+    if dog:
+        parts.append("d=" + quote(dog, safe=""))
+    if sim:
+        parts.append("s=1")
+    return f"{PAIRING_SCHEME}://pair?" + "&".join(parts)
+
+
+def parse_pairing_code(code: str) -> dict:
+    """The reverse of pairing_code, as the app reads it. For tests."""
+    url = urlsplit(code.strip())
+    q = {k: v[0] for k, v in parse_qs(url.query).items()}
+    if url.scheme != PAIRING_SCHEME or url.netloc != "pair" or q.get("v") != "1":
+        raise ValueError("not a GeoCollar pairing code")
+    key = base64.urlsafe_b64decode(q["k"] + "=" * (-len(q["k"]) % 4))
+    if len(key) != APP_KEY_LEN:
+        raise ValueError("bad app key")
+    return {"node_id": "!" + q["n"], "key_id": int(q["i"], 16), "key": key, "pin": q.get("p"),
+            "ble_name": q.get("b", ""), "dog": q.get("d", ""), "sim": q.get("s") == "1"}
+
+
+# The app's half of a session, for tests: the app itself is JavaScript (app/src/applink.js) and
+# the collar's half is firmware/GeoCollar/AppLink.cpp. All three share golden bytes.
+def _app_mac(key: bytes, label: bytes, key_id: int, app_nonce: bytes, collar_nonce: bytes) -> bytes:
+    return hmac.new(key, label + struct.pack("<I", key_id) + app_nonce + collar_nonce, hashlib.sha256).digest()
+
+
+def app_challenge_tag(key: bytes, key_id: int, app_nonce: bytes, collar_nonce: bytes) -> bytes:
+    return _app_mac(key, b"GCA1", key_id, app_nonce, collar_nonce)[:APP_TAG_LEN]
+
+
+def app_session_key(key: bytes, key_id: int, app_nonce: bytes, collar_nonce: bytes) -> bytes:
+    return _app_mac(key, b"GCS1", key_id, app_nonce, collar_nonce)
+
+
+def app_tag(session_key: bytes, message: bytes) -> bytes:
+    return hmac.new(session_key, message, hashlib.sha256).digest()[:APP_TAG_LEN]
+
+
+def encode_app_hello(key_id: int, app_nonce: bytes) -> bytes:
+    return bytes([VERSION, MsgType.APP_HELLO]) + struct.pack("<I", key_id) + app_nonce
+
+
+def encode_app_request(session_key: bytes, key_id: int, counter: int, action: CommandAction, intensity: int = 0,
+                       duration_ms: int = 0) -> bytes:
+    msg = bytes([VERSION, MsgType.APP_REQUEST]) + struct.pack("<IIBBH", key_id, counter, action, intensity, duration_ms)
+    return msg + app_tag(session_key, msg)
+
+
+def decode_app_status(session_key: bytes, data: bytes) -> dict:
+    """An AppStatus whose signature fits: the request it answers, whether that was done, the
+    collar's report and how old its position is (None: no fix since the collar started)."""
+    if len(data) != 39 or data[0] != VERSION or data[1] != MsgType.APP_STATUS:
+        raise ValueError("not a GeoCollar app status")
+    if not hmac.compare_digest(app_tag(session_key, data[:-APP_TAG_LEN]), data[-APP_TAG_LEN:]):
+        raise ValueError("the app status is not signed by the collar")
+    key_id, counter, result = struct.unpack_from("<IIB", data, 2)
+    status = decode_status(bytes([VERSION, MsgType.STATUS]) + data[11:29])
+    age = struct.unpack_from("<H", data, 29)[0]
+    return {"key_id": key_id, "counter": counter, "done": result == 0, "status": status,
+            "fix_age_s": None if age == APP_NO_FIX_AGE else age}

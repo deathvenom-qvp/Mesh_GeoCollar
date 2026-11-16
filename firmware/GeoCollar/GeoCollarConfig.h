@@ -40,6 +40,31 @@
 #define GEOCOLLAR_LOST_STATUS_INTERVAL_MS (30 * 1000)
 #endif
 
+// Battery life (see docs/hardware.md, Battery life). Set any of these to 0 to keep Meshtastic's own
+// behaviour.
+//
+// Keep Wi-Fi off. Nothing on a collar uses it since 0.17.0, and with it on Meshtastic runs the CPU
+// at 240 MHz instead of 80 and cannot start Bluetooth, which the lost beacon needs.
+#ifndef GEOCOLLAR_WIFI_OFF
+#define GEOCOLLAR_WIFI_OFF 1
+#endif
+// Do not relay other nodes' packets: with Meshtastic's default role (Client) a collar repeats
+// every packet it hears, at full transmit power. Only the default role is changed: any other
+// role chosen in the Meshtastic app is kept.
+#ifndef GEOCOLLAR_NO_RELAY
+#define GEOCOLLAR_NO_RELAY 1
+#endif
+// Seconds the screen stays lit after a button press, boot or text message, while Meshtastic's
+// timeout is its default (or the 30 s that GeoCollar 0.16 to 0.19 set).
+#ifndef GEOCOLLAR_SCREEN_ON_SECS
+#define GEOCOLLAR_SCREEN_ON_SECS 1
+#endif
+// Bluetooth advertising interval while no phone is connected and the lost beacon is off, ms.
+// Meshtastic's own is 30 to 60 ms.
+#ifndef GEOCOLLAR_BLE_ADV_MS
+#define GEOCOLLAR_BLE_ADV_MS 1000
+#endif
+
 // After a correction, keep sending the stop frame this long so the collar really stops.
 #define GEOCOLLAR_STOP_MS 300
 // Longest single correction the firmware will ever send, whatever the base asks for.

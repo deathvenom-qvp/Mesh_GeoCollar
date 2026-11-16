@@ -10,10 +10,13 @@ up). All multi-byte fields are little-endian. Every message starts with:
 
 Messages between base and collar are **direct messages**, so Meshtastic encrypts them with PKI
 (X25519 + AES-256-CCM). Relays can forward them but cannot read them. A collar ignores GeoCollar
-messages that are not PKI-encrypted from a public key in its `security.admin_key` list.
+messages that are not PKI-encrypted from a public key in its `security.admin_key` list. The one
+exception is the companion app, which reaches the collar over Bluetooth instead of the mesh and
+proves itself with a key of its own (see [The companion app](#the-companion-app)).
 
-The reference implementations are `firmware/GeoCollar/Protocol.cpp` and
-`base/geocollar_base/protocol.py`; their tests share golden byte strings.
+The reference implementations are `firmware/GeoCollar/Protocol.cpp`, `firmware/GeoCollar/AppLink.cpp`,
+`base/geocollar_base/protocol.py` and, for the app, `app/src/applink.js`; their tests share golden
+byte strings.
 
 ## 1. FenceChunk (base to collar)
 
@@ -83,7 +86,7 @@ Same 20-byte layout; Breach is sent the moment the collar enters Lost, and every
 | 14 | 2 | PDOP × 100 |
 | 16 | 1 | satellites in view |
 | 17 | 2 | clearance to nearest fence line, metres, signed (negative = on the wrong side) |
-| 19 | 1 | flags: bit 0 corrections enabled, bit 1 shock enabled, bit 2 lost beacon on, bit 3 lost beacon silenced, bit 4 no current GPS fix, bit 5 the collar reads sequence numbers on Owner and Config |
+| 19 | 1 | flags: bit 0 corrections enabled, bit 1 shock enabled, bit 2 lost beacon on, bit 3 lost beacon silenced, bit 4 no current GPS fix, bit 5 the collar reads sequence numbers on Owner and Config, bit 6 the collar holds the key of at least one phone app (section 8) |
 
 With bit 4 set the position is the last one the collar had (0, 0 if it has had none since it
 started) and the clearance belongs to that position. A fix counts as current for the GPS interval
@@ -167,7 +170,9 @@ with fences loaded), the collar:
 
 - halves its GPS rate (twice the lost-mode interval, 30 s by default) to save battery;
 - advertises on Bluetooth as `<dog> is lost <phone>` for 90 s, then stops advertising for 90 s,
-  and repeats. Spaces, dots and brackets are dropped from the phone number, and the name becomes
+  and repeats. A collar that holds a phone app's key (section 8) does not go silent in the quiet
+  90 s: it advertises its ordinary Meshtastic name every 2 s, so the owner's app can still find
+  and connect to it. Spaces, dots and brackets are dropped from the phone number, and the name becomes
   `<dog> lost <phone>` and then a shortened dog's name if it would not fit Bluetooth's 29 bytes.
   It uses Meshtastic's own Bluetooth stack, advertising once a second, so Bluetooth must stay
   enabled in the collar's Meshtastic settings. While a phone is connected it leaves Bluetooth alone;
@@ -178,3 +183,93 @@ with fences loaded), the collar:
 
 It stops when a good fix is back inside every fence, when new fences arrive, or on command 15.
 Silenced, it stays off until the dog has been back inside, so the next escape starts it again.
+
+## 8. AppKeys (base to collar) and 9. AppKeysAck (collar to base)
+
+The phones that may connect to this collar with the companion app (`app/`). Sent like every other
+base message, as a PKI direct message from an admin key.
+
+AppKeys:
+
+| Offset | Size | Field |
+| --- | --- | --- |
+| 2 | 4 | sequence number, from the same counter as a command's (never 0) |
+| 6 | 1 | key count, 0..4 |
+| per key: 4 | key id (never 0, no two alike) |
+| per key: 16 | the key |
+
+It is always the whole list, so a phone left out is a phone removed, and an empty list removes
+them all. The collar refuses a list whose sequence number is not higher than the last it accepted,
+saves an accepted list to flash, ends a running session whose key is gone, and answers:
+
+AppKeysAck: `02 09 <sequence number, 4 bytes> <key count>`.
+
+The base sends the list again, at growing intervals up to an hour, each time the collar reports
+until the acknowledgement for its newest list arrives, and also when a report's flag bit 6
+disagrees with the list (a collar that was erased, or one that still holds keys this base never
+gave it). Golden bytes for one key (id `0x1a2b3c4d`, key `00 01 .. 0f`), sequence 1763085600:
+`02 08 208d1669 01 4d3c2b1a 000102030405060708090a0b0c0d0e0f`, and its acknowledgement
+`02 09 208d1669 01`.
+
+## The companion app
+
+A phone talks to the collar over the collar's own Meshtastic Bluetooth service, as any Meshtastic
+phone app does: it writes `ToRadio` protobufs and reads `FromRadio` ones. GeoCollar messages go
+in a `MeshPacket` addressed to the collar's own node number, on portnum 300. The collar's module
+sees such a packet as coming from itself, answers with a packet from itself to itself, and hands
+that to the phone only: nothing of this goes on the air.
+
+Reaching the Bluetooth service at all takes the collar's Bluetooth PIN. That is not enough to
+command the collar: every request is signed with a key that the base made for one phone, gave to
+the phone in a QR code and to the collar in AppKeys. Messages are authenticated, not encrypted
+(the Bluetooth link is encrypted by the pairing).
+
+| Type | Direction | Layout after the 2-byte header |
+| --- | --- | --- |
+| 16 AppHello | app to collar | key id (4), app nonce (8) |
+| 17 AppChallenge | collar to app | key id (4), collar nonce (8), tag (8) |
+| 18 AppRequest | app to collar | key id (4), counter (4), action (1), intensity (1), duration ms (2), tag (8) |
+| 19 AppStatus | collar to app | key id (4), counter (4), result (1), the 18 bytes of a Status after its header, age of the fix in seconds (2, `0xffff` = no fix yet), tag (8) |
+| 20 AppError | collar to app | key id (4), code (1): 1 unknown key, 2 no session |
+
+- Challenge tag: the first 8 bytes of HMAC-SHA256(key, `"GCA1"` + key id + app nonce + collar
+  nonce). It proves to the app that the collar holds the key.
+- Session key: HMAC-SHA256(key, `"GCS1"` + key id + app nonce + collar nonce), all 32 bytes.
+- Request and status tags: the first 8 bytes of HMAC-SHA256(session key, the message up to the tag).
+
+A hello starts a session and ends the one before it; the collar keeps one, in RAM. Both nonces
+are fresh random bytes, so a recorded session is worthless later. Within a session the counter
+starts at 1 and must grow with every request; the collar checks the tag first, so a forged
+request cannot use a counter up. An AppStatus repeats its request's counter. Result is 0 done or
+1 not allowed.
+
+A phone may ask for these actions only: 14 request status, 15 silence the lost beacon, 3 beep,
+2 vibrate, 10 corrections off, 11 corrections on. Anything else, shock included, gets result 1 and
+is not done. Beep, vibrate, silence and the corrections switch run through the same code as a
+command from the base, which also reports the change to the base; a request for status stays off
+the mesh. An AppError is not signed: all it can do is make the app say hello again.
+
+Golden bytes (key id `0x1a2b3c4d`, key `00 01 .. 0f`, app nonce `a0 .. a7`, collar nonce
+`c0 .. c7`), shared by `firmware/test/test_main.cpp`, `base/tests/test_protocol.py` and
+`app/test/protocol.test.mjs`:
+
+| Message | Bytes |
+| --- | --- |
+| AppHello | `0210 4d3c2b1a a0a1a2a3a4a5a6a7` |
+| AppChallenge | `0211 4d3c2b1a c0c1c2c3c4c5c6c7 c66cfaa9f4fe36cb` |
+| session key | `4b4ad99bb6e9aa4a581e9cc9defdb082abb994605cae8f691fde30c639488fce` |
+| AppRequest, counter 1, silence the lost beacon | `0212 4d3c2b1a 01000000 0f 00 0000 d2b8917361311478` |
+| AppError, no session | `0214 4d3c2b1a 02` |
+
+### The pairing code
+
+What the base's **Connect app** QR code says:
+
+`geocollar://pair?v=1&n=<node number, 8 hex digits>&i=<key id, 8 hex digits>&k=<key, base64url without padding>`
+
+followed by any of `&p=<the collar's 6-digit Bluetooth PIN>`, `&b=<the collar's Meshtastic short
+name, which its Bluetooth name starts with>`, `&d=<the dog's name>` and `&s=1` for one of the
+base's simulated collars (the app then shows its demo collar, as there is nothing to connect to).
+The key is in the code and nowhere else outside the base and the collar, so the base shows a code
+once.
+

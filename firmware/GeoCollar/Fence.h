@@ -229,6 +229,13 @@ uint32_t gpsIntervalSecs(const Settings &s, CollarState state, float clearanceM,
 /// stays on and reports all the time, and 45 s without a fix means the lock is gone.
 uint32_t fixOverdueMs(uint32_t gpsIntervalSecs);
 
+/// The GPS update interval to give Meshtastic so that its fixes come every fixEverySecs. For an
+/// interval over 10 s Meshtastic 2.8 lets the GPS sleep between fixes, and after each lock holds
+/// it on for min(interval - 10 s, 20 s) before it reports the fix and starts counting the interval
+/// again; so a fix comes every interval plus that hold. 10 s or less keeps the GPS on, reporting
+/// every second, and is returned unchanged.
+uint32_t gpsSettingSecs(uint32_t fixEverySecs);
+
 /// Says whether the collar has a current GPS fix. There is none at boot, and none again once a
 /// fix is overdue; only the next fix brings it back. A change of GPS interval gives the GPS a
 /// full allowance from that moment, so going from a slow interval to a fast one does not make
