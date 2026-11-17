@@ -295,7 +295,10 @@ shows its built-in demo collar for one.
 
 Type an address in the search box at the top right of the map and press Enter. The map starts
 at Home Assistant's home location (Settings > System > General) and the ⌂ button returns there;
-the **Home location** option overrides it. Searches go to OpenStreetMap's Nominatim service, so
+the **Home location** option overrides it. If you move the home in Home Assistant, save the
+**Home mode** card on the Settings tab again: the base asks Home Assistant for the home then, and
+a home mode anchor at the home location (the base station's radio, unless you placed it on the
+map) moves to it, with no restart. Searches go to OpenStreetMap's Nominatim service, so
 the base needs internet access for them.
 
 ## Drawing fences

@@ -300,7 +300,46 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
         return protocol.HomeAnchor(ANCHOR_KINDS.get(a.get("kind"), protocol.AnchorKind.NONE),
                                    a.get("address", ""), int(a.get("rssi", -75)))
 
-    home_cache: dict = {}
+    home_cache: dict = {}  # "at": the last home location Home Assistant gave
+    home_lock = threading.Lock()
+
+    def anchor_follows_home() -> bool:
+        """Home mode is on and the owner has not put the anchor anywhere: it is at the home location."""
+        a = store.setting("home_anchor") or {}
+        return a.get("kind", "off") != "off" and (a.get("lat") is None or a.get("lon") is None)
+
+    def home_moved(at: tuple[float, float]) -> None:
+        """The home location changed (or Home Assistant gave it for the first time): an anchor at
+        the home location moves with it. Collars only listen for the anchor, so only the simulated
+        ones, which stand in for its radio range with this position, need telling."""
+        if not anchor_follows_home():
+            return
+        log.info("the home location is now %.5f, %.5f: the home anchor moves with it", *at)
+        anchor = home_anchor()
+        for node_id in store.collars():
+            if node_id in sim:
+                sim.set_anchor(node_id, anchor, at)
+
+    def base_home(fresh: bool = False) -> tuple[float, float] | None:
+        """The base's home location: the app option, else Home Assistant's home. Home Assistant is
+        asked once, and again when fresh: when the owner saves the home mode setting, so a home
+        moved there reaches the base then. Until it has answered (it may not be up yet) it is
+        asked each time; after that, if it can't be reached, the last location it gave stands."""
+        h = geo.parse_home(settings.get("home", ""))
+        if h:
+            return float(h["lat"]), float(h["lon"])
+        with home_lock:
+            if not fresh and "at" in home_cache:
+                return home_cache["at"]
+        h = geo.ha_home()
+        with home_lock:
+            before = home_cache.get("at")
+            if h:
+                home_cache["at"] = (float(h["lat"]), float(h["lon"]))
+            at = home_cache.get("at")
+        if at is not None and at != before:
+            home_moved(at)
+        return at
 
     def anchor_position() -> tuple[float, float] | None:
         """Where the anchor stands: where the owner put it, else the base's home location."""
@@ -309,12 +348,7 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
             return None
         if a.get("lat") is not None and a.get("lon") is not None:
             return float(a["lat"]), float(a["lon"])
-        if "home" not in home_cache:
-            h = geo.parse_home(settings.get("home", "")) or geo.ha_home()
-            if not h:
-                return None  # asked again next time: Home Assistant may not be up yet
-            home_cache["home"] = (float(h["lat"]), float(h["lon"]))
-        return home_cache["home"]
+        return base_home()
 
     def config_for(node_id: str):
         """What the collar should have been sent: its report interval and, once the owner has set
@@ -828,6 +862,8 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
             raise HTTPException(400, f"the GPS restart time is one of {', '.join(map(str, GPS_RESTART_CHOICES))} s")
         store.set_setting("home_anchor", {"kind": body.kind, "address": address, "rssi": body.rssi,
                                           "lat": body.lat, "lon": body.lon, "gps_restart_s": body.gps_restart_s})
+        if anchor_follows_home():
+            base_home(fresh=True)  # a home moved in Home Assistant since the last save reaches the base now
         sent = [node_id for node_id in store.collars() if push_config(node_id)]
         return {**home_anchor_view(), "sent_to": sent}
 

@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.19.4
+
+The base picks up a home moved in Home Assistant. A base change only: collars need nothing new.
+Tested with the app's own tests, which move the home with a simulated collar.
+
+- **Saving home mode asks Home Assistant for the home again.** Earlier the base asked Home
+  Assistant for its home location once and kept that answer until the app restarted, so a home
+  moved in Settings > System > General never reached the base. Now, after moving the home, save
+  the **Home mode** card (Settings tab) and the base station's location follows, with no restart.
+  The base does not keep checking in between.
+- The home mode card, its map marker and range circle, and the distance checks against each
+  collar's bands follow the new home. Simulated collars listen for the anchor there too.
+- If Home Assistant can't be reached when you save, the last home it gave stands. An anchor you
+  placed on the map, or a **Home location** set in the app options, stays where it is.
+
 ## 0.19.3
 
 The collar looks at the GPS a second time before it corrects. New collar firmware. Tested with
