@@ -878,3 +878,46 @@ def test_home_anchor_is_sent_to_collars_and_checked(tmp_path):
     # A collar reporting that it is home.
     client.app.state.on_status("!a1b2c3d4", {**GOOD, "numbered": True, "home": True})
     assert client.get("/api/collars").json()["!a1b2c3d4"]["status"]["home"] is True
+
+
+def test_the_home_anchor_follows_home_assistants_home(tmp_path, monkeypatch):
+    from geocollar_base import app as app_mod
+    from geocollar_base import geo
+
+    home = [{"lat": 40.001, "lon": -74.999}]
+    monkeypatch.setattr(geo, "ha_home", lambda: home[0])
+    client, _ = make(tmp_path)
+    node_id = client.post("/api/sim", json={"name": "Sim", "lat": 40.0, "lon": -75.0}).json()["node_id"]
+    client.put(f"/api/collars/{node_id}/fences", json=FENCE)
+    client.put("/api/home-anchor", json={"kind": "base", "rssi": -75})  # at the home location
+    sim_collar = client.app.state.sim.collars[node_id]
+    a = client.get("/api/home-anchor").json()
+    assert a["position"] == [40.001, -74.999] and a["position_set"] is False
+    assert sim_collar.anchor_at == (40.001, -74.999)
+    room = a["collars"][0]["room_m"]
+
+    # The home is moved in Home Assistant: the page shows the anchor there straight away, the
+    # distance to the bands is checked from there, and the simulated collar listens there.
+    home[0] = {"lat": 40.0015, "lon": -74.9985}
+    a = client.get("/api/home-anchor").json()
+    assert a["position"] == [40.0015, -74.9985] and a["collars"][0]["room_m"] != room
+    assert sim_collar.anchor_at == (40.0015, -74.9985)
+
+    # Without the page open: the app looks again every HOME_MAX_AGE_S while it runs.
+    home[0] = {"lat": 40.0012, "lon": -74.9988}
+    monkeypatch.setattr(app_mod, "HOME_MAX_AGE_S", 0.02)
+    with client:  # runs the app's background loops
+        deadline = time.monotonic() + 3
+        while sim_collar.anchor_at != (40.0012, -74.9988) and time.monotonic() < deadline:
+            time.sleep(0.02)
+    assert sim_collar.anchor_at == (40.0012, -74.9988)
+
+    # Home Assistant out of reach: the last home it gave stands.
+    home[0] = None
+    assert client.get("/api/home-anchor").json()["position"] == [40.0012, -74.9988]
+
+    # An anchor the owner placed on the map stays where it was put.
+    home[0] = {"lat": 41.0, "lon": -74.0}
+    client.put("/api/home-anchor", json={"kind": "base", "rssi": -75, "lat": 40.001, "lon": -74.999})
+    assert client.get("/api/home-anchor").json()["position"] == [40.001, -74.999]
+    assert sim_collar.anchor_at == (40.001, -74.999)
