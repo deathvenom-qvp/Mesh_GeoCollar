@@ -21,31 +21,42 @@ phone, whatever a phone sends.
 
 1. On the phone, open the repository's
    [app-latest release](https://github.com/deathvenom-qvp/Mesh_GeoCollar/releases/tag/app-latest)
-   and download `geocollar-app.apk`. (It appears there once a build of `main` with the app has
-   run. Before that, each pull request's **Phone app build (Android)** check has the same file
-   under its artifacts.)
+   and download `geocollar-app.apk`. (Every push that changes the app, on any branch, also
+   builds it: open the run of **Phone app** under the repository's Actions tab, and it is in
+   `geocollar-app-android` under *Artifacts*.)
 2. Open the file. Android asks whether to allow installing apps from your browser or file
    manager: allow it, then install.
 3. Open GeoCollar and allow Bluetooth ("Nearby devices"), the camera, and location when it asks.
 
-This is a debug build, signed with a throwaway key that changes with every build. To install a
+Until the repository has an Android signing key (see [Packages from GitHub](#packages-from-github)),
+this is a debug build, signed with a throwaway key that changes with every build. To install a
 newer one, uninstall the old one first, which also forgets the linked collars: link them again
-from the base station. A properly signed release is on the list of [things not done](#not-done-yet).
+from the base station. With the key set up, it is a signed release and each one installs over the
+last.
 
 ### iPhone and iPad
 
-Apple only lets a signed app onto a device, so there is nothing to download. You need a Mac with
-Xcode and an Apple ID (a free one works; the app then needs reinstalling every 7 days, a paid
-developer account lifts that):
+Apple only lets a signed app onto a device. There are three ways:
 
-```sh
-cd app
-npm ci
-npm run ios          # builds the web part, syncs it, and opens Xcode
-```
+- **Sideload the unsigned build.** Download `geocollar-app-unsigned.ipa` from the
+  [app-latest release](https://github.com/deathvenom-qvp/Mesh_GeoCollar/releases/tag/app-latest)
+  and install it with a sideloading tool such as AltStore or Sideloadly, which signs it with your
+  own Apple ID as it installs it. With a free Apple ID it has to be refreshed every 7 days.
+- **The signed build**, `geocollar-app.ipa` on the same release, once the repository has an Apple
+  certificate and profile set up (see [Packages from GitHub](#packages-from-github)). With an ad
+  hoc or development profile it installs on the iPhones listed in the profile; with an App Store
+  profile it is for uploading to TestFlight.
+- **Build it yourself** on a Mac with Xcode and an Apple ID (a free one works; the app then needs
+  reinstalling every 7 days, a paid developer account lifts that):
 
-In Xcode, select the **App** target, pick your team under **Signing & Capabilities**, change the
-bundle identifier to one of your own, plug in the phone and press Run.
+  ```sh
+  cd app
+  npm ci
+  npm run ios          # builds the web part, syncs it, and opens Xcode
+  ```
+
+  In Xcode, select the **App** target, pick your team under **Signing & Capabilities**, change
+  the bundle identifier to one of your own, plug in the phone and press Run.
 
 ## Link a collar
 
@@ -136,6 +147,61 @@ browser only the demo collar connects.
 | `test/` | `node --test`. The link is tested against the demo collar and against the firmware's real session code. |
 | `android/`, `ios/` | The native projects Capacitor wraps the web part in: permissions, icons, the `geocollar://` link. |
 | `tools/make_icons.py` | Draws the icon and launch screen into both projects. |
+| `tools/ios_signing.py` | Sets the iOS project up for a signed build on GitHub, from the provisioning profile. |
+
+## Packages from GitHub
+
+The **Phone app** workflow (`.github/workflows/app.yml`) builds the packages on every push that
+changes something under `app/`, on any branch; a push that changes only the firmware or the base
+does not run it. It can also be started by hand from the Actions tab (*Run workflow*). Each run
+keeps its packages under *Artifacts*, and a run on `main` also replaces them on the
+[app-latest release](https://github.com/deathvenom-qvp/Mesh_GeoCollar/releases/tag/app-latest).
+
+| File | Artifact | What |
+| --- | --- | --- |
+| `geocollar-app.apk` | `geocollar-app-android` | Android, to install. The signed release with an Android key, else a debug build. |
+| `geocollar-app.aab` | `geocollar-app-android` | Android App Bundle for Google Play. Only with an Android key. |
+| `geocollar-app-debug.apk` | `geocollar-app-android` | The debug build. Only with an Android key (otherwise it is `geocollar-app.apk`). |
+| `geocollar-app-unsigned.ipa` | `geocollar-app-ios` | iPhone, unsigned, for a sideloading tool. Always built. |
+| `geocollar-app.ipa` | `geocollar-app-ios` | iPhone, signed. Only with an Apple certificate and profile. |
+| `geocollar-app-simulator.zip` | `geocollar-app-ios` | For the iOS Simulator on a Mac: unzip, then `xcrun simctl install booted App.app`. |
+
+The build number (Android `versionCode`, iOS build) is the workflow's run number, so each build
+counts up.
+
+### Secrets for signed builds
+
+Without any of these the workflow still builds everything it can. Add them under the
+repository's *Settings > Secrets and variables > Actions > New repository secret*.
+
+**Android** (all four together):
+
+| Secret | What |
+| --- | --- |
+| `ANDROID_KEYSTORE_BASE64` | The upload or release keystore (`.jks`), base64-encoded: `base64 -w0 release.jks` (macOS: `base64 -i release.jks`). |
+| `ANDROID_KEYSTORE_PASSWORD` | The keystore's password. |
+| `ANDROID_KEY_ALIAS` | The key's alias in it. |
+| `ANDROID_KEY_PASSWORD` | The key's password. Leave it out if it is the same as the keystore's. |
+
+To make a keystore: `keytool -genkeypair -v -keystore release.jks -alias geocollar -keyalg RSA
+-keysize 4096 -validity 10000`. Keep a copy somewhere safe: an app signed with a lost key cannot
+be updated, only uninstalled and installed again. The first signed APK cannot install over a debug
+one; uninstall the debug one first.
+
+**iPhone** (needs a paid Apple Developer account; both together):
+
+| Secret | What |
+| --- | --- |
+| `IOS_CERTIFICATE_P12_BASE64` | An Apple Distribution certificate (or Apple Development, for a development profile) with its private key, exported from Keychain Access as `.p12`, base64-encoded: `base64 -i cert.p12`. |
+| `IOS_CERTIFICATE_PASSWORD` | The password chosen when exporting the `.p12`. |
+| `IOS_PROVISIONING_PROFILE_BASE64` | The provisioning profile (`.mobileprovision`) for the app, made with that certificate, base64-encoded: `base64 -i GeoCollar.mobileprovision`. |
+
+The workflow takes everything else from the profile: the team, the bundle identifier (a
+wildcard profile keeps `io.github.deathvenomqvp.geocollar`), and the kind of package. An *ad hoc*
+profile makes an `.ipa` that installs on the iPhones registered in it (install it with Apple
+Configurator, or Xcode's *Devices and Simulators* window); a *development* profile the same, for development; an
+*App Store* profile one to upload to TestFlight or the App Store with Transporter. The app uses
+Bluetooth, the camera and location, none of which need extra capabilities on the App ID.
 
 ## What is tested and what is not
 
@@ -151,7 +217,7 @@ Tested, on a PC:
 - The base station's real QR code, scanned by the app's scanner through a pretend camera in a
   desktop browser.
 - The screens, in a desktop browser at phone size, with the demo collar.
-- That the Android and iOS projects compile (on GitHub, with every pull request).
+- That the Android and iOS projects compile (on GitHub, with every push that changes the app).
 
 Not tested, because it needs a collar and a phone:
 
@@ -163,8 +229,10 @@ Not tested, because it needs a collar and a phone:
 
 ## Not done yet
 
-- A signed Android release (so updates install over each other), and store listings. The
-  identifiers `io.github.deathvenomqvp.geocollar` are placeholders to change before publishing.
+- Store listings. The GitHub workflow can make signed packages (see
+  [Packages from GitHub](#packages-from-github)) but no signing keys are set up yet, and nothing
+  uploads to Google Play or TestFlight. The identifiers `io.github.deathvenomqvp.geocollar` are
+  placeholders to change before publishing.
 - The app connects only while it is open and on the collar's screen. It does not run in the
   background or raise a notification when a collar comes into range.
 - One collar at a time is connected: the one whose screen is open.
