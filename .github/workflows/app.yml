@@ -1,0 +1,218 @@
+# Builds the phone app's Android and iPhone packages on every push that changes the app, on any
+# branch, and keeps them as the run's artifacts. A push to main also puts them on the "app-latest"
+# release. Without any secrets the packages are unsigned or debug builds; app/README.md
+# ("Packages from GitHub") lists the secrets that make signed ones.
+name: Phone app
+
+on:
+  push:
+    branches: ["**"] # not tags
+    paths:
+      - "app/**"
+      - ".github/workflows/app.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: app-${{ github.ref }}
+  # A newer push to a branch replaces a build still running; main's builds all finish.
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions:
+  contents: read
+
+jobs:
+  android:
+    name: Phone app package (Android)
+    runs-on: ubuntu-latest
+    env:
+      ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+      ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+      ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+      ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: gradle
+      - run: npm ci
+        working-directory: app
+      - run: npm run build
+        working-directory: app
+      - run: npx cap sync android
+        working-directory: app
+      - name: Debug build
+        run: ./gradlew --no-daemon assembleDebug -PgeocollarVersionCode=${{ github.run_number }}
+        working-directory: app/android
+      - name: Signed release build
+        if: env.ANDROID_KEYSTORE_BASE64 != ''
+        working-directory: app/android
+        run: |
+          echo "$ANDROID_KEYSTORE_BASE64" | base64 --decode > "$RUNNER_TEMP/release.jks"
+          ./gradlew --no-daemon assembleRelease bundleRelease \
+            -PgeocollarVersionCode=${{ github.run_number }} \
+            -Pandroid.injected.signing.store.file="$RUNNER_TEMP/release.jks" \
+            -Pandroid.injected.signing.store.password="$ANDROID_KEYSTORE_PASSWORD" \
+            -Pandroid.injected.signing.key.alias="$ANDROID_KEY_ALIAS" \
+            -Pandroid.injected.signing.key.password="${ANDROID_KEY_PASSWORD:-$ANDROID_KEYSTORE_PASSWORD}"
+          rm "$RUNNER_TEMP/release.jks"
+      # geocollar-app.apk is the one to install: the signed release when there is one, else the
+      # debug build.
+      - name: Collect the packages
+        run: |
+          mkdir -p dist-app
+          out=app/android/app/build/outputs
+          if [ -n "$ANDROID_KEYSTORE_BASE64" ]; then
+            cp $out/apk/release/app-release.apk dist-app/geocollar-app.apk
+            cp $out/bundle/release/app-release.aab dist-app/geocollar-app.aab
+            cp $out/apk/debug/app-debug.apk dist-app/geocollar-app-debug.apk
+          else
+            cp $out/apk/debug/app-debug.apk dist-app/geocollar-app.apk
+          fi
+          ls -l dist-app
+      - uses: actions/upload-artifact@v4
+        with:
+          name: geocollar-app-android
+          path: dist-app/
+          if-no-files-found: error
+
+  ios:
+    name: Phone app package (iPhone)
+    runs-on: macos-15
+    env:
+      IOS_CERTIFICATE_P12_BASE64: ${{ secrets.IOS_CERTIFICATE_P12_BASE64 }}
+      IOS_CERTIFICATE_PASSWORD: ${{ secrets.IOS_CERTIFICATE_PASSWORD }}
+      IOS_PROVISIONING_PROFILE_BASE64: ${{ secrets.IOS_PROVISIONING_PROFILE_BASE64 }}
+      BUILD_NUMBER: ${{ github.run_number }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - run: npm ci
+        working-directory: app
+      - run: npm run build
+        working-directory: app
+      - run: npx cap sync ios
+        working-directory: app
+      - run: mkdir -p dist-app
+
+      # For the iOS Simulator on a Mac: unzip, then `xcrun simctl install booted App.app`.
+      - name: Simulator build
+        working-directory: app/ios/App
+        run: |
+          xcodebuild -project App.xcodeproj -scheme App -configuration Debug \
+            -sdk iphonesimulator -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath build/sim CODE_SIGNING_ALLOWED=NO build
+          ditto -c -k --keepParent build/sim/Build/Products/Debug-iphonesimulator/App.app \
+            "$GITHUB_WORKSPACE/dist-app/geocollar-app-simulator.zip"
+
+      # For a real iPhone, unsigned: a sideloading tool (AltStore, Sideloadly) signs it with the
+      # user's own Apple ID when it installs it.
+      - name: Unsigned iPhone build
+        working-directory: app/ios/App
+        run: |
+          xcodebuild -project App.xcodeproj -scheme App -configuration Release \
+            -destination 'generic/platform=iOS' -archivePath build/unsigned.xcarchive \
+            CODE_SIGNING_ALLOWED=NO CURRENT_PROJECT_VERSION="$BUILD_NUMBER" archive
+          mkdir -p build/unsigned/Payload
+          cp -R build/unsigned.xcarchive/Products/Applications/App.app build/unsigned/Payload/
+          (cd build/unsigned && zip -qry "$GITHUB_WORKSPACE/dist-app/geocollar-app-unsigned.ipa" Payload)
+
+      - name: Install the signing certificate and profile
+        if: env.IOS_CERTIFICATE_P12_BASE64 != '' || env.IOS_PROVISIONING_PROFILE_BASE64 != ''
+        run: |
+          if [ -z "$IOS_CERTIFICATE_P12_BASE64" ] || [ -z "$IOS_PROVISIONING_PROFILE_BASE64" ]; then
+            echo "::error::Signed iPhone builds need both IOS_CERTIFICATE_P12_BASE64 and IOS_PROVISIONING_PROFILE_BASE64."
+            exit 1
+          fi
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          keychain_password=$(openssl rand -hex 24)
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          echo "$IOS_CERTIFICATE_P12_BASE64" | base64 --decode > "$RUNNER_TEMP/certificate.p12"
+          security import "$RUNNER_TEMP/certificate.p12" -P "$IOS_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$keychain"
+          rm "$RUNNER_TEMP/certificate.p12"
+          security set-key-partition-list -S apple-tool:,apple: -k "$keychain_password" "$keychain" >/dev/null
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+          identity=$(security find-identity -v -p codesigning "$keychain" | awk -F'"' 'NF > 1 { print $2; exit }')
+          if [ -z "$identity" ]; then
+            echo "::error::No usable signing identity in IOS_CERTIFICATE_P12_BASE64 (it needs the private key too: export it from Keychain Access as .p12)."
+            exit 1
+          fi
+          echo "Signing as: $identity"
+
+          echo "$IOS_PROVISIONING_PROFILE_BASE64" | base64 --decode > "$RUNNER_TEMP/profile.mobileprovision"
+          security cms -D -i "$RUNNER_TEMP/profile.mobileprovision" > "$RUNNER_TEMP/profile.plist"
+          python3 app/tools/ios_signing.py "$RUNNER_TEMP/profile.plist" "$identity" "$RUNNER_TEMP" | tee -a "$GITHUB_ENV"
+          uuid=$(/usr/libexec/PlistBuddy -c 'Print :UUID' "$RUNNER_TEMP/profile.plist")
+          for dir in "$HOME/Library/MobileDevice/Provisioning Profiles" "$HOME/Library/Developer/Xcode/UserData/Provisioning Profiles"; do
+            mkdir -p "$dir"
+            cp "$RUNNER_TEMP/profile.mobileprovision" "$dir/$uuid.mobileprovision"
+          done
+          echo "SIGNING_KEYCHAIN=$keychain" >> "$GITHUB_ENV"
+
+      - name: Signed iPhone build
+        if: env.SIGNING_KEYCHAIN != ''
+        working-directory: app/ios/App
+        run: |
+          xcodebuild -project App.xcodeproj -scheme App -configuration Release \
+            -destination 'generic/platform=iOS' -archivePath build/signed.xcarchive \
+            CURRENT_PROJECT_VERSION="$BUILD_NUMBER" archive
+          xcodebuild -exportArchive -archivePath build/signed.xcarchive \
+            -exportOptionsPlist "$RUNNER_TEMP/ExportOptions.plist" -exportPath build/signed
+          cp build/signed/App.ipa "$GITHUB_WORKSPACE/dist-app/geocollar-app.ipa"
+          echo "Signed geocollar-app.ipa: $BUNDLE_ID, $EXPORT_METHOD, build $BUILD_NUMBER"
+
+      - name: Remove the signing keychain
+        if: always() && env.SIGNING_KEYCHAIN != ''
+        run: security delete-keychain "$SIGNING_KEYCHAIN"
+
+      - run: ls -l dist-app
+      - uses: actions/upload-artifact@v4
+        with:
+          name: geocollar-app-ios
+          path: dist-app/
+          if-no-files-found: error
+
+  # Each build of main replaces the files on the "app-latest" pre-release, where app/README.md
+  # sends people to install the app from. Android alone is enough to publish: a failed iPhone
+  # build leaves the iPhone files there as they were.
+  publish:
+    name: Publish to the app-latest release
+    needs: [android, ios]
+    if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.android.result == 'success' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    concurrency:
+      group: app-latest-release
+      cancel-in-progress: false
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - run: |
+          ls -l dist
+          gh release view app-latest >/dev/null 2>&1 || gh release create app-latest --prerelease \
+            --title "Latest phone app" --notes "Built automatically from main."
+          gh release upload app-latest dist/* --clobber
+          gh release edit app-latest --title "Latest phone app" --notes "Built automatically from main at ${GITHUB_SHA}.
+
+          - geocollar-app.apk: Android. Install it by hand, see app/README.md.
+          - geocollar-app-unsigned.ipa: iPhone, for a sideloading tool that signs it with your own Apple ID.
+          - geocollar-app.ipa (when the repository has iPhone signing set up): iPhone, signed.
+          - geocollar-app-simulator.zip: the iOS Simulator on a Mac."

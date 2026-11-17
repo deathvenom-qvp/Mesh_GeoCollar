@@ -7,7 +7,8 @@ android {
         applicationId "io.github.deathvenomqvp.geocollar"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 1
+        // GitHub sets this to the build number, so each build there can install over the last.
+        versionCode((project.findProperty("geocollarVersionCode") ?: "1").toInteger())
         versionName "0.1.0"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         aaptOptions {
