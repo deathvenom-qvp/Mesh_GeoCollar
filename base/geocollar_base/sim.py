@@ -67,6 +67,36 @@ def clearance_m(zones: list[protocol.Zone], lat: float, lon: float) -> float:
     return min((signed_distance_m(z, lat, lon) for z in zones), default=1e9)
 
 
+# Home mode (firmware: HomeWatch). The collar needs the anchor at the threshold or stronger for
+# HOME_ENTER_S before it turns its GPS off, and turns it back on once it has not heard the anchor
+# that strongly (less a margin) for HOME_LEAVE_S.
+HOME_ENTER_S = 20
+HOME_LEAVE_S = 7
+HOME_FRESH_S = 600  # the last fix must be this recent, and inside, clear of every band
+# Roughly what each anchor reads at 1 m, dBm: a typical beacon, and a Meshtastic radio, which
+# transmits louder. Walls, the dog's body and the collar's angle move readings by 10 dB or more.
+ANCHOR_RSSI_AT_1M = {protocol.AnchorKind.BEACON: -59, protocol.AnchorKind.BASE_RADIO: -50}
+DOG_RUN_MPS = 4.0  # a dog leaving at a steady run, for the room check
+
+
+def anchor_range_m(kind: protocol.AnchorKind, rssi: int) -> float:
+    """About how far from the anchor the collar still reads `rssi` dBm, in open air."""
+    ref = ANCHOR_RSSI_AT_1M.get(kind, -59)
+    return round(10 ** ((ref - rssi) / 20), 1)
+
+
+def room_from_anchor_m(zones: list[protocol.Zone], lat: float, lon: float) -> float:
+    """How far it is from the anchor to the nearest band: where the collar would first beep.
+    Negative: the anchor is in a band or outside."""
+    return min((signed_distance_m(z, lat, lon) - z.band_width_m for z in zones), default=1e9)
+
+
+def home_room_needed_m(kind: protocol.AnchorKind, rssi: int, gps_restart_s: float) -> float:
+    """How far a running dog gets from where home mode is on to its first fix after leaving: the
+    anchor's range, then the time to notice the anchor has gone and for the GPS to get a fix."""
+    return round(anchor_range_m(kind, rssi) + DOG_RUN_MPS * (HOME_LEAVE_S + gps_restart_s))
+
+
 # Bands, from quiet to outside (firmware: enum class Band).
 CLEAR, ATTENTION, WARNING, DANGER, OUTSIDE = range(5)
 
@@ -382,6 +412,13 @@ class SimCollar:
         self.beacon = LostBeacon()
         self.owner = ("", "", "")  # dog's name, owner's name, phone: as sent to a real collar
         self._ble = False
+        # Home mode: the anchor, where it is, and how the collar is doing with it.
+        self.anchor: protocol.HomeAnchor | None = None
+        self.anchor_at: tuple[float, float] | None = None
+        self.home = False
+        self._near_since: float | None = None
+        self._last_near = -1e9
+        self._last_clear_fix = -1e9
 
     # -- settings ---------------------------------------------------------------------------
     def settings(self) -> dict:
@@ -475,6 +512,15 @@ class SimCollar:
     def set_owner(self, dog: str, owner: str, phone: str) -> None:
         self.owner = (dog, owner, phone)
 
+    def set_anchor(self, anchor: protocol.HomeAnchor | None, at: tuple[float, float] | None) -> None:
+        """The home anchor, and where it stands (the simulator's stand-in for its radio range)."""
+        if anchor is not None and anchor.kind == protocol.AnchorKind.NONE:
+            anchor = None
+        self.anchor, self.anchor_at = anchor, at
+        self._near_since = None
+        if self.home:
+            self._leave_home(time.time(), "home anchor changed")
+
     # -- time -------------------------------------------------------------------------------
     def _event(self, kind: str, text: str) -> None:
         self.events.appendleft({"t": time.time(), "kind": kind, "text": text})
@@ -497,10 +543,49 @@ class SimCollar:
                 self.heading = bearing
                 self.lat, self.lon = _move(self.lat, self.lon, bearing, step)
 
+    def _near_anchor(self) -> bool:
+        if not self.anchor or not self.anchor_at:
+            return False
+        _, dist = _bearing_and_distance(self.lat, self.lon, *self.anchor_at)
+        return dist <= anchor_range_m(self.anchor.kind, self.anchor.rssi)
+
+    def _leave_home(self, now: float, why: str) -> None:
+        self.home = False
+        self._near_since = None
+        self._report_now = True
+        self._event("info", f"{why}: GPS on")
+
+    def _run_home(self, now: float) -> None:
+        """Mirror of the firmware's HomeWatch (Fence.cpp), with the anchor heard whenever the dog
+        is within its range."""
+        if self._near_anchor():
+            self._last_near = now
+            if self._near_since is None:
+                self._near_since = now
+        elif now - self._last_near > HOME_LEAVE_S:
+            self._near_since = None
+        allowed = (self.anchor is not None and self.engine.zones and self.engine.state == protocol.CollarState.INSIDE
+                   and not self.beacon.active)
+        if self.home:
+            if not allowed:
+                self._leave_home(now, "home mode off")
+            elif now - self._last_near > HOME_LEAVE_S:
+                self._leave_home(now, "away from the home anchor")
+        elif (allowed and self._near_since is not None and now - self._near_since >= HOME_ENTER_S
+              and now - self._last_clear_fix <= HOME_FRESH_S):
+            self.home = True
+            self._report_now = True
+            self._event("info", "home, near the anchor: GPS off")
+
     def step(self, dt: float, now: float) -> dict | None:
         """Advance dt seconds. Returns a status record when the collar would report."""
         self._walk(dt)
-        self.battery = max(0.0, self.battery - dt / 360)  # about 10 hours from full
+        self.battery = max(0.0, self.battery - dt / (720 if self.home else 360))  # about 10 hours from full
+        self._run_home(now)
+        if self.home:  # GPS off: no fixes, so no fence decisions; reports carry the last fix
+            if self._report_now or now - self._last_report >= self.report_s:
+                return self.report(now)
+            return None
         # A GPS fix with some noise, the way the real receiver jitters.
         n = self.noise_m
         lat, lon = _move(self.lat, self.lon, self.rng.uniform(0, 360), abs(self.rng.gauss(0, n / 1.5)) if n else 0)
@@ -516,6 +601,8 @@ class SimCollar:
             self._event("info", "past the line: corrections off until clear of every band")
         elif was_quiet and not self.engine._quiet:
             self._event("info", "clear of every band: corrections back on")
+        if self.engine.state == protocol.CollarState.INSIDE:  # clear of every band
+            self._last_clear_fix = now
         self._pulse(d, now)
         if d.send_breach:
             self._event("lost", "confirmed outside: corrections stop, lost mode")
@@ -585,6 +672,7 @@ class SimCollar:
             "shock_enabled": self.engine.settings.shock_enabled,
             "beacon_active": self.beacon.active,
             "beacon_silenced": self.beacon.silenced,
+            "home": self.home,
         }
 
     def public(self) -> dict:
@@ -633,6 +721,10 @@ class Simulator:
     def set_owner(self, node_id: str, dog: str, owner: str, phone: str) -> None:
         with self.lock:
             self.collars[node_id].set_owner(dog, owner, phone)
+
+    def set_anchor(self, node_id: str, anchor: protocol.HomeAnchor | None, at: tuple[float, float] | None) -> None:
+        with self.lock:
+            self.collars[node_id].set_anchor(anchor, at)
 
     def report_now(self, node_id: str) -> None:
         """Send a status straight away, as the collar does after a command or new fences."""

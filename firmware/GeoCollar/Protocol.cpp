@@ -200,8 +200,14 @@ size_t encodeConfig(uint8_t *out, size_t cap, const CollarConfig &c, uint32_t se
     w.u8(kVersion);
     w.u8(static_cast<uint8_t>(MsgType::Config));
     w.u16(c.reportS);
-    if (seq)
+    if (seq) {
         w.u32(seq);
+        if (c.hasAnchor) {
+            w.u8(static_cast<uint8_t>(c.anchor.kind));
+            w.bytes(c.anchor.address, sizeof(c.anchor.address));
+            w.u8(static_cast<uint8_t>(c.anchor.rssiDbm));
+        }
+    }
     return w.done();
 }
 
@@ -219,6 +225,17 @@ bool decodeConfig(const uint8_t *buf, size_t len, CollarConfig &c, uint32_t &seq
         n = r.u32();
         if (!r.ok || n == 0)
             return false; // a few stray bytes, or a number of 0: not a message this firmware knows
+        if (len - r.pos >= kAnchorLength) { // the home anchor (0.19.2 on); fewer bytes: something newer
+            const uint8_t kind = r.u8();
+            for (uint8_t &b : tmp.anchor.address)
+                b = r.u8();
+            const int8_t rssi = static_cast<int8_t>(r.u8());
+            if (!r.ok || kind > static_cast<uint8_t>(AnchorKind::BaseRadio) || rssi < kMinAnchorRssi || rssi > kMaxAnchorRssi)
+                return false;
+            tmp.hasAnchor = true;
+            tmp.anchor.kind = static_cast<AnchorKind>(kind);
+            tmp.anchor.rssiDbm = rssi;
+        }
     }
     c = tmp;
     seq = n;

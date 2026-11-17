@@ -150,6 +150,35 @@ def test_numbered_owner_and_config_match_the_firmware():
     assert p.decode_config_seq(p.encode_config(300)) == 0
 
 
+def test_config_home_anchor_matches_the_firmware():
+    # Golden vector shared with firmware/test/test_main.cpp (testProtocol, the home anchor).
+    a = p.HomeAnchor(p.AnchorKind.BEACON, "aa:bb:cc:01:02:03", -72)
+    data = p.encode_config(0, 77, a)
+    assert data.hex() == "020700004d000000" "01aabbcc010203b8"
+    assert p.decode_config(data) == 0 and p.decode_config_seq(data) == 77
+    assert p.decode_config_anchor(data) == p.HomeAnchor(p.AnchorKind.BEACON, "AA:BB:CC:01:02:03", -72)
+    assert p.decode_config_anchor(p.encode_config(300, 77)) is None
+    # The base radio needs no address: the collar knows it as the node that sends its fences.
+    base = p.encode_config(600, 78, p.HomeAnchor(p.AnchorKind.BASE_RADIO, "ignored", -85))
+    assert base[8:].hex() == "02" "000000000000" "ab"
+    off = p.decode_config_anchor(p.encode_config(0, 79, p.HomeAnchor()))
+    assert off.kind == p.AnchorKind.NONE
+    with pytest.raises(ValueError):
+        p.encode_config(0, 0, a)  # the anchor needs a sequence number
+    for bad in (p.HomeAnchor(p.AnchorKind.BEACON, "aa:bb:cc", -72), p.HomeAnchor(p.AnchorKind.BEACON, "aa:bb:cc:01:02:0g", -72),
+                p.HomeAnchor(p.AnchorKind.BASE_RADIO, "", -20), p.HomeAnchor(p.AnchorKind.BASE_RADIO, "", -101)):
+        with pytest.raises(ValueError):
+            p.encode_config(0, 80, bad)
+    assert p.parse_bt_address("AA-BB-CC-01-02-03") == p.parse_bt_address("aabbcc010203") == bytes.fromhex("aabbcc010203")
+
+
+def test_status_home_flag():
+    s = p.Status(p.MsgType.STATUS, 3, p.CollarState.INSIDE, 80, 40.0, -75.0, 1.0, 9, 40, True, False, home=True)
+    raw = p.encode_status(s)
+    assert raw[-1] == 0x01 | 0x80
+    assert p.decode_status(raw).home and not p.decode_status(raw[:-1] + bytes([0x01])).home
+
+
 def test_status_fix_and_firmware_flags():
     s = p.Status(p.MsgType.STATUS, 3, p.CollarState.INSIDE, 80, 40.0, -75.0, 1.0, 9, 40, True, False,
                  no_fix=True, numbered=True)

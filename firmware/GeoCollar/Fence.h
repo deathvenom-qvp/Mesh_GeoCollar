@@ -305,4 +305,64 @@ size_t beaconName(const char *dog, const char *phone, char *out, size_t cap);
 /// The mesh message: "Please help get Rex home. Call Ken 5551234567." plus the last position.
 size_t beaconText(const char *dog, const char *owner, const char *phone, int32_t latI, int32_t lonI, char *out, size_t cap);
 
+// ---------------------------------------------------------------------------------------------
+// Home mode: the GPS off while the collar is close to a Bluetooth anchor deep inside the fences
+// ---------------------------------------------------------------------------------------------
+
+enum class AnchorKind : uint8_t {
+    None = 0,
+    Beacon = 1,    // a Bluetooth beacon, known by its address
+    BaseRadio = 2, // the base station's Meshtastic radio, known by its Bluetooth name ("..._1a2b")
+};
+
+/// The anchor the base chose. A reading of its signal at least rssiDbm strong counts as near.
+struct HomeAnchor {
+    AnchorKind kind = AnchorKind::None;
+    uint8_t address[6] = {}; // Beacon: its address as written, most significant byte first
+    int8_t rssiDbm = -70;
+};
+constexpr int8_t kMinAnchorRssi = -100, kMaxAnchorRssi = -30;
+
+/// Decides when the collar is home. Home means: the anchor has been heard at least as strong as
+/// its threshold, in every reading, for kEnterMs; and the newest GPS fix had the dog inside and
+/// clear of every band, at most kFreshMs ago (or the collar was last home that recently). That
+/// fix is what keeps an anchor heard from outside the fence from ever counting. Home ends as soon
+/// as no reading in kLeaveMs is within kStayMarginDb of the threshold, when a fix says otherwise,
+/// or when home is no longer allowed (fences changed, lost, the anchor turned off).
+class HomeWatch
+{
+  public:
+    static constexpr uint32_t kEnterMs = 20 * 1000;
+    static constexpr uint32_t kLeaveMs = 7 * 1000;
+    static constexpr int kStayMarginDb = 6;
+    static constexpr uint32_t kFreshMs = 10 * 60 * 1000;
+
+    void setThreshold(int8_t rssiDbm) { threshold_ = rssiDbm; }
+    /// The anchor or the fences changed: away, and every reading and fix so far forgotten.
+    void reset();
+    /// A reading of the anchor's signal.
+    void onSighting(int rssiDbm, uint32_t nowMs);
+    /// Every GPS fix good enough to use. clear = inside and clear of every band.
+    void onFix(bool clear, uint32_t nowMs);
+    /// Call about once a second. allowed: an anchor is set, fences are loaded and the dog is
+    /// inside. Returns true when home() changed (here or in onFix).
+    bool tick(uint32_t nowMs, bool allowed);
+    bool home() const { return home_; }
+
+  private:
+    void leave(uint32_t provenMs);
+    int threshold_ = -70;
+    bool home_ = false;
+    bool changed_ = false;
+    bool clear_ = false;   // the newest fix was clear (or the collar was home since)
+    uint32_t clearMs_ = 0; // when that was last known
+    bool strong_ = false;  // an unbroken run of strong readings is going on
+    uint32_t strongSinceMs_ = 0;
+    uint32_t lastStrongMs_ = 0;
+    uint32_t lastStayMs_ = 0; // home: the last reading strong enough to stay
+};
+
+/// The GPS update interval while home: Meshtastic powers the GPS down and leaves it there.
+constexpr uint32_t kHomeGpsSecs = 3600;
+
 } // namespace geocollar

@@ -249,3 +249,50 @@ def test_beacon_strings_match_firmware():
     assert beacon_text("Rex", "Ken", "555-123-4567", 40.1234567, -75.1234567) == (
         "Please help get Rex home. Call Ken 555-123-4567. Last seen 40.12345,-75.12345")
     assert beacon_text("Rex", "", "") == "Please help get Rex home."
+
+
+def test_home_mode_in_the_simulator():
+    from geocollar_base import sim as simmod
+
+    sim = walker()
+    anchor = protocol.HomeAnchor(protocol.AnchorKind.BEACON, "AA:BB:CC:01:02:03", -85)
+    sim.set_anchor(anchor, (40.0, -75.0))
+    t = 1000
+    for t in range(1000, 1000 + simmod.HOME_ENTER_S - 1):
+        sim.step(1.0, now=t)
+    assert not sim.home  # in range, but not for long enough yet
+    for t in range(t + 1, t + 4):
+        r = sim.step(1.0, now=t)
+    assert sim.home and any("GPS off" in e["text"] for e in sim.events)
+    assert sim.report(t)["home"] is True
+    # No fixes while home: walking around inside range changes nothing.
+    fix = sim._fix
+    sim.step(1.0, now=t + 1)
+    assert sim._fix == fix
+    # Walking off: once the anchor has faded for HOME_LEAVE_S the GPS is back on.
+    sim.update({"target": list(_move(40.0, -75.0, 90, 60)), "mode": "goto", "speed_mps": 4})
+    left = None
+    for u in range(t + 2, t + 40):
+        sim.step(1.0, now=u)
+        if not sim.home and left is None:
+            left = u
+    assert left is not None and sim.engine.state == S.INSIDE
+    # Not in a band: home needs a clear fix inside, so an anchor in the band never turns the GPS off.
+    edge = (39.9991 + 3 / 111_000, -75.0)  # 3 m inside the south line: the warning band
+    sim.set_anchor(anchor, edge)
+    sim.update({"lat": edge[0], "lon": edge[1]})
+    for u in range(left + 40, left + 80):
+        sim.step(1.0, now=u)
+    assert sim.engine.state == S.WARNING and not sim.home
+
+
+def test_home_room_check():
+    from geocollar_base import sim as simmod
+
+    B = protocol.AnchorKind
+    assert simmod.anchor_range_m(B.BEACON, -75) < simmod.anchor_range_m(B.BEACON, -85)
+    assert simmod.anchor_range_m(B.BEACON, -75) < simmod.anchor_range_m(B.BASE_RADIO, -75)
+    assert simmod.home_room_needed_m(B.BEACON, -75, 30) > simmod.home_room_needed_m(B.BEACON, -75, 10)
+    # The 200 m yard's bands are 10 m wide: about 90 m from its middle to the nearest band.
+    assert 85 < simmod.room_from_anchor_m([YARD], 40.0, -75.0) < 95
+    assert simmod.room_from_anchor_m([YARD], 40.0, -76.0) < 0

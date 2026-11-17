@@ -72,9 +72,10 @@ class FakeLink:
 
     # The sequence numbers on Config and Owner messages are kept apart from `sent` (they come
     # from the clock), in config_seqs and owner_seqs.
-    def send_config(self, node_id, report_s, seq=0):
+    def send_config(self, node_id, report_s, seq=0, anchor=None):
         self.sent.append((node_id, protocol.encode_config(report_s)))
         self.config_seqs = getattr(self, "config_seqs", []) + [seq]
+        self.anchors = getattr(self, "anchors", []) + [anchor]
 
     def send_app_keys(self, node_id, keys, seq):
         self.sent.append((node_id, protocol.encode_app_keys(keys, seq)))
@@ -832,3 +833,48 @@ def test_a_simulated_collar_can_be_linked_for_trying_the_app(tmp_path):
     assert r.status_code == 200 and r.json()["synced"] is True and r.json()["sim"] is True
     assert protocol.parse_pairing_code(r.json()["code"])["sim"] is True
     assert not getattr(link, "app_keys", [])  # nothing goes on the air for a simulated collar
+
+
+def test_home_anchor_is_sent_to_collars_and_checked(tmp_path):
+    client, link = make(tmp_path)
+    client.post("/api/collars", json={"node_id": "!a1b2c3d4", "name": "Rex"})
+    client.put("/api/collars/!a1b2c3d4/fences", json=FENCE)
+    # Nothing set yet: home mode is off and no settings message goes to the collar.
+    assert client.get("/api/home-anchor").json()["kind"] == "off"
+    client.app.state.on_status("!a1b2c3d4", {**GOOD, "numbered": True})
+    assert not getattr(link, "anchors", [])
+
+    bad = [{"kind": "beacon", "address": "nope"}, {"kind": "moon"}, {"kind": "base", "rssi": -20},
+           {"kind": "base", "lat": 40.0}, {"kind": "base", "gps_restart_s": 5}]
+    for body in bad:
+        assert client.put("/api/home-anchor", json=body).status_code == 400, body
+
+    r = client.put("/api/home-anchor", json={"kind": "beacon", "address": "aa-bb-cc-01-02-03", "rssi": -85,
+                                             "lat": 40.001, "lon": -74.999})  # the yard's middle
+    assert r.status_code == 200
+    a = r.json()
+    assert a["sent_to"] == ["!a1b2c3d4"] and a["address"] == "AA:BB:CC:01:02:03" and a["position"] == [40.001, -74.999]
+    assert link.anchors[-1] == protocol.HomeAnchor(protocol.AnchorKind.BEACON, "AA:BB:CC:01:02:03", -85)
+    assert link.config_seqs[-1] > 0  # the anchor always goes numbered
+    # The check: how far it is from the anchor to the bands, against how far a running dog gets.
+    row = a["collars"][0]
+    assert row["name"] == "Rex" and row["room_m"] > 0 and a["need_m"] > a["range_m"] > 0
+    assert row["ok"] == (row["room_m"] >= a["need_m"])
+
+    # Sent once: later reports do not send it again, until it changes.
+    n = len(link.anchors)
+    client.app.state.on_status("!a1b2c3d4", {**GOOD, "numbered": True})
+    assert len(link.anchors) == n
+    client.put("/api/home-anchor", json={"kind": "base", "rssi": -75})
+    assert link.anchors[-1].kind == protocol.AnchorKind.BASE_RADIO
+    # The report interval goes with it, and the anchor with the interval.
+    client.patch("/api/collars/!a1b2c3d4", json={"report_s": 300})
+    assert link.anchors[-1].kind == protocol.AnchorKind.BASE_RADIO
+    # Turning it off tells the collars.
+    client.put("/api/home-anchor", json={"kind": "off"})
+    assert link.anchors[-1].kind == protocol.AnchorKind.NONE
+    assert client.get("/api/home-anchor").json()["collars"] == []
+
+    # A collar reporting that it is home.
+    client.app.state.on_status("!a1b2c3d4", {**GOOD, "numbered": True, "home": True})
+    assert client.get("/api/collars").json()["!a1b2c3d4"]["status"]["home"] is True

@@ -86,7 +86,7 @@ Same 20-byte layout; Breach is sent the moment the collar enters Lost, and every
 | 14 | 2 | PDOP × 100 |
 | 16 | 1 | satellites in view |
 | 17 | 2 | clearance to nearest fence line, metres, signed (negative = on the wrong side) |
-| 19 | 1 | flags: bit 0 corrections enabled, bit 1 shock enabled, bit 2 lost beacon on, bit 3 lost beacon silenced, bit 4 no current GPS fix, bit 5 the collar reads sequence numbers on Owner and Config, bit 6 the collar holds the key of at least one phone app (section 8) |
+| 19 | 1 | flags: bit 0 corrections enabled, bit 1 shock enabled, bit 2 lost beacon on, bit 3 lost beacon silenced, bit 4 no current GPS fix, bit 5 the collar reads sequence numbers on Owner and Config, bit 6 the collar holds the key of at least one phone app (section 8), bit 7 home mode: near the home anchor with the GPS off (0.19.2 on) |
 
 With bit 4 set the position is the last one the collar had (0, 0 if it has had none since it
 started) and the clearance belongs to that position. A fix counts as current for the GPS interval
@@ -94,6 +94,11 @@ plus a minute, or for 45 s when the GPS runs all the time (an interval of 10 s o
 fences loaded the collar sends a Status when a fix goes missing and when it comes back, at most
 one such report in 5 minutes, and keeps its GPS searching instead of letting Meshtastic rest it
 for up to an hour after a failed search.
+
+With bit 7 set the GPS is off because the collar hears its home anchor (see Config below): the
+position and clearance are from its last fix, which showed the dog inside and clear of every
+band. Bit 4 may be set too once that fix is old. The collar sends a Status when it enters and
+leaves home mode.
 
 A collar also sends a Status 15 s after it starts, so the base hears from it without waiting a
 whole report interval.
@@ -149,12 +154,25 @@ the message again, numbered, when such a collar last got it without one.
 | --- | --- | --- |
 | 2 | 2 | report interval, seconds: 30..3600, or 0 for the firmware's default (10 minutes) |
 | 4 | 4 | sequence number, optional (never 0) |
+| 8 | 1 | home anchor kind, optional (only after a sequence number): 0 off, 1 Bluetooth beacon, 2 the base radio |
+| 9 | 6 | the beacon's Bluetooth address, most significant byte first (zeros for the other kinds) |
+| 15 | 1 | signal threshold, dBm, signed: -100..-30 |
 
 How often the collar sends a Status. While lost it reports at least every 30 s whatever this
 says. The sequence number works as for Owner, with its own counter on the collar. More bytes may
 follow the number (room for later settings); 1 to 3 bytes after the interval are refused.
 Firmware 0.15 reads the interval and ignores the rest, so the base always sends the number.
 Golden bytes for 300 s: `02 07 2c01`, and with sequence number 1763085600: `02 07 2c01 208d1669`.
+
+The home anchor (0.19.2 on) turns home mode on or off: while the collar hears the anchor at the
+threshold or stronger, it turns its GPS off (see [hardware.md](hardware.md#home-mode)). A beacon
+is matched by its address; the base radio by its Meshtastic Bluetooth name, which ends in `_`
+and the last four hex digits of the node ID of the base that sent the collar its fences (so the
+base radio needs no address). A kind above 2 or a threshold out of range makes the whole message
+refused; fewer than 8 bytes after the number are ignored, as room for later settings. The collar
+keeps the anchor in `/prefs/geocollar-home.bin`. Firmware before 0.19.2 ignores it. Golden bytes
+for a beacon AA:BB:CC:01:02:03 at -72 dBm, interval 0, number 77:
+`02 07 0000 4d000000 01 aabbcc010203 b8`.
 
 ## 6. Hello (collar, broadcast)
 

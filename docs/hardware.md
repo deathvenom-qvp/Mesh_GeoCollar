@@ -127,6 +127,44 @@ What GeoCollar changes on the collar, and why (each can be turned off with a bui
   (every 60 s deep inside, not every 80 s). This keeps the GPS on a little more than before: it
   is a fix for correction timing, not a saving.
 
+### Home mode
+
+Off unless you turn it on (Settings > Home mode in the base app). The idea: Bluetooth only
+reaches a short way, so a collar that hears an anchor in the house strongly is well inside its
+fences, and needs no GPS. Listening costs a few mA at most (a 100 ms scan window every 2 to 5 s),
+against tens of mA for the GPS, so a dog that spends most of the day indoors should run much
+longer.
+
+- **What it listens for.** Either the base station's radio (its Meshtastic Bluetooth name, so
+  nothing to set up, but the radio must have Bluetooth on, be connected to the base by USB rather
+  than Wi-Fi, which turns Meshtastic's Bluetooth off, and have no phone connected to it over
+  Bluetooth, which stops it advertising), or a Bluetooth beacon by its address: any iBeacon or
+  Eddystone tag, or a spare Meshtastic radio, put where the dog spends its time. Nothing else is
+  needed on the beacon.
+- **When the GPS goes off.** The anchor must be heard at the threshold or stronger for 20 s,
+  the collar's last fix must have shown the dog inside and clear of every band (and be at most
+  10 minutes old, while the anchor has been heard), and the lost beacon must be off. New fences
+  also need a fresh fix first.
+- **While home.** The GPS is put to sleep, with Meshtastic's GPS interval at an hour, so it still
+  takes about one fix an hour. If that fix is not inside and clear, home mode ends at once. The
+  scan runs every 2 s. Reports say "home, GPS off" (status bit 7) and carry the last fix.
+- **When it ends.** Once the anchor has not been heard within 6 dB of the threshold for 7 s, the
+  GPS is woken and fixes as often as it does near the line, until a fix says where the dog is.
+  Turning Bluetooth off on the collar, a change of anchor, or the fences going away end it too.
+- **The catch: the restart.** With the screen dark Vext is off while the GPS sleeps, so the GPS
+  loses power and may need a cold start. A dog leaving at a steady run (4 m/s) covers about
+  4 × (7 + restart time) metres before its first fix, so the anchor should be at least that far,
+  plus its range, inside the bands. The base app checks this for each collar with the restart
+  time you choose (30 s unless you have timed it, about 150 m). Time it on the bench (below), and
+  pick "Very close" for a small yard.
+- **Spoofing.** Bluetooth names and addresses are easy to copy. Someone who copies the anchor
+  near a collar keeps its GPS off while it is close by, for up to an hour per fix. That is no
+  worse than walking off with the dog, but it is why home mode is off by default.
+
+Signal strength is rough: walls, the dog's body and the collar's angle move readings by 10 dB or
+more. The three choices in the app are -65 dBm (the same room), -75 (in or right by the house)
+and -85 (the yard around the anchor); the circle on the map is a guess from typical figures.
+
 Left as they are, and why:
 
 - **The GPS rate near the line.** It is what makes corrections arrive in time. Deep inside, the
@@ -135,7 +173,7 @@ Left as they are, and why:
 - **CPU below 80 MHz, or automatic light sleep.** Bluetooth, the GPS serial port and the
   correction transmitter's timing rely on it. Untestable without hardware.
 - **Duty-cycled LoRa receive.** It would miss fence updates and commands from the base.
-- **Bluetooth off.** The lost beacon and the phone app need it.
+- **Bluetooth off.** The lost beacon, the phone app and home mode need it.
 - **Fewer GPS bands or satellite systems.** It would save some GPS current but cost accuracy near
   trees and buildings, which is where false corrections come from. Worth trying on the bench.
 - **Meshtastic's own position and telemetry broadcasts.** A few short transmissions an hour.
@@ -147,4 +185,9 @@ Left as they are, and why:
 2. Note the current deep inside the fences (fixes every 60 s) and near the line (GPS always on).
 3. In a serial log, `Took Ns to get lock` after each GPS wake-up says whether the UC6580 restarts
    warm (a few seconds) or cold (30 s or more) once Vext has been off. If it is cold, deep-inside
-   pacing saves little, and the GPS could as well stay on.
+   pacing saves little, and the GPS could as well stay on. It is also the restart time to pick
+   for home mode.
+4. Home mode: with an anchor set, watch for `GeoCollar: home, near the anchor: GPS off` in the
+   serial log, the current dropping, and `away from the anchor: GPS on` a few seconds after
+   carrying the collar out of range. If the scan cannot start, the log says
+   `cannot listen for the home anchor`.

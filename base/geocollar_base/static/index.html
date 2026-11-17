@@ -176,6 +176,12 @@
   .appcode .pin { font-weight: 700; font-variant-numeric: tabular-nums; letter-spacing: .08em; }
   .beacon .actions { margin-top: 6px; }
   .contact { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-top: 6px; }
+  .anchorKinds { display: grid; gap: 4px; margin-top: 8px; }
+  .anchorKinds label { display: flex; gap: 8px; align-items: flex-start; font-size: 14px; }
+  .anchorKinds label input { width: auto; margin-top: 3px; }
+  .anchorChecks { margin: 8px 0 0; padding: 0; list-style: none; font-size: 13px; }
+  .anchorChecks li { padding: 2px 0; }
+  .anchorDot { width: 12px; height: 12px; border-radius: 50%; background: var(--accent); border: 2px solid #fff; box-shadow: 0 0 0 1px var(--accent); }
   @media (max-width: 420px) { .contact { grid-template-columns: 1fr; } }
   .simgrid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 10px; margin-top: 10px; }
   .simgrid .wide { grid-column: 1 / -1; }
@@ -585,6 +591,48 @@
     </form>
   </section>
 
+  <section id="homeBox">
+    <h2>Home mode: GPS off near the house</h2>
+    <div class="muted">The GPS uses most of a collar's battery. When the collar hears a Bluetooth anchor close by,
+      and its last fix showed the dog inside, clear of every band, it turns the GPS off. It turns it back on as soon
+      as the anchor fades, and checks with a fix about once an hour meanwhile. Needs collar firmware 0.19.2 or later,
+      with Bluetooth on.</div>
+    <form id="homeForm">
+      <div class="anchorKinds" role="radiogroup" aria-label="What the collar listens for">
+        <label><input type="radio" name="anchorKind" value="off"> <span>Off: the GPS stays on</span></label>
+        <label><input type="radio" name="anchorKind" value="base"> <span>The base station's radio. It must be
+          connected by USB (not Wi-Fi) with Bluetooth on, and no phone connected to it over Bluetooth.</span></label>
+        <label><input type="radio" name="anchorKind" value="beacon"> <span>A Bluetooth beacon (any iBeacon or
+          Eddystone tag, or a spare radio), by its Bluetooth address.</span></label>
+      </div>
+      <label class="field" id="anchorAddrField" style="margin-top:8px">Beacon's Bluetooth address
+        <input id="anchorAddr" placeholder="AA:BB:CC:DD:EE:FF" autocomplete="off" spellcheck="false"
+          pattern="\s*([0-9A-Fa-f]{2}[:\-]?){5}[0-9A-Fa-f]{2}\s*" title="Six pairs of hex digits, like AA:BB:CC:DD:EE:FF"></label>
+      <div id="anchorMore">
+        <label class="field" style="margin-top:8px">How close counts as home
+          <select id="anchorRssi">
+            <option value="-65">Very close (in the same room)</option>
+            <option value="-75">Close (in or right by the house)</option>
+            <option value="-85">Nearby (the yard around the anchor)</option>
+          </select></label>
+        <label class="field" style="margin-top:8px">How long the collar's GPS takes to get a fix after a rest
+          <select id="anchorRestart">
+            <option value="10">About 10 s</option>
+            <option value="30">About 30 s (if you have not timed it)</option>
+            <option value="60">About a minute</option>
+          </select></label>
+        <div class="row" style="margin-top:8px;gap:8px;flex-wrap:wrap;align-items:center">
+          <span class="muted" id="anchorWhere"></span>
+          <button type="button" id="anchorHere" title="Centre the map on the Collars tab where the anchor stands first">Put it where the Collars map is centred</button>
+          <button type="button" id="anchorAtHome">Use the home location</button>
+        </div>
+      </div>
+      <div id="anchorReport"></div>
+      <div class="row" style="margin-top:8px;gap:8px"><button class="primary">Save and send to collars</button>
+        <span class="muted" id="homeMsg" role="status"></span></div>
+    </form>
+  </section>
+
   <section id="fwBox" class="wide">
     <h2>Collar firmware</h2>
     <div class="fwcols">
@@ -848,6 +896,7 @@ const trackLayer = L.featureGroup().addTo(map);
 map.createPane('bands').style.zIndex = 390; // under the zone outlines
 const bandLayer = L.featureGroup().addTo(map);
 const dogLayer = L.featureGroup().addTo(map);
+const anchorLayer = L.featureGroup().addTo(map);
 
 // ---------------------------------------------------------------------------------------------
 // State
@@ -1235,8 +1284,9 @@ function renderCollars() {
     if (s) {
       bits.push(ago(now - s.received));
       if (s.battery_pct != null && s.battery_pct !== 255) bits.push(`battery ${s.battery_pct}%`);
-      if (s.clearance_m != null && c.fence_version && !s.no_fix) bits.push(`${len(Math.abs(s.clearance_m))} ${s.clearance_m < 0 ? 'past' : 'from'} the line`);
-      if (s.no_fix) bits.push('no GPS fix');
+      if (s.clearance_m != null && c.fence_version && !s.no_fix && !s.home) bits.push(`${len(Math.abs(s.clearance_m))} ${s.clearance_m < 0 ? 'past' : 'from'} the line`);
+      if (s.home) bits.push('home, GPS off');
+      else if (s.no_fix) bits.push('no GPS fix');
       if (s.beacon_active) bits.unshift('asking for help');
     }
     box.append(el('div', { class: 'collar' + (id === selected ? ' selected' : ''), onclick: () => select(id), role: 'button', tabindex: 0,
@@ -1255,12 +1305,12 @@ function renderDogs() {
   for (const [id, c] of Object.entries(collars)) {
     const s = c.status;
     if (!s || !(s.lat || s.lon)) continue;
-    const stale = now - s.received > STALE_S || s.no_fix; // greyed: not where the dog is known to be now
+    const stale = now - s.received > STALE_S || s.no_fix || s.home; // greyed: not where the dog is known to be now
     const icon = L.divIcon({ className: '', iconSize: [22, 22], iconAnchor: [11, 11],
       html: `<div class="dog st-${s.state}${stale ? ' stale' : ''}" style="--c:${css({ INSIDE: '--ok', WARNING: '--warn', OUTSIDE: '--bad', LOST: '--bad' }[s.state] || '--idle')}"><div class="pin"></div><div class="label"></div></div>` });
     const m = L.marker([s.lat, s.lon], { icon, pmIgnore: true, snapIgnore: true, zIndexOffset: id === selected ? 1000 : 500, title: c.name, keyboard: false });
     m.on('add', () => { const lab = m.getElement() && m.getElement().querySelector('.label'); if (lab) lab.textContent = c.name; });
-    m.bindTooltip(`${stateLabel(s.state)} · ${ago(now - s.received)}${s.no_fix ? ' · no GPS fix, last known position' : s.sats ? ` · ${s.sats} sats` : ''}`, { direction: 'bottom', offset: [0, 12] });
+    m.bindTooltip(`${stateLabel(s.state)} · ${ago(now - s.received)}${s.home ? ' · home, GPS off' : s.no_fix ? ' · no GPS fix, last known position' : s.sats ? ` · ${s.sats} sats` : ''}`, { direction: 'bottom', offset: [0, 12] });
     m.on('click', e => { L.DomEvent.stopPropagation(e); select(id); });
     m.addTo(dogLayer);
     if (id === selected && c.sim && c.sim.mode === 'goto' && c.sim.target) {
@@ -1289,7 +1339,8 @@ function renderSelected() {
     rows.push(['State', stateLabel(s.state)], ['Last report', ago(Date.now() / 1000 - s.received)]);
     if (s.battery_pct != null && s.battery_pct !== 255) rows.push(['Battery', `${s.battery_pct}%`]);
     // Collar firmware 0.16 on says when it has no current fix; its position is then the last one it knew.
-    if (s.no_fix) rows.push(['GPS', s.lat || s.lon ? 'No fix now: the map shows where it last had one' : 'No fix yet']);
+    if (s.home) rows.push(['GPS', 'Off: home, near the anchor. The map shows the last fix']);
+    else if (s.no_fix) rows.push(['GPS', s.lat || s.lon ? 'No fix now: the map shows where it last had one' : 'No fix yet']);
     else if (s.sats) rows.push(['GPS', `${s.sats} sats, PDOP ${s.pdop}`]);
     rows.push(['Corrections', s.corrections_enabled ? 'On' : 'Off']);
     rows.push(['Lost alert', s.beacon_active ? 'On: Bluetooth and mesh' : s.beacon_silenced ? 'Silenced until back inside' : 'Off']);
@@ -1742,6 +1793,82 @@ $('contactForm').onsubmit = async e => {
   } catch (err) { $('contactMsg').textContent = err.message; }
   renderContact();
   refresh();
+};
+
+// Home mode: the anchor collars listen for, and whether a running dog would have a fix again
+// before it reaches the bands.
+let homeAnchor = null, anchorPos = undefined; // undefined: unchanged; null: the home location
+const anchorKind = () => (document.querySelector('input[name=anchorKind]:checked') || {}).value || 'off';
+function renderHomeForm() {
+  const kind = anchorKind();
+  $('anchorAddrField').hidden = kind !== 'beacon';
+  $('anchorAddr').required = kind === 'beacon';
+  $('anchorMore').hidden = kind === 'off';
+  const pos = anchorPos !== undefined ? anchorPos : homeAnchor && homeAnchor.position_set ? homeAnchor.position : null;
+  $('anchorWhere').textContent = pos ? `Anchor at ${pos[0].toFixed(5)}, ${pos[1].toFixed(5)}.`
+    : kind === 'base' ? 'The base radio is at the home location.' : 'The anchor is at the home location.';
+}
+function renderHomeAnchor() {
+  const a = homeAnchor;
+  anchorLayer.clearLayers();
+  if (!a) return;
+  const parts = [];
+  if (a.kind !== 'off') {
+    for (const w of a.warnings) parts.push(el('div', { class: 'callout bad' }, w));
+    if (a.need_m != null) {
+      parts.push(el('div', { class: 'muted', style: 'margin-top:8px' },
+        `Home reaches about ${len(a.range_m)} from the anchor. A dog running off gets about ${len(a.need_m)} from there before its GPS has a fix again, `
+        + 'so the anchor should be at least that far inside the bands.'));
+      const rows = a.collars.map(c => el('li', {},
+        c.room_m == null ? `${c.name}: no fences yet`
+          : c.ok ? `✓ ${c.name}: ${len(c.room_m)} from the anchor to the nearest band`
+          : `⚠ ${c.name}: ${c.room_m < 0 ? 'the anchor is in a band or outside the fences' : `only ${len(c.room_m)} to the nearest band`}. `
+            + 'The dog could reach it before the GPS has a fix: use a closer setting, or move the anchor.',
+        c.home ? ' Home now, GPS off.' : ''));
+      if (rows.length) parts.push(el('ul', { class: 'anchorChecks' }, ...rows));
+    }
+    if (a.position) {
+      const at = L.latLng(a.position[0], a.position[1]);
+      L.circle(at, { radius: a.range_m, color: css('--accent'), weight: 1, dashArray: '3 4', fillOpacity: 0.08, interactive: false, pmIgnore: true, snapIgnore: true }).addTo(anchorLayer);
+      L.marker(at, { icon: L.divIcon({ className: '', iconSize: [12, 12], iconAnchor: [6, 6], html: '<div class="anchorDot"></div>' }),
+        title: 'Home anchor', keyboard: false, pmIgnore: true, snapIgnore: true }).bindTooltip('Home anchor: GPS off within the circle').addTo(anchorLayer);
+    }
+  }
+  $('anchorReport').replaceChildren(...parts);
+}
+async function loadHomeAnchor(keepForm) {
+  try { homeAnchor = await api('home-anchor'); } catch { return; }
+  if (!keepForm) {
+    const r = document.querySelector(`input[name=anchorKind][value=${homeAnchor.kind || 'off'}]`);
+    if (r) r.checked = true;
+    $('anchorAddr').value = homeAnchor.address || '';
+    $('anchorRssi').value = String(homeAnchor.rssi || -75);
+    if (!$('anchorRssi').value) $('anchorRssi').value = '-75';
+    $('anchorRestart').value = String(homeAnchor.gps_restart_s || 30);
+    anchorPos = undefined;
+  }
+  renderHomeForm();
+  renderHomeAnchor();
+}
+document.querySelectorAll('input[name=anchorKind]').forEach(r => { r.onchange = renderHomeForm; });
+$('anchorHere').onclick = () => { const c = map.getCenter(); anchorPos = [c.lat, c.lng]; renderHomeForm(); $('homeMsg').textContent = 'Save to use this position.'; };
+$('anchorAtHome').onclick = () => { anchorPos = null; renderHomeForm(); $('homeMsg').textContent = 'Save to use the home location.'; };
+$('homeForm').onsubmit = async e => {
+  e.preventDefault();
+  const pos = anchorPos !== undefined ? anchorPos : homeAnchor && homeAnchor.position_set ? homeAnchor.position : null;
+  const body = { kind: anchorKind(), address: $('anchorAddr').value, rssi: +$('anchorRssi').value,
+    gps_restart_s: +$('anchorRestart').value, lat: pos ? pos[0] : null, lon: pos ? pos[1] : null };
+  try {
+    const r = await api('home-anchor', { method: 'PUT', body: JSON.stringify(body) });
+    homeAnchor = r;
+    anchorPos = undefined;
+    const n = r.sent_to.length, total = Object.keys(collars).length;
+    $('homeMsg').textContent = !total ? 'Saved. Collars you add get it.'
+      : n === total ? `Saved and sent to ${n === 1 ? 'the collar' : `all ${n} collars`}.`
+      : `Saved. Sent to ${n} of ${total}; the others get it when they next report.`;
+  } catch (err) { $('homeMsg').textContent = err.message; }
+  renderHomeForm();
+  renderHomeAnchor();
 };
 
 const showReportRate = () => {
@@ -3160,7 +3287,7 @@ function showTab(name, scrollTo) {
   $('logMain').hidden = tab !== 'log';
   if (tab === 'collars') map.invalidateSize(); // the map was hidden: let Leaflet measure it again
   else if (tab === 'log') openLog();
-  else fwRefresh();
+  else { fwRefresh(); loadHomeAnchor(true); }
   const target = scrollTo && $(scrollTo);
   if (target) target.scrollIntoView({ block: 'start' });
   else $(tabView[tab]).scrollTop = 0;
@@ -3176,6 +3303,7 @@ document.querySelector('.tabs').addEventListener('keydown', e => {
 window.addEventListener('beforeunload', e => { if (isDirty() || Object.keys(drafts).length) { e.preventDefault(); e.returnValue = ''; } });
 
 loadContact();
+loadHomeAnchor();
 
 // Poll faster while a simulated collar is around, so it moves smoothly.
 async function loop() {
