@@ -102,6 +102,9 @@ constexpr uint32_t kSlowAdvRefreshMs = 60 * 1000;
 // minutes after every button press, boot or text message) to this; it now counts as a default
 // too, and both give way to GEOCOLLAR_SCREEN_ON_SECS (see applyPowerSettings).
 constexpr uint32_t kScreenOnSecs = 30;
+// While a correction waits for its second look and the GPS has no new reading yet, look for one
+// this often.
+constexpr int32_t kVerifyPollMs = 200;
 
 uint16_t clampU16(uint32_t v)
 {
@@ -573,6 +576,7 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
                         engine_.setFences(scratch_);
                         pulser_.stop();
                         beacon_.reset();
+                        verifying_ = false;
                         // Where the last fix stands against the new lines, for the report and for
                         // the GPS pacing; with no current fix, 0 makes the GPS fix often.
                         lastClearance_ = (scratch_.zoneCount && !fixWatch_.noFix())
@@ -678,7 +682,15 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
             report(now);
         }
         // Send the next frame, or the first one of a correction started above.
-        return tx_.busy() ? tx_.poll() : 1000;
+        int32_t next = tx_.busy() ? tx_.poll() : 1000;
+        if (verifying_) {
+            // Back when the wait for the second look is over, and then until the GPS has a reading.
+            const int32_t wait = (int32_t)(verifyAtMs_ - millis());
+            const int32_t soon = wait > 0 ? wait : kVerifyPollMs;
+            if (soon < next)
+                next = soon;
+        }
+        return next;
     }
 
   private:
@@ -718,18 +730,60 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
     /// restored from flash, and neither says where the dog is now.
     int onGpsStatus(const meshtastic::GPSStatus *status)
     {
-        if (!gps || !status->getHasLock() || config.position.fixed_position)
-            return 0;
+        if (status->getHasLock() && takeReading())
+            setIntervalFromNow(0); // check the fences now, not at the next once-a-second pass
+        return 0;
+    }
+
+    /// Take the GPS's newest reading for runOnce(), if it is one the fences have not had yet.
+    bool takeReading()
+    {
+        if (!gps || config.position.fixed_position)
+            return false;
         const meshtastic_Position &p = gps->p;
         if (p.timestamp == 0 || p.timestamp == lastFixTimestamp_ || (p.latitude_i == 0 && p.longitude_i == 0))
-            return 0; // not a new fix (the GPS also publishes when it only has the time)
+            return false; // not a new fix (the GPS also publishes when it only has the time)
         lastFixTimestamp_ = p.timestamp;
         pendingFix_ = Fix{p.latitude_i, p.longitude_i, clampU16(p.PDOP), clampU8(p.sats_in_view), millis()};
         fixPending_ = true;
-        setIntervalFromNow(0); // check the fences now, not at the next once-a-second pass
-        return 0;
+        return true;
     }
 #endif
+
+    /// The second look: the fence engine holds a correction back until a reading taken at least a
+    /// second after the first still has the dog in the band (see FenceEngine::onFix). Returns
+    /// true once there is such a reading to check, stamped with the time it is looked at.
+    ///
+    /// Near a line the GPS is on all the time and has a new reading every second, so the wait
+    /// ends with one about a second old at most. A reading that comes during the wait is kept
+    /// until the wait is over. If the GPS has gone to sleep (it does between fixes more than 10 s
+    /// apart, so only when the dog got into a band faster than the pacing allows for, or with
+    /// pacing off), it is woken now; Meshtastic's GPS thread then needs up to 5 s to read it.
+    bool secondLook(uint32_t now)
+    {
+        if ((int32_t)(now - verifyAtMs_) < 0)
+            return false; // the second is not over yet
+        if (now - verifyAtMs_ > kVerifyStaleMs) {
+            verifying_ = false; // no reading in all that time: the next one starts the wait again
+            return fixPending_;
+        }
+#if GEOCOLLAR_HAS_GPS
+        if (gps && gps->hasLock()) {
+            // The newest reading, whether Meshtastic has announced it yet or not: with fixes more
+            // than 10 s apart it keeps a new lock to itself for up to 20 s.
+            takeReading();
+        } else if (gps && !verifyWoke_ && !fixPending_ &&
+                   config.position.gps_mode == meshtastic_Config_PositionConfig_GpsMode_ENABLED &&
+                   !config.position.fixed_position) {
+            verifyWoke_ = true;
+            lastGpsKickMs_ = now;
+            gps->up();
+        }
+#endif
+        if (fixPending_)
+            pendingFix_.nowMs = now;
+        return fixPending_;
+    }
 
     /// Subscribe to the GPS once it exists.
     void watchForFixes()
@@ -744,7 +798,7 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
 
     void checkPosition()
     {
-        if (!fixPending_)
+        if (verifying_ ? !secondLook(millis()) : !fixPending_)
             return;
         fixPending_ = false;
         const Fix fix = pendingFix_;
@@ -756,6 +810,10 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
             engine_.settings().correctionsEnabled = false;
         const Decision d = engine_.onFix(fix);
         engine_.settings().correctionsEnabled = savedEnable;
+        if (d.verify && !(verifying_ && d.verifyAtMs == verifyAtMs_))
+            verifyWoke_ = false; // a new wait: the GPS may be woken for it once
+        verifying_ = d.verify;
+        verifyAtMs_ = d.verifyAtMs;
 
         lastClearance_ = d.clearanceM; // 0 for a fix too poor to use, which also makes the GPS fix often
         if (!d.fixRejected)
@@ -1078,9 +1136,11 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
             engine_.forceLost();
             tx_.stop();
             pulser_.stop();
+            verifying_ = false;
             break;
         case proto::CommandAction::ClearLost:
             engine_.clearLost();
+            verifying_ = false;
             break;
         case proto::CommandAction::RequestStatus:
             break;
@@ -1436,6 +1496,9 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
     Fix pendingFix_{};              // the newest fix from the GPS, waiting for runOnce()
     bool fixPending_ = false;
     Fix lastFix_{};
+    bool verifying_ = false;   // a correction is held back for its second look (see secondLook)
+    uint32_t verifyAtMs_ = 0;  // when the wait for it is over
+    bool verifyWoke_ = false;  // the GPS has been woken for it
     FixWatch fixWatch_;         // no current fix: none since boot, or the last one is overdue
     bool loggedNoFix_ = true;
     bool reportedNoFix_ = true; // what the last report told the base about that

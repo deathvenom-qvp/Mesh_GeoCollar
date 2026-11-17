@@ -4,8 +4,9 @@
 A simulated collar moves on its own (stays put, wanders, or walks to a point), and checks each
 position against its fences with a Python copy of the collar firmware's rules
 (firmware/GeoCollar/Fence.cpp): the same clearance maths, danger / warning / attention bands, Outside -> Lost after
-3 fixes, re-arming after 3 fixes 5 m back inside, and beep / vibrate / shock choices. It reports
-to the base like a real collar would, minus the radio.
+3 fixes, re-arming after 3 fixes 5 m back inside, beep / vibrate / shock choices, and the second
+look a second later before a correction starts or steps up. It reports to the base like a real
+collar would, minus the radio.
 """
 
 from __future__ import annotations
@@ -133,6 +134,16 @@ class Decision:
     send_breach: bool = False
     send_status: bool = False
     clearance_m: float = 0
+    verify: bool = False  # a correction is held back until a second reading agrees
+
+
+# The second look (firmware: kVerifyMs, kVerifyStaleMs). Before a correction starts, or steps up
+# to a stronger one, the collar waits a second and takes another reading.
+VERIFY_S = 1.0
+VERIFY_STALE_S = 30.0
+# The simulator takes a fix about once a second, by a timer that may fire a hair early. A real
+# collar keeps such a reading until the second is over; here it simply counts.
+_TICK_SLACK_S = 0.05
 
 
 @dataclass
@@ -145,22 +156,53 @@ class FenceEngine:
     _shocks_this_breach: int = 0
     _shock_times: deque = field(default_factory=lambda: deque(maxlen=16))
     _quiet: bool = False  # went past the line: no corrections until clear of every band
+    # The second look (firmware: FenceEngine::secondLook).
+    _agreed: int = 0  # CLEAR: the most severe band that two readings a second apart agree on
+    _verifying: bool = False  # a reading has the dog in a more severe band than _agreed
+    _verify_t: float = 0  # when the first such reading came
+    _verify_band: int = 0  # the least severe band of the readings since then
 
     def set_fences(self, zones: list[protocol.Zone]) -> None:
         self.zones = list(zones)
         self._outside = self._rearm = self._shocks_this_breach = 0
         self._quiet = False
+        self._reset_second_look()
         self.state = protocol.CollarState.INSIDE if self.zones else protocol.CollarState.NO_FENCE
 
     def force_lost(self) -> None:
         self.state = protocol.CollarState.LOST
         self._rearm = 0
+        self._reset_second_look()
 
     def clear_lost(self) -> None:
         if self.state == protocol.CollarState.LOST:
             self.state = protocol.CollarState.INSIDE if self.zones else protocol.CollarState.NO_FENCE
         self._outside = self._rearm = self._shocks_this_breach = 0
         self._quiet = False
+        self._reset_second_look()
+
+    def _reset_second_look(self) -> None:
+        self._agreed = CLEAR
+        self._verifying = False
+
+    def _second_look(self, band: int, now: float) -> None:
+        """Take one reading's band into the second look; afterwards _agreed is the band to correct for."""
+        if band <= self._agreed:
+            # No deeper than agreed already. A milder band counts at once, so that going deeper
+            # again is checked again.
+            self._agreed, self._verifying = band, False
+            return
+        waited = now - self._verify_t
+        if not self._verifying or waited > VERIFY_STALE_S:
+            self._verifying, self._verify_t, self._verify_band = True, now, band
+            return
+        self._verify_band = min(self._verify_band, band)
+        if waited < VERIFY_S - _TICK_SLACK_S:
+            return  # too soon after the first to count as a second look
+        self._agreed = self._verify_band
+        self._verifying = band > self._agreed
+        if self._verifying:  # deeper still than agreed: that takes a second look of its own
+            self._verify_t, self._verify_band = now, band
 
     def _set_state(self, s: protocol.CollarState, d: Decision) -> None:
         if s != self.state:
@@ -174,19 +216,23 @@ class FenceEngine:
         return sum(1 for t in self._shock_times if now - t < 3600) < s.max_shocks_per_hour
 
     def on_fix(self, lat: float, lon: float, now: float) -> Decision:
+        """One GPS fix. One reading alone never starts a correction: see FenceEngine::onFix."""
+        d = self._evaluate(lat, lon, now)
+        d.verify = (self._verifying and not self._quiet and self.settings.corrections_enabled
+                    and self.state == protocol.CollarState.WARNING)
+        return d
+
+    def _evaluate(self, lat: float, lon: float, now: float) -> Decision:
         S = protocol.CollarState
         d = Decision()
         if self.state == S.NO_FENCE:
             return d
         # Every zone has its own bands; the most severe band over all zones decides.
-        c, band, shock_band = 1e9, CLEAR, False
+        c, band = 1e9, CLEAR
         for z in self.zones:
             zd = signed_distance_m(z, lat, lon)
             c = min(c, zd)
-            b = band_for(z, zd)
-            band = max(band, b)
-            if b == DANGER and z.danger_m > 0:
-                shock_band = True
+            band = max(band, band_for(z, zd))
         d.clearance_m = c
         s = self.settings
 
@@ -205,6 +251,7 @@ class FenceEngine:
         if band == OUTSIDE:
             # Past the line: stop correcting at once, and stay quiet until clear of every band.
             self._quiet = True
+            self._reset_second_look()
             self._outside += 1
             if self._outside >= s.lost_confirm_fixes:
                 self._set_state(S.LOST, d)
@@ -217,18 +264,21 @@ class FenceEngine:
         if band == CLEAR:
             self._shocks_this_breach = 0
             self._quiet = False
+            self._reset_second_look()
             self._set_state(S.INSIDE, d)
             return d
 
+        # In a band: the correction for the band a second look has agreed on, if any yet.
         self._set_state(S.WARNING, d)
+        self._second_look(band, now)
         if self._quiet or not s.corrections_enabled:
             return d
-        if band == ATTENTION:
+        if self._agreed == ATTENTION:
             d.correction = "beep"
-        elif band == DANGER and shock_band:
-            self._correct_hard(d, now)
-        else:
+        elif self._agreed == WARNING:
             d.correction, d.intensity = "vibrate", s.vibrate_level
+        elif self._agreed == DANGER:
+            self._correct_hard(d, now)
         return d
 
     def _correct_hard(self, d: Decision, now: float) -> None:
@@ -541,7 +591,10 @@ class SimCollar:
         lat, lon = _move(self.lat, self.lon, self.rng.uniform(0, 360), abs(self.rng.gauss(0, n / 1.5)) if n else 0)
         self._fix = (lat, lon)
         was_quiet = self.engine._quiet
+        was_verifying = self.engine._verifying
         d = self.engine.on_fix(lat, lon, now)
+        if d.verify and not was_verifying:
+            self._event("info", "in a band: checking the position again in a second before correcting")
         if self.engine.zones:
             self.clearance = d.clearance_m
         if self.engine._quiet and not was_quiet:

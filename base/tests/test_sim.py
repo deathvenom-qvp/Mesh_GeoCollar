@@ -6,7 +6,7 @@ from fastapi.testclient import TestClient
 
 from geocollar_base import protocol
 from geocollar_base.app import create_app
-from geocollar_base.sim import LostBeacon, SimCollar, _move, beacon_name, beacon_text
+from geocollar_base.sim import VERIFY_STALE_S, FenceEngine, LostBeacon, SimCollar, _move, beacon_name, beacon_text
 
 # A 200 m square keep-in zone around (40.0, -75.0).
 YARD = protocol.Zone(protocol.ZoneKind.KEEP_IN, 0, 5, 5, [(39.9991, -75.00117), (39.9991, -74.99883), (40.0009, -74.99883), (40.0009, -75.00117)])
@@ -21,9 +21,10 @@ def walker():
 
 def test_walk_out_matches_firmware_rules():
     sim = walker()
-    sim.update({"target": list(_move(40.0, -75.0, 90, 150)), "mode": "goto", "speed_mps": 5})
+    # At 2 m/s, so that each 5 m band has the two fixes a second apart that a correction takes.
+    sim.update({"target": list(_move(40.0, -75.0, 90, 150)), "mode": "goto", "speed_mps": 2})
     states = []
-    for t in range(40):
+    for t in range(80):
         r = sim.step(1.0, now=1000 + t)
         states.append(sim.engine.state)
         if r:
@@ -37,7 +38,7 @@ def test_walk_out_matches_firmware_rules():
 
     # Walk back in: re-arms after 3 fixes at least 5 m inside.
     sim.update({"target": [40.0, -75.0], "mode": "goto"})
-    for t in range(60):
+    for t in range(90):
         sim.step(1.0, now=2000 + t)
     assert sim.engine.state == S.INSIDE
 
@@ -62,6 +63,8 @@ def test_no_corrections_past_the_line_and_quiet_until_clear():
     lat, lon = _move(40.0, -75.0, 90, 100 - 11)
     sim.update({"lat": lat, "lon": lon})
     sim.step(0, now=11)
+    assert sim.events[0]["text"].startswith("in a band: checking the position again")  # the first reading only waits
+    sim.step(0, now=12)
     assert sim.events[0]["kind"] == "beep"
 
 
@@ -70,22 +73,110 @@ def test_pulses_repeat_beeps():
     sim.set_fences([YARD], 7, protocol.Pulses(beep_s=2, vibrate_s=3))
     lat, lon = _move(40.0, -75.0, 90, 100 - 8)  # attention band
     sim.update({"lat": lat, "lon": lon})
-    for t in range(7):
+    for t in range(8):
         sim.step(0, now=100 + t)
     beeps = [e for e in sim.events if e["kind"] == "beep"]
-    assert len(beeps) == 4  # at 0, 2, 4 and 6 s
+    assert len(beeps) == 4  # at 1 s (the second look), 3, 5 and 7 s
 
 
 def test_danger_band_inside_the_line_shocks():
     sim = walker()
     sim.set_fences([protocol.Zone(YARD.kind, 3, 4, 6, YARD.vertices)], 9)
     sim.update({"shock_enabled": True})
-    for t, metres_in in enumerate((20, 10, 5, 1.5)):  # clear, attention, warning, danger
+    for t, metres_in in enumerate((20, 10, 10, 5, 5, 1.5, 1.5)):  # clear, then two fixes each in attention, warning, danger
         lat, lon = _move(40.0, -75.0, 90, 100 - metres_in)
         sim.update({"lat": lat, "lon": lon})
         sim.step(0, now=t)
-    kinds = [e["kind"] for e in reversed(sim.events) if e["kind"] != "fences"]
+    kinds = [e["kind"] for e in reversed(sim.events) if e["kind"] not in ("fences", "info")]
     assert kinds == ["beep", "vibrate", "shock"] and sim.engine.state == S.WARNING
+    # One fix in each band is not enough for any of them.
+    sim = walker()
+    sim.set_fences([protocol.Zone(YARD.kind, 3, 4, 6, YARD.vertices)], 9)
+    sim.update({"shock_enabled": True})
+    for t, metres_in in enumerate((20, 1.5, 20, 5, 20, 10, 20)):
+        lat, lon = _move(40.0, -75.0, 90, 100 - metres_in)
+        sim.update({"lat": lat, "lon": lon})
+        sim.step(0, now=t)
+    assert not {"shock", "vibrate", "beep"} & {e["kind"] for e in sim.events}
+
+
+def test_second_look_matches_firmware():
+    # Same cases as firmware/test/test_main.cpp testSecondLook().
+    zone = protocol.Zone(YARD.kind, 3, 4, 6, YARD.vertices)  # shock 0-3 m, vibrate 3-7 m, beep 7-13 m
+    beep, buzz, shock, clear = (_move(40.0, -75.0, 90, 100 - m) for m in (10, 5, 1.5, 50))
+    out = _move(40.0, -75.0, 90, 102)
+
+    def fresh():
+        e = FenceEngine()
+        e.settings.shock_enabled = True
+        e.settings.lost_confirm_fixes = 10
+        e.set_fences([zone])
+        return e
+
+    def fix(e, where, now):
+        d = e.on_fix(*where, now)
+        return d.correction, d.verify
+
+    # The first reading in a band starts the wait; one before the second is over does not end it.
+    e = fresh()
+    assert fix(e, beep, 5.0) == (None, True) and e.state == S.WARNING
+    assert fix(e, beep, 5.6) == (None, True)
+    assert fix(e, beep, 6.0) == ("beep", False)
+    assert fix(e, beep, 6.1) == ("beep", False)
+
+    # The second look finds the dog clear, or past the line: no correction.
+    e = fresh()
+    assert fix(e, shock, 5) == (None, True)
+    assert fix(e, clear, 6) == (None, False) and e.state == S.INSIDE
+    assert fix(e, shock, 7) == (None, True)
+    assert fix(e, out, 8) == (None, False) and e.state == S.OUTSIDE
+    assert fix(e, buzz, 9) == (None, False)  # on the way back in: silent
+
+    # A step up takes a second look too, and the agreed correction goes on meanwhile. A step
+    # down counts at once.
+    e = fresh()
+    fix(e, beep, 5)
+    assert fix(e, beep, 6) == ("beep", False)
+    assert fix(e, buzz, 7) == ("beep", True)
+    assert fix(e, buzz, 8) == ("vibrate", False)
+    assert fix(e, shock, 9) == ("vibrate", True)
+    assert fix(e, shock, 10) == ("shock", False)
+    assert fix(e, beep, 11) == ("beep", False)
+    assert fix(e, shock, 12) == ("beep", True)
+
+    # Two readings in different bands agree on the milder one.
+    e = fresh()
+    fix(e, shock, 5)
+    assert fix(e, buzz, 6) == ("vibrate", False)
+    e = fresh()
+    fix(e, buzz, 5)
+    assert fix(e, shock, 6) == ("vibrate", True)
+    assert fix(e, shock, 7) == ("shock", False)
+    e = fresh()
+    fix(e, shock, 5)
+    fix(e, buzz, 5.4)
+    assert fix(e, shock, 6) == ("vibrate", True)
+
+    # A first reading that has got old is not agreed with.
+    e = fresh()
+    fix(e, buzz, 5)
+    assert fix(e, buzz, 5 + VERIFY_STALE_S + 1) == (None, True)
+    assert fix(e, buzz, 5 + VERIFY_STALE_S + 2) == ("vibrate", False)
+
+    # With corrections off the readings still count; new fences and lost commands start afresh.
+    e = fresh()
+    fix(e, shock, 5)
+    assert fix(e, shock, 6) == ("shock", False)
+    e.settings.corrections_enabled = False
+    assert fix(e, beep, 7) == (None, False)
+    e.settings.corrections_enabled = True
+    assert fix(e, shock, 8) == ("beep", True)
+    e.set_fences([zone])
+    assert fix(e, buzz, 9) == (None, True)
+    assert fix(e, buzz, 10) == ("vibrate", False)
+    e.force_lost()
+    e.clear_lost()
+    assert fix(e, buzz, 11) == (None, True)
 
 
 def test_sim_api_flow(tmp_path):

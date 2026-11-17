@@ -15,6 +15,11 @@ constexpr size_t kMaxZones = 4;
 constexpr size_t kMaxVertices = 32;
 /// How many recent shocks the hourly limit remembers; Settings::maxShocksPerHour cannot exceed it.
 constexpr size_t kShockHistory = 16;
+/// The second look. Before a correction starts, or steps up to a stronger one, the collar waits
+/// this long and takes another GPS reading; only if that one agrees does the correction go out.
+constexpr uint32_t kVerifyMs = 1000;
+/// A first reading older than this is too old to be agreed with: the wait starts again.
+constexpr uint32_t kVerifyStaleMs = 30000;
 
 enum class ZoneKind : uint8_t {
     KeepIn = 0,  // the dog should stay inside this polygon
@@ -128,6 +133,10 @@ struct Decision {
     bool sendStatus = false;    // state changed: tell the base
     bool fixRejected = false;   // fix too poor to act on
     float clearanceM = 0;
+    // A correction is held back until another reading agrees with this one. A reading counts as
+    // the second look from verifyAtMs on: the caller waits until then and gets one from the GPS.
+    bool verify = false;
+    uint32_t verifyAtMs = 0;
 };
 
 class FenceEngine
@@ -146,14 +155,26 @@ class FenceEngine
     void clearLost();
 
     /// Feed one GPS fix; returns what the collar should do now.
+    ///
+    /// One reading alone never starts a correction. The first reading in a band (or in a more
+    /// severe band than before) only starts a wait of kVerifyMs. The correction goes out when a
+    /// reading taken after that wait still has the dog there, and it is the correction for the
+    /// least severe band of those readings: a shock takes two readings in the danger band, at
+    /// least kVerifyMs apart. While the dog stays in a band that has been agreed on, each reading
+    /// corrects at once. A reading in a milder band counts at once too, so going deeper again is
+    /// checked again.
     Decision onFix(const Fix &fix);
 
   private:
+    Decision evaluate(const Fix &fix);
     bool fixIsGood(const Fix &fix) const;
     bool shockAllowed(uint32_t nowMs);
     /// Shock if allowed (enabled, under the per-breach and per-hour caps), otherwise vibrate.
     void correctHard(Decision &d, uint32_t nowMs);
     void setState(CollarState s, Decision &d);
+    /// Take one reading's band into the second look; afterwards agreed_ is the band to correct for.
+    void secondLook(Band band, uint32_t nowMs);
+    void resetSecondLook();
 
     FenceSet fences_;
     Settings settings_;
@@ -162,6 +183,11 @@ class FenceEngine
     uint8_t rearmCount_ = 0;
     uint8_t shocksThisBreach_ = 0;
     bool quiet_ = false; // went past the line: no corrections until clear of every band
+    // The second look (see onFix).
+    Band agreed_ = Band::Clear;      // the most severe band that two readings kVerifyMs apart agree on
+    bool verifying_ = false;         // a reading has the dog in a more severe band than agreed_
+    uint32_t verifyMs_ = 0;          // when the first such reading came
+    Band verifyBand_ = Band::Clear;  // the least severe band of the readings since then
     // Timestamps of recent shocks, for the per-hour cap.
     uint32_t shockTimes_[kShockHistory] = {};
     size_t shockHead_ = 0;

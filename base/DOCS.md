@@ -318,6 +318,9 @@ collar** (in the Fences section), then **Send to collar**.
    **Repeat beep** and **Repeat vibrate** set how often the collar repeats them while the dog stays
    in that band (every 2 to 10 s, or once per GPS fix). Once the dog is past the line the collar
    goes quiet, and stays quiet until the dog is back inside and clear of every band.
+   A correction never starts on a single GPS reading: the collar waits 1 second, reads the GPS
+   again, and corrects only if the dog is still in a band. Each step up, from beep to vibrate and
+   from vibrate to shock, is checked the same way.
    The map shades each band so you can see exactly where it starts and ends. For a keep-out zone
    the bands lie outside its line.
 6. Press **Send to collar**. The page shows when the collar reports the new fence version.
@@ -325,7 +328,9 @@ collar** (in the Fences section), then **Send to collar**.
 **GPS accuracy.** The collar's UC6580 receiver is rated at 1.5 m (RMS) in open sky. On a dog,
 near buildings and under trees, expect 2 to 5 m, and the occasional jump of 10 m or more. Make
 each band at least 3 m wide, and draw the line a few metres inside anything that really matters,
-such as a road. The collar ignores fixes with poor satellite geometry.
+such as a road. The collar ignores fixes with poor satellite geometry, and a single jump into a
+band does not correct the dog, because the reading a second later has to agree. A running dog
+covers 5 m or more in that second, so wider bands give it more warning.
 
 Each collar holds up to 4 zones of up to 32 corners. The dog must be inside **every** keep-in
 zone, so use one keep-in zone, not several side by side.
