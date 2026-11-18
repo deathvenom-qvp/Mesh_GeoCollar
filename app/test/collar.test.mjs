@@ -15,6 +15,7 @@ import { hex, unhex } from '../src/bytes.js';
 import { CollarLink, Link } from '../src/collar.js';
 import { CollarHalf, DemoDog } from '../src/demo.js';
 import { FakeNode } from '../src/fakenode.js';
+import * as mesh from '../src/meshtastic.js';
 import { matchesCollar, pickConnected } from '../src/match.js';
 import { bearingDeg, compass, distanceM, formatAge, formatDistance, offset } from '../src/geo.js';
 
@@ -31,7 +32,7 @@ function makeLink(transport, who = collar) {
     for (const w of [...waiting]) if (w.test()) { waiting.splice(waiting.indexOf(w), 1); w.resolve(); }
   };
   const link = new CollarLink(who, transport, {
-    pollMs: 20, replyMs: 300, retryMs: 20,
+    pollMs: 20, replyMs: 300, retryMs: 20, configMs: 300,
     onState: (s, d) => { states.push(d ? `${s}: ${d}` : s); check(); },
     onStatus: st => { reports.push(st); check(); },
   });
@@ -147,6 +148,31 @@ test('refuses a different collar and reconnects after a drop', async () => {
   await b.link.stop();
 });
 
+test('tries again on a link another app keeps up, which drops repeated writes', async () => {
+  // The Meshtastic app (or the phone) holds the collar's Bluetooth link, so it stays up between
+  // this app's attempts, and the collar drops a write that repeats the one before it. Here the
+  // other app reads the first answer to "want config", so the first attempt gets nowhere; the
+  // next attempt's "want config" must still reach the collar.
+  const { node } = demoNode();
+  node.sharedLink = true;
+  const real = node.transport();
+  let stolen = 0;
+  const t = {
+    ...real,
+    read: async () => {
+      const buf = await real.read();
+      if (!stolen && buf.length && mesh.decodeFromRadio(buf).configComplete !== undefined) { stolen++; return new Uint8Array(0); }
+      return buf;
+    },
+  };
+  const { link, states, state } = makeLink(t);
+  link.start();
+  await state(Link.ONLINE);
+  assert.equal(stolen, 1);
+  assert.ok(states.some(s => s.startsWith(Link.WAITING)), 'the first attempt failed');
+  await link.stop();
+});
+
 test('ignores GeoCollar messages that did not come from the collar itself', async () => {
   // Anything the collar hears on the mesh is passed to the phone too. A forged "unknown key"
   // from another node must not make the app give up.
@@ -251,6 +277,11 @@ test('finds the collar among the devices the phone is already connected to', () 
   assert.equal(pickConnected(collar, [buds, ours]), 'EE:03');
   assert.equal(pickConnected(collar, [other, ours], new Set(), true), 'EE:03', 'the right name first');
   assert.equal(pickConnected(collar, [buds]), null, 'Android lists everything: the name has to match');
+  assert.equal(pickConnected(collar, [buds, other]), 'EE:02', 'or look like a Meshtastic node: it may be remembered by an older name');
+  assert.equal(pickConnected(collar, [buds, other], new Set(['EE:02'])), null);
+  const withService = { deviceId: 'EE:06', name: 'Something', uuids: ['6BA1B218-15A8-461F-9FA8-5DCAE273EAFD'] };
+  assert.equal(pickConnected(collar, [buds, other, withService]), 'EE:06', 'one the phone knows offers the service, before a guess');
+  assert.equal(pickConnected(collar, [buds, other, withService, ours]), 'EE:03', 'the right name first');
   assert.equal(pickConnected(collar, [{ deviceId: 'EE:04' }]), null);
   assert.equal(pickConnected(collar, [other], new Set(), true), 'EE:02', 'iOS lists only Meshtastic devices: worth a try');
   assert.equal(pickConnected(collar, [other], new Set(['EE:02']), true), null, 'not one that proved to be another node');

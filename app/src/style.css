@@ -110,3 +110,12 @@ details .primary { width: 100%; }
          border-radius: 12px; background: #1c1d1f; color: #fff; box-shadow: var(--shadow); text-align: center; }
 .about { margin: 0; text-align: center; font-size: 12px; }
 .about a { color: inherit; }
+button.link { background: none; border: 0; padding: 0; min-height: 0; color: var(--accent); font-size: inherit; text-decoration: underline; }
+
+.logtools { display: flex; gap: 8px; padding: 12px 16px 8px; }
+.logtools button { flex: 1; min-width: 0; }
+.logtools button.quiet { flex: 0 0 auto; }
+.lognote { margin: 0; padding: 0 16px 8px; }
+.logtext { flex: 1; min-height: 0; overflow: auto; -webkit-overflow-scrolling: touch; margin: 0; padding: 10px 16px calc(12px + env(safe-area-inset-bottom));
+           border-top: 1px solid var(--line); background: var(--panel); font: 11.5px/1.45 ui-monospace, Menlo, Consolas, monospace;
+           white-space: pre-wrap; word-break: break-word; -webkit-user-select: text; user-select: text; }

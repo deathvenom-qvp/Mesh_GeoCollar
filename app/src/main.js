@@ -5,6 +5,9 @@
 import L from 'leaflet';
 import { App } from '@capacitor/app';
 import { Capacitor } from '@capacitor/core';
+import { Directory, Encoding, Filesystem } from '@capacitor/filesystem';
+import { Preferences } from '@capacitor/preferences';
+import { Share } from '@capacitor/share';
 
 import { Action, State } from './applink.js';
 import { bleTransport } from './ble.js';
@@ -16,12 +19,17 @@ import { bearingDeg, compass, distanceM, formatAge, formatDistance } from './geo
 import { parsePairingCode } from './pairing.js';
 import { startScanner } from './scanner.js';
 import { loadCollars, saveCollars } from './store.js';
+import { clearLog, describe, flushLog, log, logLines, onLog, setLogSaver } from './log.js';
 
 const $ = id => document.getElementById(id);
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const native = Capacitor.isNativePlatform();
 const platform = Capacitor.getPlatform();
 const imperial = /^en-(US|LR|MM)\b/i.test(navigator.language || '');
+// eslint-disable-next-line no-undef
+const BUILD = typeof __GEOCOLLAR_BUILD__ !== 'undefined' ? __GEOCOLLAR_BUILD__ : {};
+const BUILD_TEXT = BUILD.number ? `Build ${BUILD.number} (${BUILD.commit}${BUILD.branch && BUILD.branch !== 'main' ? `, ${BUILD.branch}` : ''})` : 'Local build';
+const LOG_KEY = 'geocollar.log.v1';
 
 const STATE_TEXT = {
   [State.NO_FENCE]: 'No fence set',
@@ -50,6 +58,7 @@ let ticker = 0;
 let lastSaved = 0;
 let toastTimer = 0;
 let map, collarMark, meMark, line, follow = true, placed = false;
+let logReturn = 'home'; // the screen the debug log goes back to
 
 const nameOf = c => c.dog || 'the collar';
 const titleOf = c => c.dog || `Collar ${c.node}`;
@@ -191,6 +200,8 @@ function transportFor(c) {
 }
 
 function openCollar(c) {
+  log('app', `open collar ${c.node}: Bluetooth name "${c.bleName || ''}_${c.node.slice(-4)}", dog "${c.dog || ''}"`
+    + `${c.deviceId ? `, last address ${c.deviceId}` : ''}${c.demo ? ', demo' : c.sim ? ', simulated' : ''}`);
   current = c;
   status = c.last || null;
   live = false;
@@ -219,6 +230,7 @@ function openCollar(c) {
 
 async function closeCollar() {
   if (!current) return;
+  log('app', `close collar ${current.node}`);
   const old = link;
   link = null;
   current = null;
@@ -422,8 +434,107 @@ async function send(action, intensity, durationMs, done) {
     await link.command(action, intensity, durationMs);
     toast(done);
   } catch (e) {
+    log('app', `command ${action} failed:`, describe(e));
     toast(e && e.message ? e.message : 'That did not work.');
   }
+}
+
+// ---- The debug log ----
+
+function logHeader() {
+  const out = ['GeoCollar debug log',
+    `App: ${BUILD_TEXT}${BUILD.date ? `, built ${BUILD.date}` : ''}`,
+    `Platform: ${platform}, ${navigator.userAgent}`,
+    `Saved: ${new Date().toString()}`];
+  for (const c of collars) {
+    out.push(`Collar: node ${c.node}, Bluetooth name "${c.bleName || ''}_${c.node.slice(-4)}", dog "${c.dog || ''}"`
+      + `${c.deviceId ? `, address ${c.deviceId}` : ''}${c.demo ? ', demo' : c.sim ? ', simulated' : ''}`
+      + `${c.last ? `, last heard ${new Date(c.last.at).toISOString()}` : ', never heard'}`);
+  }
+  if (current && link) out.push(`On screen: ${current.node}, link ${link.state}${link.detail ? `: ${link.detail}` : ''}`);
+  return out.join('\n');
+}
+
+const logFileText = () => `${logHeader()}\n${'-'.repeat(60)}\n${logLines().join('\n')}\n`;
+
+function openLog() {
+  if (screen !== 'logScreen') logReturn = screen;
+  show('logScreen');
+  const pre = $('logText');
+  pre.textContent = logLines().join('\n');
+  pre.scrollTop = pre.scrollHeight;
+}
+
+function closeLog() {
+  show(logReturn);
+  if (logReturn === 'home') renderHome();
+  else render();
+}
+
+onLog(line => {
+  if (screen !== 'logScreen') return;
+  const pre = $('logText');
+  if (line === null) { pre.textContent = ''; return; }
+  const atEnd = pre.scrollHeight - pre.scrollTop - pre.clientHeight < 40;
+  pre.append((pre.textContent ? '\n' : '') + line);
+  if (atEnd) pre.scrollTop = pre.scrollHeight;
+});
+
+async function shareLog() {
+  flushLog();
+  const text = logFileText();
+  const d = new Date();
+  const p2 = n => String(n).padStart(2, '0');
+  const name = `geocollar-log-${d.getFullYear()}${p2(d.getMonth() + 1)}${p2(d.getDate())}-${p2(d.getHours())}${p2(d.getMinutes())}.txt`;
+  if (!native) {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([text], { type: 'text/plain' }));
+    a.download = name;
+    document.body.append(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+    return;
+  }
+  try {
+    const { uri } = await Filesystem.writeFile({ path: name, data: text, directory: Directory.Cache, encoding: Encoding.UTF8 });
+    await Share.share({ title: 'GeoCollar debug log', dialogTitle: 'Save or send the debug log', files: [uri] });
+  } catch (e) {
+    if (/cancel/i.test(describe(e))) return;
+    log('app', 'sharing the log failed:', describe(e));
+    toast('Could not share the file. Use Copy instead.');
+  }
+}
+
+async function copyLog() {
+  const text = logFileText();
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch {
+    const t = document.createElement('textarea');
+    t.value = text;
+    t.setAttribute('readonly', '');
+    t.style.position = 'fixed';
+    t.style.opacity = '0';
+    document.body.append(t);
+    t.select();
+    const ok = document.execCommand && document.execCommand('copy');
+    t.remove();
+    if (!ok) { toast('Could not copy. Use Save or share instead.'); return; }
+  }
+  toast('The log is copied. Paste it into a message.');
+}
+
+async function startLog() {
+  let saved = [];
+  try {
+    const { value } = await Preferences.get({ key: LOG_KEY });
+    if (value) saved = JSON.parse(value);
+  } catch { /* none yet */ }
+  setLogSaver(all => Preferences.set({ key: LOG_KEY, value: JSON.stringify(all.slice(-1500)) }), saved);
+  log('app', `start: ${BUILD_TEXT}${BUILD.date ? `, built ${BUILD.date}` : ''}, ${platform}, ${navigator.userAgent}`);
+  window.addEventListener('error', e => log('app', 'error:', describe(e.error || e.message)));
+  window.addEventListener('unhandledrejection', e => log('app', 'unhandled:', describe(e.reason)));
 }
 
 $('add').addEventListener('click', openAdd);
@@ -438,6 +549,13 @@ $('corrections').addEventListener('click', () => {
   if (!confirm(`Pause corrections? ${current.dog || 'The dog'} can then cross the fence line without a beep or vibration, until you resume them.`)) return undefined;
   return send(Action.CORRECTIONS_OFF, 0, 0, 'Corrections are paused.');
 });
+$('openLog').addEventListener('click', openLog);
+$('collarLog').addEventListener('click', openLog);
+$('logShare').addEventListener('click', shareLog);
+$('logCopy').addEventListener('click', copyLog);
+$('logClear').addEventListener('click', () => {
+  if (confirm('Clear the debug log?')) { clearLog(); log('app', `log cleared; ${BUILD_TEXT}, ${platform}`); }
+});
 $('recenter').addEventListener('click', () => { follow = true; placed = false; render(); });
 $('remove').addEventListener('click', async () => {
   const c = current;
@@ -451,6 +569,7 @@ $('remove').addEventListener('click', async () => {
 });
 
 async function back() {
+  if (screen === 'logScreen') { closeLog(); return; }
   if (screen === 'addScreen') closeAdd();
   if (screen === 'collarScreen') await closeCollar();
   goHome();
@@ -463,9 +582,15 @@ function openUrl(url) {
 }
 
 async function main() {
+  $('build').textContent = BUILD_TEXT;
+  await startLog();
   collars = await loadCollars();
   goHome();
   if (native) {
+    App.addListener('appStateChange', st => {
+      log('app', st.isActive ? 'came to the front' : 'went to the background');
+      if (!st.isActive) flushLog();
+    });
     App.addListener('appUrlOpen', e => openUrl(e.url));
     App.addListener('backButton', () => { if (screen === 'home') App.exitApp(); else back(); });
     const launch = await App.getLaunchUrl().catch(() => null);

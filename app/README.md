@@ -105,6 +105,10 @@ simulated collar has no Bluetooth to connect to.
 - The collar takes one phone connection at a time, and the Meshtastic app and this one would
   read the same messages. If the Meshtastic app is connected to the collar, disconnect it there
   first.
+- When another app or the phone itself holds the collar's Bluetooth link, the link stays up
+  between this app's attempts, and the collar drops a write that repeats the one before it. So
+  the app sends a heartbeat with a fresh random number before each "want config"; without it,
+  every attempt after a failed one went unanswered.
 - Map tiles come from OpenStreetMap and Esri and need internet. Without it the map is blank, and
   the distance, the direction and **Open in maps** still work.
 
@@ -122,6 +126,18 @@ The message layouts are in [docs/protocol.md](../docs/protocol.md#the-companion-
   backup. Anyone who can unlock the phone can use the app.
 - Messages between the app and the collar are signed, not encrypted on their own: the Bluetooth
   link's encryption is what hides the position from eavesdroppers.
+
+## When it does not connect: the debug log
+
+The app keeps a log of what it does over Bluetooth: the devices the phone is connected to and
+the ones a scan sees, which one it picks, pairing, connecting, the collar's Bluetooth services,
+and every Meshtastic message in and out (kind and size only), with times. It keeps the last few
+thousand lines, including the previous run, and holds no keys or PINs.
+
+Open it with **Debug log** at the bottom of the first screen or on a collar's screen. **Save or
+share** hands it to the phone's share sheet as a `.txt` file (save it to Files or Drive, or send
+it); **Copy** puts it on the clipboard. The log's first lines and the first screen show the build
+(the GitHub run number and commit), so it is clear which build was running.
 
 ## Build it
 
@@ -150,6 +166,7 @@ browser only the demo collar connects.
 | `src/pairing.js` | Reads the base station's pairing code. |
 | `src/demo.js`, `src/fakenode.js` | The demo collar: the collar's half of the protocol in JavaScript behind a pretend Meshtastic node. |
 | `src/main.js`, `src/index.html`, `src/style.css` | The screens. |
+| `src/log.js` | The debug log. |
 | `test/` | `node --test`. The link is tested against the demo collar and against the firmware's real session code. |
 | `android/`, `ios/` | The native projects Capacitor wraps the web part in: permissions, icons, the `geocollar://` link. |
 | `tools/make_icons.py` | Draws the icon and launch screen into both projects. |

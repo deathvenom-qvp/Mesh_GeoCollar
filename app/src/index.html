@@ -31,7 +31,8 @@
     <button id="add" class="primary">Add a collar</button>
     <button id="demo" class="quiet">Try a demo collar</button>
     <p class="about muted">Free software, GPL-3.0-or-later. Source and licences:
-      <a href="https://github.com/deathvenom-qvp/Mesh_GeoCollar" target="_blank" rel="noopener">github.com/deathvenom-qvp/Mesh_GeoCollar</a></p>
+      <a href="https://github.com/deathvenom-qvp/Mesh_GeoCollar" target="_blank" rel="noopener">github.com/deathvenom-qvp/Mesh_GeoCollar</a>
+      <br><span id="build"></span> · <button id="openLog" class="link">Debug log</button></p>
   </footer>
 </div>
 
@@ -85,9 +86,26 @@
     </div>
     <div class="more">
       <a id="openMaps" target="_blank" rel="noopener">Open in maps</a>
+      <button id="collarLog" class="quiet">Debug log</button>
       <button id="remove" class="quiet danger">Remove from this phone</button>
     </div>
   </section>
+</div>
+
+<div id="logScreen" class="screen" hidden>
+  <header class="bar">
+    <button class="back" data-back aria-label="Back">&#8249;</button>
+    <h1>Debug log</h1>
+  </header>
+  <div class="logtools">
+    <button id="logShare" class="primary">Save or share</button>
+    <button id="logCopy">Copy</button>
+    <button id="logClear" class="quiet danger">Clear</button>
+  </div>
+  <p class="lognote muted">What the app did over Bluetooth, with times, including the last run. It holds no keys or
+    PINs. If a collar does not connect, leave its screen open for a minute, then save or share this and send it
+    with what you saw.</p>
+  <pre id="logText" class="logtext"></pre>
 </div>
 
 <div id="toast" class="toast" role="status" hidden></div>
