@@ -161,6 +161,18 @@ it shows as the dog in the Meshtastic app and on other nodes. If the collar is o
 gets the change when it next reports. Both need collar firmware from 0.15.0 on; older collars keep
 reporting every 10 minutes and keep their Meshtastic name.
 
+The same form sets **GPS fix inside the fence**: how often the collar takes a fix while the dog is
+inside the fence and away from the home mode anchor, from 0 (the GPS always on, a fix every
+second) to every 30 seconds. 3 seconds unless you change it. The collar fixes that often
+everywhere inside, near a line or not, so a dog running at 6 m/s covers up to 18 m between fixes
+at 3 s and 180 m at 30 s: keep it short unless the bands are wide. At 10 seconds or less the GPS
+never switches off, which uses the most battery; above 10 s it sleeps between fixes, which saves
+something only if it gets its fix back quickly after waking (see
+[Battery life](../docs/hardware.md#battery-life)). Past a line the collar fixes at least every
+5 seconds whatever this says; lost mode and home mode keep their own pace. Needs collar firmware
+0.19.6 or later; older collars ignore it and pace their GPS themselves (every 5 seconds near the
+line, up to a minute deep inside).
+
 ## When a collar has no GPS fix
 
 Indoors, under a metal roof or in a car a collar can lose its GPS fix. It then cannot tell where

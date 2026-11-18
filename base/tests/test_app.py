@@ -72,10 +72,11 @@ class FakeLink:
 
     # The sequence numbers on Config and Owner messages are kept apart from `sent` (they come
     # from the clock), in config_seqs and owner_seqs.
-    def send_config(self, node_id, report_s, seq=0, anchor=None):
+    def send_config(self, node_id, report_s, seq=0, anchor=None, gps_inside_s=None):
         self.sent.append((node_id, protocol.encode_config(report_s)))
         self.config_seqs = getattr(self, "config_seqs", []) + [seq]
         self.anchors = getattr(self, "anchors", []) + [anchor]
+        self.gps_inside = getattr(self, "gps_inside", []) + [gps_inside_s]
 
     def send_app_keys(self, node_id, keys, seq):
         self.sent.append((node_id, protocol.encode_app_keys(keys, seq)))
@@ -225,9 +226,11 @@ def test_collar_missing_owner_info_gets_it_on_next_report(tmp_path):
     # The link hands reports to the app; this is what MeshLink calls.
     status = {"state": "INSIDE", "lat": 40.0, "lon": -75.0, "beacon_active": False, "pki": True, "sender_key": "a2V5"}
     client.app.state.on_status("!a1b2c3d4", status)
-    assert link.sent == [("!a1b2c3d4", protocol.encode_owner("Rex", "", ""))]
+    # With the settings: the default GPS interval inside the fences, 3 s.
+    assert link.sent == [("!a1b2c3d4", protocol.encode_owner("Rex", "", "")), ("!a1b2c3d4", protocol.encode_config(0))]
+    assert link.gps_inside == [protocol.DEFAULT_GPS_INSIDE_S]
     client.app.state.on_status("!a1b2c3d4", status)
-    assert len(link.sent) == 1  # only once
+    assert len(link.sent) == 2  # only once
 
 
 def test_shock_switch_needs_confirmation(tmp_path):
@@ -376,6 +379,18 @@ def test_rename_and_report_interval(tmp_path):
     assert link.sent == [("!a1b2c3d4", protocol.encode_owner("Biscuit", "", ""))]
     for bad in (10, 7200):
         assert client.patch("/api/collars/!a1b2c3d4", json={"report_s": bad}).status_code == 400
+
+    # The GPS interval inside the fences: 3 s until the owner picks another, 0 (always on) to 30.
+    assert client.get("/api/collars").json()["!a1b2c3d4"]["gps_inside_s"] == 3
+    for bad in (-1, 31):
+        assert client.patch("/api/collars/!a1b2c3d4", json={"gps_inside_s": bad}).status_code == 400
+    link.sent.clear()
+    r = client.patch("/api/collars/!a1b2c3d4", json={"gps_inside_s": 0}).json()
+    assert r["gps_inside_s"] == 0 and r["config_sent"] and link.gps_inside[-1] == 0
+    assert link.sent == [("!a1b2c3d4", protocol.encode_config(300))]
+    link.sent.clear()
+    client.patch("/api/collars/!a1b2c3d4", json={"gps_inside_s": 0})  # the same again: nothing goes
+    assert link.sent == []
     assert client.patch("/api/collars/!a1b2c3d4", json={"name": " "}).status_code == 400
 
     # Not sent while the radio is away: it goes with the collar's next report.
@@ -386,7 +401,7 @@ def test_rename_and_report_interval(tmp_path):
     link.sent.clear()
     client.app.state.on_status("!a1b2c3d4", {"state": "INSIDE", "pki": True, "sender_key": "a2V5"})
     assert ("!a1b2c3d4", protocol.encode_config(60)) in link.sent
-    assert client.get("/api/collars").json()["!a1b2c3d4"]["config_sent"] == 60
+    assert client.get("/api/collars").json()["!a1b2c3d4"]["config_sent"] == [60, 0, "", -75, 0]
 
 
 def test_a_collar_that_does_not_trust_the_base_is_not_sent_anything(tmp_path):
@@ -410,9 +425,10 @@ def test_owner_and_config_are_numbered_for_firmware_that_reads_numbers(tmp_path)
     client.app.state.on_status("!a1b2c3d4", GOOD)
     client.patch("/api/collars/!a1b2c3d4", json={"name": "Biscuit"})
     assert link.owner_seqs == [0, 0]
-    # The report interval is always numbered: older firmware skips the number.
+    # The settings are always numbered: older firmware skips the number. The first report brought
+    # the default GPS interval inside the fences; the new report interval goes again.
     client.patch("/api/collars/!a1b2c3d4", json={"report_s": 300})
-    assert len(link.config_seqs) == 1 and link.config_seqs[0] > 1_700_000_000
+    assert len(link.config_seqs) == 2 and all(s > 1_700_000_000 for s in link.config_seqs)
 
     # The collar is updated and says it reads numbers: the name goes again, numbered this time, so
     # the collar stops accepting an unnumbered (replayable) one. The interval already had a number.
@@ -839,10 +855,11 @@ def test_home_anchor_is_sent_to_collars_and_checked(tmp_path):
     client, link = make(tmp_path)
     client.post("/api/collars", json={"node_id": "!a1b2c3d4", "name": "Rex"})
     client.put("/api/collars/!a1b2c3d4/fences", json=FENCE)
-    # Nothing set yet: home mode is off and no settings message goes to the collar.
+    # Nothing set yet: home mode is off. The settings still go, for the GPS interval inside the
+    # fences, with an anchor of kind NONE (home mode off) in front of it.
     assert client.get("/api/home-anchor").json()["kind"] == "off"
     client.app.state.on_status("!a1b2c3d4", {**GOOD, "numbered": True})
-    assert not getattr(link, "anchors", [])
+    assert link.anchors == [protocol.HomeAnchor()] and link.gps_inside == [protocol.DEFAULT_GPS_INSIDE_S]
 
     bad = [{"kind": "beacon", "address": "nope"}, {"kind": "moon"}, {"kind": "base", "rssi": -20},
            {"kind": "base", "lat": 40.0}, {"kind": "base", "gps_restart_s": 5}]

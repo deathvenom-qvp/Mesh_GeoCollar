@@ -127,6 +127,16 @@ bool sameFences(const FenceSet &a, const FenceSet &b)
     return true;
 }
 
+bool setGpsInsideSecs(Settings &s, uint8_t secs)
+{
+    const uint16_t v = secs ? secs : 1; // 1 s: Meshtastic keeps the GPS on and reports every second
+    if (s.gpsFastSecs == v && s.gpsSlowSecs == v)
+        return false;
+    s.gpsFastSecs = v;
+    s.gpsSlowSecs = v;
+    return true;
+}
+
 void sanitizeSettings(Settings &s)
 {
     const Settings d; // the defaults, for values that make no sense at all
@@ -379,8 +389,9 @@ uint32_t gpsIntervalSecs(const Settings &s, CollarState state, float clearanceM,
     const uint32_t slow = s.gpsSlowSecs > fast ? s.gpsSlowSecs : fast;
     switch (state) {
     case CollarState::Warning:
-    case CollarState::Outside:
         return fast;
+    case CollarState::Outside:
+        return fast < kOutsideGpsSecs ? fast : kOutsideGpsSecs;
     default:
         break;
     }

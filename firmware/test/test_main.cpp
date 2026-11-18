@@ -674,7 +674,9 @@ static void testProtocol()
         CollarConfig b;
         CHECK(decodeConfig(buf, n, b, seq) && seq == 77 && b.reportS == 0 && b.hasAnchor);
         CHECK(b.anchor.kind == AnchorKind::Beacon && memcmp(b.anchor.address, mac, 6) == 0 && b.anchor.rssiDbm == -72);
-        CHECK(decodeConfig(buf, n + 3, b, seq) && b.hasAnchor); // later fields after it
+        CHECK(!b.hasGpsInside); // a base before 0.19.6: the collar keeps its own GPS pacing
+        buf[n] = 3;
+        CHECK(decodeConfig(buf, n + 3, b, seq) && b.hasAnchor && b.hasGpsInside && b.gpsInsideS == 3); // later fields after it
         CHECK(encodeConfig(buf, sizeof(buf), a, 0) == 4);      // no number, no anchor
         n = encodeConfig(buf, sizeof(buf), a, 77);
         buf[8] = 3; // no such kind
@@ -687,6 +689,27 @@ static void testProtocol()
         CollarConfig plain;
         n = encodeConfig(buf, sizeof(buf), plain, 9);
         CHECK(decodeConfig(buf, n, b, seq) && !b.hasAnchor); // a base without home mode
+
+        // The GPS interval inside the fences, after the anchor (0.19.6 on). Golden bytes shared
+        // with the Python tests: the base radio at -75 dBm, interval 0, number 77, every 3 s.
+        CollarConfig g;
+        g.hasAnchor = true;
+        g.anchor.kind = AnchorKind::BaseRadio;
+        g.anchor.rssiDbm = -75;
+        g.hasGpsInside = true;
+        g.gpsInsideS = 3;
+        n = encodeConfig(buf, sizeof(buf), g, 77);
+        CHECK(n == 2 + 2 + 4 + kAnchorLength + 1);
+        CHECK(hex(buf, n) == "020700004d000000" "02000000000000b5" "03");
+        CHECK(decodeConfig(buf, n, b, seq) && b.hasGpsInside && b.gpsInsideS == 3 && b.anchor.rssiDbm == -75);
+        buf[n - 1] = 0; // always on
+        CHECK(decodeConfig(buf, n, b, seq) && b.hasGpsInside && b.gpsInsideS == 0);
+        buf[n - 1] = kMaxGpsInsideS;
+        CHECK(decodeConfig(buf, n, b, seq) && b.gpsInsideS == kMaxGpsInsideS);
+        buf[n - 1] = kMaxGpsInsideS + 1; // out of range: the whole message is refused
+        CHECK(!decodeConfig(buf, n, b, seq));
+        g.hasAnchor = false; // the interval only travels after the anchor
+        CHECK(encodeConfig(buf, sizeof(buf), g, 77) == 8);
     }
     n = encodeConfig(buf, sizeof(buf), cfg, 5);
     CHECK(!decodeConfig(buf, n, cfg2, seq)); // below the shortest interval
@@ -1170,6 +1193,25 @@ static void testBaseLink()
     s.gpsPacing = true;
     s.gpsLostSecs = 400;
     CHECK(gpsIntervalSecs(s, CollarState::Lost, -50, 10, false, false) == 400);
+    // The owner's GPS interval inside the fences: that often everywhere inside, near a line or not.
+    Settings in;
+    CHECK(setGpsInsideSecs(in, 3) && !setGpsInsideSecs(in, 3));
+    CHECK(gpsIntervalSecs(in, CollarState::Inside, 1000, 10) == 3);
+    CHECK(gpsIntervalSecs(in, CollarState::Inside, 12, 10) == 3);
+    CHECK(gpsIntervalSecs(in, CollarState::Warning, 5, 10) == 3);
+    CHECK(gpsIntervalSecs(in, CollarState::Outside, -5, 10) == 3);
+    CHECK(gpsIntervalSecs(in, CollarState::Lost, -50, 10) == 15); // lost mode keeps its own pace
+    CHECK(gpsSettingSecs(gpsIntervalSecs(in, CollarState::Inside, 1000, 10)) == 3); // GPS always on
+    setGpsInsideSecs(in, 0); // always on: a fix every second
+    CHECK(in.gpsFastSecs == 1 && gpsIntervalSecs(in, CollarState::Inside, 1000, 10) == 1);
+    setGpsInsideSecs(in, 30);
+    CHECK(gpsIntervalSecs(in, CollarState::Inside, 1000, 10) == 30);
+    CHECK(gpsIntervalSecs(in, CollarState::Warning, 5, 10) == 30);
+    CHECK(gpsIntervalSecs(in, CollarState::Outside, -5, 10) == kOutsideGpsSecs); // past the line: at least every 5 s
+    Settings saved = in;
+    sanitizeSettings(saved); // what a restart reads back keeps it
+    CHECK(saved.gpsFastSecs == 30 && saved.gpsSlowSecs == 30);
+
     // What Meshtastic is given, with its hold after each lock, for a fix every 5 minutes.
     CHECK(gpsSettingSecs(kOutOfReachGpsSecs) == kOutOfReachGpsSecs - 20);
 }

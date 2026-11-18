@@ -104,7 +104,9 @@ struct Settings {
     uint16_t maxPdopX100 = 500;     // ignore fixes worse than PDOP 5.0
     uint8_t minSats = 5;
     uint16_t correctionMs = 1000;   // how long each beep/vibrate/shock lasts
-    // GPS pacing: fix often near the line, rarely deep inside, to save battery.
+    // GPS pacing: fix often near the line, rarely deep inside, to save battery. The owner's GPS
+    // interval inside the fences from the base (0.19.6 on, setGpsInsideSecs) sets both to one
+    // value, so the collar fixes that often everywhere inside.
     bool gpsPacing = true;
     uint16_t gpsFastSecs = 5;       // at or near the line (10 s or less keeps the GPS always on)
     uint16_t gpsSlowSecs = 60;      // deep inside
@@ -115,6 +117,15 @@ struct Settings {
 /// Bring settings read back from flash into the ranges the firmware relies on (levels at most 99,
 /// counts and intervals at least 1), so a damaged or foreign file cannot make it misbehave.
 void sanitizeSettings(Settings &s);
+
+/// The owner's GPS interval inside the fences: a fix every `secs` seconds wherever the dog is
+/// inside, near a line or not (0 = the GPS always on, reporting every second). Returns true if
+/// the settings changed.
+bool setGpsInsideSecs(Settings &s, uint8_t secs);
+
+/// Past a line (not yet confirmed lost) the collar fixes at least this often, whatever the
+/// interval inside, so that a dog that got out is confirmed lost, or seen back inside, quickly.
+constexpr uint32_t kOutsideGpsSecs = 5;
 
 struct Fix {
     int32_t latI;

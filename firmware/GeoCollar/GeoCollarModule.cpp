@@ -650,6 +650,11 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
                 lastConfigSeq_ = seq;
                 if (c.hasAnchor)
                     setAnchor(c.anchor);
+                if (c.hasGpsInside && setGpsInsideSecs(engine_.settings(), c.gpsInsideS)) {
+                    save = true;
+                    LOG_INFO("GeoCollar: GPS inside the fences every %u s%s", (unsigned)c.gpsInsideS,
+                             c.gpsInsideS ? "" : " (always on)");
+                }
                 LOG_INFO("GeoCollar: report every %u s", (unsigned)(reportS_ ? reportS_ : GEOCOLLAR_STATUS_INTERVAL_MS / 1000));
             }
         } else if (type == proto::MsgType::AppKeys) {

@@ -59,6 +59,7 @@ class CollarIn(BaseModel):
 class CollarPatch(BaseModel):
     name: str | None = None
     report_s: int | None = None  # how often the collar reports, seconds
+    gps_inside_s: int | None = None  # GPS fix interval inside the fences, seconds (0: always on)
 
 
 class ContactIn(BaseModel):
@@ -350,24 +351,25 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
             return float(a["lat"]), float(a["lon"])
         return base_home()
 
+    def gps_inside_for(c: dict) -> int:
+        """How often the collar takes a GPS fix inside the fences: the owner's choice, else 3 s."""
+        v = c.get("gps_inside_s")
+        return protocol.DEFAULT_GPS_INSIDE_S if v is None else int(v)
+
     def config_for(node_id: str):
-        """What the collar should have been sent: its report interval and, once the owner has set
-        one (on or off), the home anchor. None: nothing to send."""
-        report_s = (store.collar(node_id) or {}).get("report_s")
-        a = store.setting("home_anchor")
-        if not a:
-            return report_s or None  # a bare number, as bases before 0.19.2 stored it
-        anchor = home_anchor()
-        return [report_s or 0, int(anchor.kind), anchor.address, anchor.rssi]
+        """What the collar should have been sent: its report interval, the home anchor (kind NONE
+        until the owner turns home mode on) and its GPS interval inside the fences."""
+        c = store.collar(node_id) or {}
+        anchor = home_anchor() or protocol.HomeAnchor()
+        return [c.get("report_s") or 0, int(anchor.kind), anchor.address, anchor.rssi, gps_inside_for(c)]
 
     def push_config(node_id: str) -> bool:
-        """The collar's report interval, if the owner set one, and the home anchor."""
+        """The collar's report interval, if the owner set one, the home anchor and its GPS interval
+        inside the fences."""
         c = store.collar(node_id) or {}
         want = config_for(node_id)
-        if want is None:
-            return False
         report_s = c.get("report_s") or 0
-        anchor = home_anchor()
+        anchor = home_anchor() or protocol.HomeAnchor()
         seq = 0
         if node_id in sim:
             if report_s:
@@ -376,7 +378,7 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
         elif link.connected:
             seq = store.next_command_seq()  # always numbered: firmware 0.15 skips the number
             try:
-                link.send_config(node_id, report_s, seq, anchor)
+                link.send_config(node_id, report_s, seq, anchor, gps_inside_for(c))
             except Exception as e:  # noqa: BLE001 - retried on the collar's next report
                 log.warning("could not send the collar settings to %s: %s", node_id, e)
                 return False
@@ -402,6 +404,7 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
         if c is None:
             return None
         c = dict(c)
+        c["gps_inside_s"] = gps_inside_for(c)
         if "apps" in c:
             c["apps_synced"] = apps_synced(c)
             c["apps"] = public_apps(c)
@@ -758,13 +761,16 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
     @app.patch("/api/collars/{node_id}")
     def update_collar(node_id: str, body: CollarPatch):
         """The collar's name is the dog's name: the lost beacon says it, and the collar takes it as
-        its Meshtastic name. report_s is how often the collar reports."""
+        its Meshtastic name. report_s is how often the collar reports, gps_inside_s how often it
+        takes a GPS fix inside the fences."""
         require(node_id)
         out: dict = {}
         if body.report_s is not None:
             if not protocol.MIN_REPORT_S <= body.report_s <= protocol.MAX_REPORT_S:
                 raise HTTPException(400, f"the report interval is {protocol.MIN_REPORT_S} to "
                                          f"{protocol.MAX_REPORT_S} seconds")
+        if body.gps_inside_s is not None and not 0 <= body.gps_inside_s <= protocol.MAX_GPS_INSIDE_S:
+            raise HTTPException(400, f"the GPS interval inside the fences is 0 to {protocol.MAX_GPS_INSIDE_S} seconds")
         if body.name is not None:
             try:
                 name = clean_name(body.name)
@@ -776,6 +782,9 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
             out["owner_sent"] = push_owner(node_id)
         if body.report_s is not None:
             store.set_collar_info(node_id, "report_s", body.report_s)
+        if body.gps_inside_s is not None:
+            store.set_collar_info(node_id, "gps_inside_s", body.gps_inside_s)
+        if body.report_s is not None or body.gps_inside_s is not None:
             if (store.collar(node_id) or {}).get("config_sent") != config_for(node_id):
                 out["config_sent"] = push_config(node_id)
         return {**(public_collar(store.collar(node_id)) or {}), **out}

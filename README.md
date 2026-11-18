@@ -54,12 +54,14 @@ least a second apart; if the two fixes are in different bands, the milder one co
 
 Fixes with poor PDOP or few satellites are ignored entirely.
 
-The collar also paces its own GPS: every 5 s near the line, slowing to once a minute deep inside
-(the time a running dog would need to reach the outermost band), and every 15 s while lost. A
-lost dog's collar that has had no answer from the base for 2 minutes (directly or through the
-mesh) and has no phone app connected takes a fix only every 5 minutes, since nothing can pass
-the position on; it goes back to the usual rate as soon as the base answers. Inside the fences
-the base makes no difference: the collar enforces them on its own.
+Inside the fence the collar takes a GPS fix every 3 s, or as often as the owner sets per collar in
+the base app (0 for always on, up to every 30 s). Just past a line it fixes at least every 5 s,
+and while lost every 15 s. A collar the base has not sent this setting to paces itself: every
+5 s near the line, slowing to once a minute deep inside. A lost dog's collar that has had no
+answer from the base for 2 minutes (directly or through the mesh) and has no phone app connected
+takes a fix only every 5 minutes, since nothing can pass the position on; it goes back to the
+usual rate as soon as the base answers. Inside the fences the base makes no difference: the
+collar enforces them on its own.
 
 ## Repository layout
 
@@ -171,9 +173,9 @@ any hardware.
 - Not yet run on hardware: the data-line tap, the RMT timing and pairing need bench testing.
 - The lost beacon's Bluetooth advertising is written against Meshtastic's BLE stack and
   untested on hardware.
-- GPS pacing is written and compiles but is untested on hardware, and its settings (5 s, 60 s,
-  15 s, 6 m/s) can't be changed from the base app yet. On the Wireless Tracker it changes how
-  often the collar takes a fix, not whether the GPS chip is powered (see `docs/hardware.md`).
+- GPS pacing is written and compiles but is untested on hardware. Only the interval inside the
+  fences can be changed from the base app; the lost-mode rate (15 s) can't yet. On the Wireless
+  Tracker the GPS is powered down between fixes only above 10 s (see `docs/hardware.md`).
 - The firmware changes in 0.16.0 (fixes taken straight from the GPS, the "no GPS fix" report,
   numbered settings messages, the correction timing) pass the PC tests and compile, and are
   untested on hardware.
