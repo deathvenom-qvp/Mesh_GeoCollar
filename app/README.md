@@ -97,8 +97,14 @@ simulated collar has no Bluetooth to connect to.
 - The key is 16 random bytes, different for every phone and every collar. The base shows it
   once, in the QR code. Removing the phone on the base removes the key from the collar.
 - The app finds the collar by its Bluetooth name: the Meshtastic name (`REX_c3d4`) or, while the
-  dog is lost, the beacon's name (`Rex is lost 5551234567`). After connecting it checks the
-  collar's node number, and the collar checks the app's key.
+  dog is lost, the beacon's name (`Rex is lost 5551234567`). A collar the phone is already
+  connected to (from the phone's Bluetooth settings, the Meshtastic app, or an earlier run) stops
+  advertising, so the app also looks among the phone's connected devices and uses that
+  connection. After connecting it checks the collar's node number, and the collar checks the
+  app's key.
+- The collar takes one phone connection at a time, and the Meshtastic app and this one would
+  read the same messages. If the Meshtastic app is connected to the collar, disconnect it there
+  first.
 - Map tiles come from OpenStreetMap and Esri and need internet. Without it the map is blank, and
   the distance, the direction and **Open in maps** still work.
 
@@ -221,7 +227,7 @@ Tested, on a PC:
 
 Not tested, because it needs a collar and a phone:
 
-- Everything Bluetooth: finding the collar by name, pairing with its PIN on Android and on iOS,
+- Everything Bluetooth: finding the collar by name or among the connected devices, pairing with its PIN on Android and on iOS,
   and Meshtastic's phone API over a real connection. `src/ble.js` has never run.
 - The collar's side on hardware: answering a phone through Meshtastic's phone API, and staying
   connectable in the quiet half of the lost beacon.

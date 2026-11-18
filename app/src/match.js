@@ -21,3 +21,16 @@ export function matchesCollar(collar, { deviceId, names = [] }) {
   }
   return false;
 }
+
+/// Which of the devices the phone is already connected to is our collar? A collar that is
+/// connected stops advertising, so a scan never finds it: the phone's own list of connected
+/// devices is the only way to see it. `meshtasticOnly` is true when that list holds only devices
+/// with Meshtastic's service (iOS filters it so); then any of them is worth a try, because the
+/// app checks the node number once connected. Android lists every connected device, earbuds and
+/// watches too, so there the name has to match.
+export function pickConnected(collar, devices, rejected = new Set(), meshtasticOnly = false) {
+  const open = (devices || []).filter(d => d && d.deviceId && !rejected.has(d.deviceId));
+  const named = open.find(d => matchesCollar(collar, { deviceId: d.deviceId, names: [d.name] }));
+  if (named) return named.deviceId;
+  return meshtasticOnly && open.length ? open[0].deviceId : null;
+}
