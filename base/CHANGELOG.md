@@ -7,13 +7,15 @@ and base. Tested with the firmware's PC tests, the firmware build check and the 
 **not on a real collar**.
 
 - **GPS fix inside the fence** (Rename, next to the collar's name): from 0, the GPS always on, to
-  every 30 seconds. **3 seconds by default.** It holds while the dog is inside the fence and away
-  from the home mode anchor, near a line or not. The collar's details show the value and whether
-  the collar has it yet.
-- It replaces the collar's own pacing inside the fence (every 5 s near the line, slowing to once a
-  minute deep inside). At 10 s or less the GPS never switches off, so the 3 s default uses more
-  battery deep inside the yard than before; home mode is where the battery is saved. Above 10 s
-  it sleeps between fixes, which pays off only if it gets its fix back quickly after waking.
+  every 30 seconds. **3 seconds by default.** It holds while the dog is inside the fence, within
+  35 m of the outermost band (where the beeping starts), and away from the home mode anchor. The
+  collar's details show the value and whether the collar has it yet.
+- **Big yards save battery.** From 35 to 100 m from the bands the interval rises with the
+  distance, up to every 2 minutes; beyond 100 m it is every 3 minutes. (It used to be at most a
+  minute.) A dog that bolts from past 35 m can reach the line before its next fix.
+- This replaces the collar's own pacing near the line (every 5 s). At 10 s or less the GPS never
+  switches off, so the 3 s default uses more battery near the bands than before. Above 10 s it
+  sleeps between fixes, which pays off only if it gets its fix back quickly after waking.
 - Just past a line the collar still fixes at least every 5 s, and lost mode and home mode keep
   their own pace.
 - The base sends it to every collar, the default included, when each next reports. Firmware

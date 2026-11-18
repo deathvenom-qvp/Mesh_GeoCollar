@@ -341,7 +341,7 @@
             <div class="muted" style="font-size:12px">More often uses more battery and airtime. While lost, it reports every 30 s anyway. The collar also takes the dog's name as its Meshtastic name.</div>
             <label class="field">GPS fix inside the fence every <b id="gpsInsideVal"></b>
               <input type="range" id="gpsInside" min="0" max="30" step="1" aria-label="How often the collar takes a GPS fix inside the fence"></label>
-            <div class="muted" style="font-size:12px">While the dog is inside the fence and away from the home mode anchor. Shorter catches a running dog sooner; up to 10 s keeps the GPS on all the time, which uses the most battery. Lost mode and home mode keep their own pace.</div>
+            <div class="muted" style="font-size:12px">While the dog is inside the fence, within 35 m of the bands and away from the home mode anchor. Further in it slows down: from 35 to 100 m up to every 2 min, beyond 100 m every 3 min. Shorter catches a running dog sooner; up to 10 s keeps the GPS on all the time, which uses the most battery. Lost mode and home mode keep their own pace.</div>
           </form>
           <div class="muted" id="selId"></div>
         </div>

@@ -175,8 +175,9 @@ keeps the anchor in `/prefs/geocollar-home.bin`. Firmware before 0.19.2 ignores 
 for a beacon AA:BB:CC:01:02:03 at -72 dBm, interval 0, number 77:
 `02 07 0000 4d000000 01 aabbcc010203 b8`.
 
-The GPS interval inside the fences (0.19.6 on): the collar takes a fix this often wherever the dog
-is inside, near a line or not, while it is not home (0 keeps the GPS on, a fix every second).
+The GPS interval inside the fences (0.19.6 on): the collar takes a fix this often while the dog is
+inside, within 35 m of the outermost band, and not home (0 keeps the GPS on, a fix every second).
+From 35 to 100 m the interval rises with the distance to 120 s; beyond 100 m it is 180 s.
 Just past a line it fixes at least every 5 s; lost mode keeps its own pace. A value above 30
 makes the whole message refused. The collar keeps it with its other settings; one that has never
 been sent it paces its GPS by the distance to the line, as before. The base always sends it, 3 s

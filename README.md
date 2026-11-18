@@ -54,10 +54,11 @@ least a second apart; if the two fixes are in different bands, the milder one co
 
 Fixes with poor PDOP or few satellites are ignored entirely.
 
-Inside the fence the collar takes a GPS fix every 3 s, or as often as the owner sets per collar in
-the base app (0 for always on, up to every 30 s). Just past a line it fixes at least every 5 s,
-and while lost every 15 s. A collar the base has not sent this setting to paces itself: every
-5 s near the line, slowing to once a minute deep inside. A lost dog's collar that has had no
+Within 35 m of the bands the collar takes a GPS fix every 3 s, or as often as the owner sets per
+collar in the base app (0 for always on, up to every 30 s). Further in it slows down for battery: from 35 to 100 m in
+step with the distance, up to every 2 minutes, and every 3 minutes beyond 100 m. Just past a line it fixes at
+least every 5 s, and while lost every 15 s. A collar the base has not sent this setting to fixes
+every 5 s near the line. A lost dog's collar that has had no
 answer from the base for 2 minutes (directly or through the mesh) and has no phone app connected
 takes a fix only every 5 minutes, since nothing can pass the position on; it goes back to the
 usual rate as soon as the base answers. Inside the fences the base makes no difference: the

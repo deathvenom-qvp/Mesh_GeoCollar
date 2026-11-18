@@ -162,16 +162,20 @@ gets the change when it next reports. Both need collar firmware from 0.15.0 on; 
 reporting every 10 minutes and keep their Meshtastic name.
 
 The same form sets **GPS fix inside the fence**: how often the collar takes a fix while the dog is
-inside the fence and away from the home mode anchor, from 0 (the GPS always on, a fix every
-second) to every 30 seconds. 3 seconds unless you change it. The collar fixes that often
-everywhere inside, near a line or not, so a dog running at 6 m/s covers up to 18 m between fixes
-at 3 s and 180 m at 30 s: keep it short unless the bands are wide. At 10 seconds or less the GPS
+inside the fence, within 35 m of the outermost band, and away from the home mode anchor, from 0
+(the GPS always on, a fix every second) to every 30 seconds. 3 seconds unless you change it. A dog
+running at 6 m/s covers up to 18 m between fixes at 3 s and 180 m at 30 s: keep it short unless
+the bands are wide. Further from the bands, in a big yard, the collar waits longer to save
+battery: from 35 to 100 m in step with the distance, up to every 2 minutes, and every 3 minutes
+beyond 100 m. That is a choice for battery over coverage: a dog that bolts from 40 m out can
+reach the line before its next fix, and gets no correction on the way. At 10 seconds or less the GPS
 never switches off, which uses the most battery; above 10 s it sleeps between fixes, which saves
 something only if it gets its fix back quickly after waking (see
 [Battery life](../docs/hardware.md#battery-life)). Past a line the collar fixes at least every
 5 seconds whatever this says; lost mode and home mode keep their own pace. Needs collar firmware
-0.19.6 or later; older collars ignore it and pace their GPS themselves (every 5 seconds near the
-line, up to a minute deep inside).
+0.19.6 or later. Collars on older firmware ignore it and pace their GPS themselves (every 5
+seconds near the line, up to a minute deep inside); with 0.19.6 a collar the base has not sent
+it yet uses 5 seconds within 35 m and the same slower steps further in.
 
 ## When a collar has no GPS fix
 
@@ -229,8 +233,8 @@ mesh, and the screen's backlight while it is lit.
   seconds costs noticeably more.
 - **Lost alert.** While a dog is lost the collar reports every 30 seconds and advertises on
   Bluetooth, which drains it faster. Silence the alert once you have the dog.
-- **GPS.** Deep inside its fences a collar takes a fix about once a minute; near a line it checks
-  every second. On the Heltec Wireless Tracker that saves little: the board has one power switch
+- **GPS.** Deep inside its fences a collar takes a fix every 2 to 3 minutes; within 35 m of the
+  bands it checks every 3 seconds (or as set). On the Heltec Wireless Tracker that saves little: the board has one power switch
   for the GPS and the screen together, Meshtastic leaves it on, and so the GPS chip runs whenever
   the collar is on. Meshtastic can be told to switch it (the Position setting **GPS EN GPIO**, 3 on the
   Tracker V1.1), which turns the GPS off between fixes while the dog is deep inside, and the

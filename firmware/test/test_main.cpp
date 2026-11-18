@@ -225,8 +225,8 @@ static void testGpsPacing()
 {
     Settings s;
     CHECK(gpsIntervalSecs(s, CollarState::NoFence, 500, 10) == 0);
-    CHECK(gpsIntervalSecs(s, CollarState::Inside, 1000, 10) == 60); // deep inside: slow
-    CHECK(gpsIntervalSecs(s, CollarState::Inside, 10 + 6 * 30, 10) == 30); // 180 m of room at 6 m/s
+    CHECK(gpsIntervalSecs(s, CollarState::Inside, 1000, 10) == kFarGpsSecs); // deep inside: slow
+    CHECK(gpsIntervalSecs(s, CollarState::Inside, 10 + 100, 10) == 120);     // 100 m in
     CHECK(gpsIntervalSecs(s, CollarState::Inside, 20, 10) == 5);   // close: fast
     CHECK(gpsIntervalSecs(s, CollarState::Inside, 5, 10) == 5);    // inside the margin
     CHECK(gpsIntervalSecs(s, CollarState::Warning, 500, 10) == 5);
@@ -235,8 +235,6 @@ static void testGpsPacing()
     s.gpsPacing = false;
     CHECK(gpsIntervalSecs(s, CollarState::Inside, 20, 10) == 0);
     s.gpsPacing = true;
-    s.dogSpeedMps = 0;
-    CHECK(gpsIntervalSecs(s, CollarState::Inside, 1000, 10) == 5); // nonsense settings: stay safe
 
     // What Meshtastic is given so that, with its hold after each lock, fixes come as wanted.
     CHECK(gpsSettingSecs(0) == 0);
@@ -1181,7 +1179,7 @@ static void testBaseLink()
     CHECK(gpsIntervalSecs(s, CollarState::Outside, -5, 10, true, false) == kOutOfReachGpsSecs); // beacon on, not yet confirmed
     // Inside the fences, near a line or not yet confirmed outside, the base makes no difference:
     // the collar enforces the fence on its own.
-    CHECK(gpsIntervalSecs(s, CollarState::Inside, 1000, 10, false, false) == 60);
+    CHECK(gpsIntervalSecs(s, CollarState::Inside, 1000, 10, false, false) == kFarGpsSecs);
     CHECK(gpsIntervalSecs(s, CollarState::Inside, 20, 10, false, false) == 5);
     CHECK(gpsIntervalSecs(s, CollarState::Warning, 500, 10, false, false) == 5);
     CHECK(gpsIntervalSecs(s, CollarState::Outside, -5, 10, false, false) == 5);
@@ -1193,24 +1191,46 @@ static void testBaseLink()
     s.gpsPacing = true;
     s.gpsLostSecs = 400;
     CHECK(gpsIntervalSecs(s, CollarState::Lost, -50, 10, false, false) == 400);
-    // The owner's GPS interval inside the fences: that often everywhere inside, near a line or not.
+    // The owner's GPS interval inside the fences: that often within 35 m of the outermost band;
+    // from 35 to 100 m rising with the distance to 120 s; beyond 100 m every 180 s.
     Settings in;
     CHECK(setGpsInsideSecs(in, 3) && !setGpsInsideSecs(in, 3));
-    CHECK(gpsIntervalSecs(in, CollarState::Inside, 1000, 10) == 3);
-    CHECK(gpsIntervalSecs(in, CollarState::Inside, 12, 10) == 3);
+    CHECK(in.gpsFastSecs == 3);
+    CHECK(gpsIntervalSecs(in, CollarState::Inside, 12, 10) == 3);        // 2 m from the band
+    CHECK(gpsIntervalSecs(in, CollarState::Inside, 10 + 35, 10) == 3);   // 35 m: still near
+    CHECK(gpsIntervalSecs(in, CollarState::Inside, 10 + 36, 10) == 4);   // just past: a little slower
+    CHECK(gpsIntervalSecs(in, CollarState::Inside, 10 + 67.5f, 10) == 61); // halfway: 3 + 117 / 2
+    CHECK(gpsIntervalSecs(in, CollarState::Inside, 10 + 100, 10) == 120);
+    CHECK(gpsIntervalSecs(in, CollarState::Inside, 10 + 101, 10) == 180);
+    CHECK(gpsIntervalSecs(in, CollarState::Inside, 5000, 10) == 180);
+    uint32_t prev = 0; // never faster further in
+    for (int m = 0; m <= 300; m++) {
+        const uint32_t v = gpsIntervalSecs(in, CollarState::Inside, 10.0f + m, 10);
+        CHECK(v >= prev);
+        prev = v;
+    }
+    CHECK(gpsIntervalSecs(in, CollarState::Inside, 0, 10) == 3);         // a rejected fix: fast
     CHECK(gpsIntervalSecs(in, CollarState::Warning, 5, 10) == 3);
     CHECK(gpsIntervalSecs(in, CollarState::Outside, -5, 10) == 3);
     CHECK(gpsIntervalSecs(in, CollarState::Lost, -50, 10) == 15); // lost mode keeps its own pace
-    CHECK(gpsSettingSecs(gpsIntervalSecs(in, CollarState::Inside, 1000, 10)) == 3); // GPS always on
-    setGpsInsideSecs(in, 0); // always on: a fix every second
-    CHECK(in.gpsFastSecs == 1 && gpsIntervalSecs(in, CollarState::Inside, 1000, 10) == 1);
+    CHECK(gpsSettingSecs(gpsIntervalSecs(in, CollarState::Inside, 12, 10)) == 3); // GPS always on
+    CHECK(gpsSettingSecs(kFarGpsSecs) == kFarGpsSecs - 20);
+    setGpsInsideSecs(in, 0); // always on near the band: a fix every second
+    CHECK(in.gpsFastSecs == 1 && gpsIntervalSecs(in, CollarState::Inside, 12, 10) == 1);
+    CHECK(gpsIntervalSecs(in, CollarState::Inside, 10 + 100, 10) == 120);
     setGpsInsideSecs(in, 30);
-    CHECK(gpsIntervalSecs(in, CollarState::Inside, 1000, 10) == 30);
+    CHECK(gpsIntervalSecs(in, CollarState::Inside, 40, 10) == 30);
+    CHECK(gpsIntervalSecs(in, CollarState::Inside, 10 + 36, 10) >= 30);
+    CHECK(gpsIntervalSecs(in, CollarState::Inside, 1000, 10) == 180);
     CHECK(gpsIntervalSecs(in, CollarState::Warning, 5, 10) == 30);
     CHECK(gpsIntervalSecs(in, CollarState::Outside, -5, 10) == kOutsideGpsSecs); // past the line: at least every 5 s
     Settings saved = in;
     sanitizeSettings(saved); // what a restart reads back keeps it
-    CHECK(saved.gpsFastSecs == 30 && saved.gpsSlowSecs == 30);
+    CHECK(saved.gpsFastSecs == 30);
+    // A collar the base never sent it: the same steps from 5 s.
+    Settings old;
+    CHECK(gpsIntervalSecs(old, CollarState::Inside, 10 + 30, 10) == 5);
+    CHECK(gpsIntervalSecs(old, CollarState::Inside, 10 + 200, 10) == 180);
 
     // What Meshtastic is given, with its hold after each lock, for a fix every 5 minutes.
     CHECK(gpsSettingSecs(kOutOfReachGpsSecs) == kOutOfReachGpsSecs - 20);

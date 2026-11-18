@@ -130,10 +130,9 @@ bool sameFences(const FenceSet &a, const FenceSet &b)
 bool setGpsInsideSecs(Settings &s, uint8_t secs)
 {
     const uint16_t v = secs ? secs : 1; // 1 s: Meshtastic keeps the GPS on and reports every second
-    if (s.gpsFastSecs == v && s.gpsSlowSecs == v)
+    if (s.gpsFastSecs == v)
         return false;
     s.gpsFastSecs = v;
-    s.gpsSlowSecs = v;
     return true;
 }
 
@@ -386,7 +385,6 @@ uint32_t gpsIntervalSecs(const Settings &s, CollarState state, float clearanceM,
         const uint32_t secs = beacon ? 2 * lost : lost;
         return !relayed && secs < kOutOfReachGpsSecs ? kOutOfReachGpsSecs : secs;
     }
-    const uint32_t slow = s.gpsSlowSecs > fast ? s.gpsSlowSecs : fast;
     switch (state) {
     case CollarState::Warning:
         return fast;
@@ -395,15 +393,16 @@ uint32_t gpsIntervalSecs(const Settings &s, CollarState state, float clearanceM,
     default:
         break;
     }
+    // Within kNearAlertM of the outermost band, every gpsFastSecs; from there to kMidAlertM, slower
+    // in step with the distance, up to kMidGpsSecs; further in, every kFarGpsSecs.
     const float room = clearanceM - (float)alertWidthM;
-    if (!(room > 0) || s.dogSpeedMps == 0)
+    if (!(room > kNearAlertM))
         return fast;
-    const float secs = room / (float)s.dogSpeedMps;
-    if (secs <= (float)fast)
+    if (room > kMidAlertM)
+        return fast > kFarGpsSecs ? fast : kFarGpsSecs;
+    if (fast >= kMidGpsSecs)
         return fast;
-    if (secs >= (float)slow)
-        return slow;
-    return (uint32_t)secs;
+    return fast + (uint32_t)((room - kNearAlertM) * (float)(kMidGpsSecs - fast) / (kMidAlertM - kNearAlertM));
 }
 
 void BaseLink::onSent(uint32_t nowMs)

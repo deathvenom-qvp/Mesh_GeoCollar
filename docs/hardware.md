@@ -67,8 +67,9 @@ keep arriving, and the collar's battery voltage.
   sends and receives as usual but does not relay other nodes' packets (see Battery life). Do not
   pick Tracker or Sensor: they are meant to sleep between reports, and the collar must listen for fence updates and commands.
 - GPS update interval: GeoCollar paces the GPS itself while fences are loaded (inside the fences
-  the interval set per collar in the base app, 3 s unless changed; every 15 s while lost; a
-  collar without that setting fixes every 5 s near the line, up to every 60 s deep inside) and puts your configured
+  the interval set per collar in the base app, 3 s unless changed, within 35 m of the bands,
+  slowing to every 2 minutes by 100 m and every 3 minutes beyond; every 15 s while lost; a collar without that
+  setting fixes every 5 s near the line) and puts your configured
   interval back when there are no fences. Meshtastic saves the paced value with the rest of its
   config when it shuts down or a setting changes, so the collar keeps your own interval in its
   state file and puts that back after a restart. Change the interval in the Meshtastic app while
@@ -132,7 +133,10 @@ What GeoCollar changes on the collar, and why (each can be turned off with a bui
   also stops restarting a GPS search that finds nothing every minute, and leaves the timing to
   Meshtastic. Inside the fences nothing changes: the collar enforces them without the base, so a
   base that is switched off or restarting never slows the GPS there.
-- **GPS interval inside the fences** (base app, per collar: 0 to 30 s, 3 s by default). At
+- **GPS interval inside the fences** (base app, per collar: 0 to 30 s, 3 s by default), within
+  35 m of the outermost band; from 35 to 100 m rising with the distance to 120 s, and 180 s
+  beyond 100 m, so a big yard still saves battery. A dog that bolts from past 35 m can reach the
+  line before the next fix: the owner's choice of battery over coverage there. At
   10 s or less Meshtastic keeps the GPS on all the time. Above that it powers the GPS down
   between fixes, but each fix costs the restart plus a hold after the lock (half of what is
   above 10 s, at most 20 s; GeoCollar shortens the interval it gives Meshtastic by that much), and
@@ -186,9 +190,8 @@ and -85 (the yard around the anchor); the circle on the map is a guess from typi
 
 Left as they are, and why:
 
-- **The GPS rate near the line.** It is what makes corrections arrive in time. Deep inside, the
-  pacing already waits as long as a dog running at 6 m/s needs to reach the outermost band, up to
-  60 s.
+- **The GPS rate near the line.** It is what makes corrections arrive in time (3 s within 35 m
+  of the bands, or as set in the base app).
 - **CPU below 80 MHz, or automatic light sleep.** Bluetooth, the GPS serial port and the
   correction transmitter's timing rely on it. Untestable without hardware.
 - **Duty-cycled LoRa receive.** It would miss fence updates and commands from the base.
@@ -201,7 +204,8 @@ Left as they are, and why:
 
 1. Power the collar through a USB power meter or a bench supply with a current readout, with no
    USB data connection (a data connection keeps Meshtastic awake and the screen lit).
-2. Note the current deep inside the fences (fixes every 60 s) and near the line (GPS always on).
+2. Note the current deep inside the fences (over 100 m from the bands: fixes every 3 minutes)
+   and near the line (GPS always on).
 3. In a serial log, `Took Ns to get lock` after each GPS wake-up says whether the UC6580 restarts
    warm (a few seconds) or cold (30 s or more) once Vext has been off. If it is cold, deep-inside
    pacing saves little, and the GPS could as well stay on. It is also the restart time to pick
