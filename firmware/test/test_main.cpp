@@ -704,8 +704,17 @@ static void testProtocol()
         CHECK(decodeConfig(buf, n, b, seq) && b.hasGpsInside && b.gpsInsideS == 0);
         buf[n - 1] = kMaxGpsInsideS;
         CHECK(decodeConfig(buf, n, b, seq) && b.gpsInsideS == kMaxGpsInsideS);
+        CHECK(!b.gpsSameEverywhere);
         buf[n - 1] = kMaxGpsInsideS + 1; // out of range: the whole message is refused
         CHECK(!decodeConfig(buf, n, b, seq));
+        // Bit 7: the interval everywhere inside, whatever the distance to the bands.
+        g.gpsSameEverywhere = true;
+        n = encodeConfig(buf, sizeof(buf), g, 77);
+        CHECK(hex(buf + n - 1, 1) == "83");
+        CHECK(decodeConfig(buf, n, b, seq) && b.gpsInsideS == 3 && b.gpsSameEverywhere);
+        buf[n - 1] = 0x80 | (kMaxGpsInsideS + 1);
+        CHECK(!decodeConfig(buf, n, b, seq));
+        g.gpsSameEverywhere = false;
         g.hasAnchor = false; // the interval only travels after the anchor
         CHECK(encodeConfig(buf, sizeof(buf), g, 77) == 8);
     }
@@ -1227,6 +1236,19 @@ static void testBaseLink()
     Settings saved = in;
     sanitizeSettings(saved); // what a restart reads back keeps it
     CHECK(saved.gpsFastSecs == 30);
+    // The owner's override: that interval wherever the dog is inside, but never once it is past a
+    // line or lost.
+    setGpsInsideSecs(in, 3);
+    CHECK(gpsIntervalSecs(in, CollarState::Inside, 5000, 10, false, true, true) == 3);
+    CHECK(gpsIntervalSecs(in, CollarState::Inside, 10 + 60, 10, false, true, true) == 3);
+    CHECK(gpsIntervalSecs(in, CollarState::Warning, 5, 10, false, true, true) == 3);
+    CHECK(gpsIntervalSecs(in, CollarState::Lost, -50, 10, false, true, true) == 15);
+    CHECK(gpsIntervalSecs(in, CollarState::Lost, -50, 10, true, true, true) == 30);
+    CHECK(gpsIntervalSecs(in, CollarState::Lost, -50, 10, false, false, true) == kOutOfReachGpsSecs);
+    setGpsInsideSecs(in, 30);
+    CHECK(gpsIntervalSecs(in, CollarState::Inside, 5000, 10, false, true, true) == 30);
+    CHECK(gpsIntervalSecs(in, CollarState::Outside, -5, 10, false, true, true) == kOutsideGpsSecs);
+
     // A collar the base never sent it: the same steps from 5 s.
     Settings old;
     CHECK(gpsIntervalSecs(old, CollarState::Inside, 10 + 30, 10) == 5);

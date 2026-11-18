@@ -239,8 +239,11 @@ def mesh_names(dog: str) -> tuple[str, str]:
     return _cut_utf8(name, 39), short
 
 
+GPS_SAME_EVERYWHERE = 0x80  # on the GPS interval byte: that interval everywhere inside (kGpsSameEverywhereBit)
+
+
 def encode_config(report_s: int, seq: int = 0, anchor: HomeAnchor | None = None,
-                  gps_inside_s: int | None = None) -> bytes:
+                  gps_inside_s: int | None = None, gps_everywhere: bool = False) -> bytes:
     """How often the collar reports, in seconds (MIN_REPORT_S..MAX_REPORT_S, or 0 for the
     firmware's default). While lost it reports at least every 30 s whatever this says. Collar
     firmware before 0.15 ignores it.
@@ -251,9 +254,10 @@ def encode_config(report_s: int, seq: int = 0, anchor: HomeAnchor | None = None,
     anchor sets home mode (firmware 0.19.2 on; older firmware ignores it). It needs a sequence
     number. AnchorKind.NONE turns home mode off.
 
-    gps_inside_s is how often the collar takes a GPS fix while the dog is inside the fences and
-    not home (0..MAX_GPS_INSIDE_S, 0: the GPS always on), firmware 0.19.6 on; older firmware
-    ignores it and paces its GPS itself. It goes after the anchor, so it needs one (kind NONE will
+    gps_inside_s is how often the collar takes a GPS fix while the dog is inside the fences, within
+    35 m of the bands and not home (0..MAX_GPS_INSIDE_S, 0: the GPS always on), firmware 0.19.6
+    on; older firmware ignores it and paces its GPS itself. gps_everywhere: that interval wherever
+    the dog is inside, whatever the distance to the bands (never once it is past a line or lost). It goes after the anchor, so it needs one (kind NONE will
     do, which leaves home mode off)."""
     if gps_inside_s is not None:
         if not 0 <= gps_inside_s <= MAX_GPS_INSIDE_S:
@@ -274,7 +278,7 @@ def encode_config(report_s: int, seq: int = 0, anchor: HomeAnchor | None = None,
         addr = parse_bt_address(anchor.address) if anchor.kind == AnchorKind.BEACON else bytes(6)
         out += bytes([AnchorKind(anchor.kind)]) + addr + struct.pack("<b", anchor.rssi)
         if gps_inside_s is not None:
-            out += bytes([gps_inside_s])
+            out += bytes([gps_inside_s | (GPS_SAME_EVERYWHERE if gps_everywhere else 0)])
     return out
 
 
@@ -296,7 +300,13 @@ def decode_config_anchor(data: bytes) -> HomeAnchor | None:
 def decode_config_gps_inside(data: bytes) -> int | None:
     """The GPS interval inside the fences on a config message, None if it has none."""
     decode_config(data)
-    return data[16] if len(data) >= 17 else None
+    return data[16] & ~GPS_SAME_EVERYWHERE if len(data) >= 17 else None
+
+
+def decode_config_gps_everywhere(data: bytes) -> bool:
+    """Whether a config message asks for the GPS interval everywhere inside."""
+    decode_config(data)
+    return len(data) >= 17 and bool(data[16] & GPS_SAME_EVERYWHERE)
 
 
 def decode_config_seq(data: bytes) -> int:

@@ -186,6 +186,11 @@ def test_config_gps_inside_matches_the_firmware():
             p.encode_config(0, 77, p.HomeAnchor(), bad)
     with pytest.raises(ValueError):
         p.encode_config(0, 77, None, 3)  # it goes after the anchor
+    # Bit 7: that interval everywhere inside.
+    every = p.encode_config(0, 77, p.HomeAnchor(p.AnchorKind.BASE_RADIO, "", -75), 3, True)
+    assert every[-1:].hex() == "83"
+    assert p.decode_config_gps_inside(every) == 3 and p.decode_config_gps_everywhere(every)
+    assert not p.decode_config_gps_everywhere(data)
 
 
 def test_status_home_flag():

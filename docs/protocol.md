@@ -157,7 +157,7 @@ the message again, numbered, when such a collar last got it without one.
 | 8 | 1 | home anchor kind, optional (only after a sequence number): 0 off, 1 Bluetooth beacon, 2 the base radio |
 | 9 | 6 | the beacon's Bluetooth address, most significant byte first (zeros for the other kinds) |
 | 15 | 1 | signal threshold, dBm, signed: -100..-30 |
-| 16 | 1 | GPS interval inside the fences, seconds, optional (only after the anchor): 0..30, 0 = always on (0.19.6 on) |
+| 16 | 1 | GPS interval inside the fences, optional (only after the anchor): bits 0-6 seconds, 0..30, 0 = always on; bit 7 that interval everywhere inside (0.19.6 on) |
 
 How often the collar sends a Status. While lost it reports at least every 30 s whatever this
 says. The sequence number works as for Owner, with its own counter on the collar. More bytes may
@@ -177,13 +177,16 @@ for a beacon AA:BB:CC:01:02:03 at -72 dBm, interval 0, number 77:
 
 The GPS interval inside the fences (0.19.6 on): the collar takes a fix this often while the dog is
 inside, within 35 m of the outermost band, and not home (0 keeps the GPS on, a fix every second).
-From 35 to 100 m the interval rises with the distance to 120 s; beyond 100 m it is 180 s.
+From 35 to 100 m the interval rises with the distance to 120 s; beyond 100 m it is 180 s. With
+bit 7 set the interval holds wherever the dog is inside instead (the collar keeps that in its state
+file, format 10); it never changes the pace past a line or while lost.
 Just past a line it fixes at least every 5 s; lost mode keeps its own pace. A value above 30
 makes the whole message refused. The collar keeps it with its other settings; one that has never
 been sent it paces its GPS by the distance to the line, as before. The base always sends it, 3 s
 unless the owner changed it, with an anchor of kind 0 in front when home mode was never set.
 Firmware before 0.19.6 ignores it. Golden bytes for the base radio at -75 dBm, interval 0, number
-77, every 3 s: `02 07 0000 4d000000 02 000000000000 b5 03`.
+77, every 3 s: `02 07 0000 4d000000 02 000000000000 b5 03`; every 3 s everywhere inside: the last
+byte `83`.
 
 ## 6. Hello (collar, broadcast)
 

@@ -136,7 +136,8 @@ What GeoCollar changes on the collar, and why (each can be turned off with a bui
 - **GPS interval inside the fences** (base app, per collar: 0 to 30 s, 3 s by default), within
   35 m of the outermost band; from 35 to 100 m rising with the distance to 120 s, and 180 s
   beyond 100 m, so a big yard still saves battery. A dog that bolts from past 35 m can reach the
-  line before the next fix: the owner's choice of battery over coverage there. At
+  line before the next fix: the owner's choice of battery over coverage there. A tick box in the
+  base app keeps the owner's interval everywhere inside instead. At
   10 s or less Meshtastic keeps the GPS on all the time. Above that it powers the GPS down
   between fixes, but each fix costs the restart plus a hold after the lock (half of what is
   above 10 s, at most 20 s; GeoCollar shortens the interval it gives Meshtastic by that much), and

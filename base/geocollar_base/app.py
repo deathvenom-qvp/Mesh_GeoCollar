@@ -60,6 +60,7 @@ class CollarPatch(BaseModel):
     name: str | None = None
     report_s: int | None = None  # how often the collar reports, seconds
     gps_inside_s: int | None = None  # GPS fix interval inside the fences, seconds (0: always on)
+    gps_everywhere: bool | None = None  # that interval wherever the dog is inside, not only near the bands
 
 
 class ContactIn(BaseModel):
@@ -361,7 +362,8 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
         until the owner turns home mode on) and its GPS interval inside the fences."""
         c = store.collar(node_id) or {}
         anchor = home_anchor() or protocol.HomeAnchor()
-        return [c.get("report_s") or 0, int(anchor.kind), anchor.address, anchor.rssi, gps_inside_for(c)]
+        return [c.get("report_s") or 0, int(anchor.kind), anchor.address, anchor.rssi, gps_inside_for(c),
+                bool(c.get("gps_everywhere"))]
 
     def push_config(node_id: str) -> bool:
         """The collar's report interval, if the owner set one, the home anchor and its GPS interval
@@ -378,7 +380,7 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
         elif link.connected:
             seq = store.next_command_seq()  # always numbered: firmware 0.15 skips the number
             try:
-                link.send_config(node_id, report_s, seq, anchor, gps_inside_for(c))
+                link.send_config(node_id, report_s, seq, anchor, gps_inside_for(c), bool(c.get("gps_everywhere")))
             except Exception as e:  # noqa: BLE001 - retried on the collar's next report
                 log.warning("could not send the collar settings to %s: %s", node_id, e)
                 return False
@@ -405,6 +407,7 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
             return None
         c = dict(c)
         c["gps_inside_s"] = gps_inside_for(c)
+        c["gps_everywhere"] = bool(c.get("gps_everywhere"))
         if "apps" in c:
             c["apps_synced"] = apps_synced(c)
             c["apps"] = public_apps(c)
@@ -784,7 +787,9 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
             store.set_collar_info(node_id, "report_s", body.report_s)
         if body.gps_inside_s is not None:
             store.set_collar_info(node_id, "gps_inside_s", body.gps_inside_s)
-        if body.report_s is not None or body.gps_inside_s is not None:
+        if body.gps_everywhere is not None:
+            store.set_collar_info(node_id, "gps_everywhere", body.gps_everywhere or None)
+        if body.report_s is not None or body.gps_inside_s is not None or body.gps_everywhere is not None:
             if (store.collar(node_id) or {}).get("config_sent") != config_for(node_id):
                 out["config_sent"] = push_config(node_id)
         return {**(public_collar(store.collar(node_id)) or {}), **out}

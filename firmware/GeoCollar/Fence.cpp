@@ -375,7 +375,7 @@ void FenceEngine::correctHard(Decision &d, uint32_t nowMs)
 }
 
 uint32_t gpsIntervalSecs(const Settings &s, CollarState state, float clearanceM, uint16_t alertWidthM, bool beacon,
-                         bool relayed)
+                         bool relayed, bool sameEverywhere)
 {
     if (!s.gpsPacing || state == CollarState::NoFence)
         return 0;
@@ -396,7 +396,7 @@ uint32_t gpsIntervalSecs(const Settings &s, CollarState state, float clearanceM,
     // Within kNearAlertM of the outermost band, every gpsFastSecs; from there to kMidAlertM, slower
     // in step with the distance, up to kMidGpsSecs; further in, every kFarGpsSecs.
     const float room = clearanceM - (float)alertWidthM;
-    if (!(room > kNearAlertM))
+    if (sameEverywhere || !(room > kNearAlertM))
         return fast;
     if (room > kMidAlertM)
         return fast > kFarGpsSecs ? fast : kFarGpsSecs;

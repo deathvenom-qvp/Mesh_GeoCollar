@@ -13,6 +13,9 @@ and base. Tested with the firmware's PC tests, the firmware build check and the 
 - **Big yards save battery.** From 35 to 100 m from the bands the interval rises with the
   distance, up to every 2 minutes; beyond 100 m it is every 3 minutes. (It used to be at most a
   minute.) A dog that bolts from past 35 m can reach the line before its next fix.
+- **Use this everywhere inside the fence** (a tick box under the slider) keeps the slider's
+  interval however far the dog is from the bands. It never applies to a dog past a line or lost:
+  lost mode keeps its own pace.
 - This replaces the collar's own pacing near the line (every 5 s). At 10 s or less the GPS never
   switches off, so the 3 s default uses more battery near the bands than before. Above 10 s it
   sleeps between fixes, which pays off only if it gets its fix back quickly after waking.

@@ -244,9 +244,11 @@ class CorrectionPulser
 /// come half as often as in lost mode, to make the battery last. relayed = false: nothing can pass
 /// the position on (the base is out of reach and no phone app is connected, see BaseLink), so a
 /// lost dog (lost, or the beacon on) gets a fix only every kOutOfReachGpsSecs. Inside the fences
-/// the pace never depends on the base: the collar enforces the fence on its own.
+/// the pace never depends on the base: the collar enforces the fence on its own. sameEverywhere:
+/// the owner chose gpsFastSecs wherever the dog is inside, whatever the distance to the bands (it
+/// changes nothing once the dog is lost or past a line).
 uint32_t gpsIntervalSecs(const Settings &s, CollarState state, float clearanceM, uint16_t alertWidthM, bool beacon = false,
-                         bool relayed = true);
+                         bool relayed = true, bool sameEverywhere = false);
 
 /// How long without a fix before the last one counts as old: the GPS interval (0 = Meshtastic's
 /// default, 2 minutes) plus a minute for the GPS to wake and search. At 10 s or less the GPS

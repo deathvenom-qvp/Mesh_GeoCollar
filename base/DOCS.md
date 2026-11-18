@@ -168,7 +168,9 @@ running at 6 m/s covers up to 18 m between fixes at 3 s and 180 m at 30 s: keep 
 the bands are wide. Further from the bands, in a big yard, the collar waits longer to save
 battery: from 35 to 100 m in step with the distance, up to every 2 minutes, and every 3 minutes
 beyond 100 m. That is a choice for battery over coverage: a dog that bolts from 40 m out can
-reach the line before its next fix, and gets no correction on the way. At 10 seconds or less the GPS
+reach the line before its next fix, and gets no correction on the way. Tick **Use this everywhere
+inside the fence** to keep the slider's interval however far the dog is from the bands (more
+battery in a big yard); it never applies once the dog is past a line or lost. At 10 seconds or less the GPS
 never switches off, which uses the most battery; above 10 s it sleeps between fixes, which saves
 something only if it gets its fix back quickly after waking (see
 [Battery life](../docs/hardware.md#battery-life)). Past a line the collar fixes at least every
