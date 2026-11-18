@@ -158,13 +158,21 @@ constexpr uint16_t kMaxReportS = 3600;
 
 /// Collar settings from the base: [version][7][report interval s, u16], then an optional sequence
 /// number (u32, never 0; `seq` = 0 means none), then (only after a sequence number) the home
-/// anchor: [kind u8][Bluetooth address, 6 bytes, most significant first][RSSI threshold dBm, i8].
-/// Later fields may follow, so a longer message is accepted.
+/// anchor: [kind u8][Bluetooth address, 6 bytes, most significant first][RSSI threshold dBm, i8],
+/// then (only after the anchor) the GPS interval inside the fences [u8: seconds 0..30 (0 = GPS
+/// always on) in the low 7 bits, bit 7 set = that interval everywhere inside, whatever the
+/// distance to the bands]. Later fields may follow, so a longer message is accepted.
 struct CollarConfig {
     uint16_t reportS = 0;
     bool hasAnchor = false; // the message carried the anchor (kind None turns home mode off)
     HomeAnchor anchor;
+    bool hasGpsInside = false; // the message carried the GPS interval inside the fences (0.19.6 on)
+    uint8_t gpsInsideS = 0;
+    bool gpsSameEverywhere = false; // the interval wherever the dog is inside, not only near the bands
 };
+constexpr uint8_t kGpsSameEverywhereBit = 0x80;
+/// The longest GPS interval inside the fences the base may set, seconds.
+constexpr uint8_t kMaxGpsInsideS = 30;
 constexpr size_t kConfigLength = 2 + 2;
 constexpr size_t kAnchorLength = 1 + 6 + 1;
 size_t encodeConfig(uint8_t *out, size_t cap, const CollarConfig &c, uint32_t seq = 0);

@@ -48,18 +48,20 @@ least a second apart; if the two fixes are in different bands, the milder one co
 | Inside, clear of every band | Nothing; reports status every 10 minutes. |
 | Warning (inside, in any band) | The band's correction, above, once a second fix has agreed. |
 | Outside (not yet confirmed) | **Stops all corrections** at once. They stay off, even through the bands on the way back, until the dog is inside and clear of every band. |
-| Lost (3 good fixes outside) | **Stops all corrections**, sends a breach alert, reports position every 30 s. |
-| Outside for 90 s | **Lost beacon**: Bluetooth name "Rex is lost 5551234567" 90 s on / 90 s off, a plain-text "Please help get Rex home. Call …" on the public mesh channel every 5 minutes, GPS at half the lost rate. Until back inside or silenced from the base. |
+| Lost (3 good fixes outside) | **Stops all corrections**, sends a breach alert, reports position every 30 s. GPS fix every 60 s while the base (directly or through the mesh) or the phone app can get it, otherwise GPS off. |
+| Outside for 90 s | **Lost beacon**: Bluetooth name "Rex is lost 5551234567" 90 s on / 90 s off, a plain-text "Please help get Rex home. Call …" on the public mesh channel every 5 minutes, GPS as in lost mode. Until back inside or silenced from the base. |
 | Back inside, clear of every band, for 3 fixes | Re-arms. |
 
 Fixes with poor PDOP or few satellites are ignored entirely.
 
-The collar also paces its own GPS: every 5 s near the line, slowing to once a minute deep inside
-(the time a running dog would need to reach the outermost band), and every 15 s while lost. A
-lost dog's collar that has had no answer from the base for 2 minutes (directly or through the
-mesh) and has no phone app connected takes a fix only every 5 minutes, since nothing can pass
-the position on; it goes back to the usual rate as soon as the base answers. Inside the fences
-the base makes no difference: the collar enforces them on its own.
+Within 35 m of the bands the collar takes a GPS fix every 3 s, or as often as the owner sets per
+collar in the base app (0 for always on, up to every 30 s). Further in it slows down for battery: from 35 to 100 m in
+step with the distance, up to every 2 minutes, and every 3 minutes beyond 100 m. Just past a line it fixes at
+least every 5 s. A collar the base has not sent this setting to fixes every 5 s near the line.
+A lost dog's collar takes a fix every 60 s while it can get the position somewhere: the base
+answers it, directly or through the mesh, or the phone app is connected. Otherwise its GPS is off
+(Meshtastic still looks about once an hour). It takes a fix as soon as the phone app connects.
+Inside the fences the base makes no difference: the collar enforces them on its own.
 
 ## Repository layout
 
@@ -171,9 +173,9 @@ any hardware.
 - Not yet run on hardware: the data-line tap, the RMT timing and pairing need bench testing.
 - The lost beacon's Bluetooth advertising is written against Meshtastic's BLE stack and
   untested on hardware.
-- GPS pacing is written and compiles but is untested on hardware, and its settings (5 s, 60 s,
-  15 s, 6 m/s) can't be changed from the base app yet. On the Wireless Tracker it changes how
-  often the collar takes a fix, not whether the GPS chip is powered (see `docs/hardware.md`).
+- GPS pacing is written and compiles but is untested on hardware. Only the interval inside the
+  fences can be changed from the base app; the lost-mode rate (60 s) can't. On the Wireless
+  Tracker the GPS is powered down between fixes only above 10 s (see `docs/hardware.md`).
 - The firmware changes in 0.16.0 (fixes taken straight from the GPS, the "no GPS fix" report,
   numbered settings messages, the correction timing) pass the PC tests and compile, and are
   untested on hardware.

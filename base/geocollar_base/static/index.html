@@ -339,6 +339,11 @@
             <label class="field">Reports its position every <b id="reportVal"></b>
               <input type="range" id="reportRate" min="0" max="7" step="1" aria-label="How often the collar reports"></label>
             <div class="muted" style="font-size:12px">More often uses more battery and airtime. While lost, it reports every 30 s anyway. The collar also takes the dog's name as its Meshtastic name.</div>
+            <label class="field">GPS fix inside the fence every <b id="gpsInsideVal"></b>
+              <input type="range" id="gpsInside" min="0" max="30" step="1" aria-label="How often the collar takes a GPS fix inside the fence"></label>
+            <div class="muted" style="font-size:12px">While the dog is inside the fence, within 35 m of the bands and away from the home mode anchor. Further in it slows down: from 35 to 100 m up to every 2 min, beyond 100 m every 3 min. Shorter catches a running dog sooner; up to 10 s keeps the GPS on all the time, which uses the most battery. Lost mode and home mode keep their own pace.</div>
+            <label class="row" style="gap:6px;font-size:13px"><input type="checkbox" id="gpsEverywhere"> Use this everywhere inside the fence, however far from the bands</label>
+            <div class="muted" style="font-size:12px">No slowing down deep inside a big yard: more battery. Never applies once the dog is past a line or lost.</div>
           </form>
           <div class="muted" id="selId"></div>
         </div>
@@ -754,6 +759,8 @@ const collarSay = t => { $('collarMsg').textContent = t; };
 // How often a collar reports. 10 min is the firmware's default.
 const REPORT_CHOICES = [30, 60, 120, 300, 600, 900, 1800, 3600];
 const reportLabel = s => s < 60 ? `${s} s` : s < 3600 ? `${s / 60} min` : `${s / 3600} h`;
+const GPS_INSIDE_DEFAULT = 3;
+const gpsInsideLabel = s => s === 0 ? 'second (GPS always on)' : `${s} s`;
 const ago = secs => secs < 90 ? `${Math.round(secs)} s ago` : secs < 5400 ? `${Math.round(secs / 60)} min ago`
   : secs < 172800 ? `${Math.round(secs / 3600)} h ago` : `${Math.round(secs / 86400)} days ago`;
 const stateLabel = s => ({ NO_FENCE: 'No fence', INSIDE: 'Inside', WARNING: 'Near the line', OUTSIDE: 'Outside', LOST: 'Lost' })[s] || 'No report yet';
@@ -1348,8 +1355,16 @@ function renderSelected() {
     rows.push(['State', 'Not reporting yet'], ['Last heard', `${ago(Date.now() / 1000 - c.hello.seen)} (saying hello)`]);
     if (c.hello.battery_pct != null) rows.push(['Battery', `${c.hello.battery_pct}%`]);
   } else rows.push(['State', 'No report yet']);
+  // What the collar was last sent: [report s, anchor kind, address, rssi, GPS inside s], or a bare
+  // report interval from a base before 0.19.2.
+  const sent = Array.isArray(c.config_sent) ? c.config_sent : [c.config_sent];
   if (!c.sim) rows.push(['Reports every', reportLabel(c.report_s || 600)
-    + (c.report_s && c.config_sent !== c.report_s ? ' (not sent yet)' : '')]);
+    + (c.report_s && sent[0] !== c.report_s ? ' (not sent yet)' : '')]);
+  const gpsIn = c.gps_inside_s ?? GPS_INSIDE_DEFAULT;
+  const gpsAll = !!c.gps_everywhere;
+  if (!c.sim) rows.push(['GPS inside the fence', (gpsIn === 0 ? 'Always on' : `Every ${gpsIn} s`)
+    + (gpsAll ? ', everywhere' : ' within 35 m of the bands')
+    + (sent[4] === gpsIn && !!sent[5] === gpsAll ? '' : ' (not sent yet)')]);
   if (!c.sim) rows.push(['Locked to this base', c.locked ? 'Yes' : 'Not set up from this base']);
   if (c.ble_pin) rows.push(['Bluetooth PIN', String(c.ble_pin)]);
   // update_mode: left by a Wi-Fi update that an older version of this app started and never finished
@@ -1876,12 +1891,20 @@ const showReportRate = () => {
   $('reportVal').textContent = reportLabel(s) + (s === 600 ? ' (default)' : '');
 };
 $('reportRate').oninput = showReportRate;
+const showGpsInside = () => {
+  const s = +$('gpsInside').value;
+  $('gpsInsideVal').textContent = gpsInsideLabel(s) + (s === GPS_INSIDE_DEFAULT ? ' (default)' : '');
+};
+$('gpsInside').oninput = showGpsInside;
 $('renameBtn').onclick = () => {
   const c = collars[selected];
   $('renameInput').value = unnamed(c, selected) ? '' : c.name;
   const i = REPORT_CHOICES.indexOf(c.report_s || 600);
   $('reportRate').value = i < 0 ? 4 : i;
   showReportRate();
+  $('gpsInside').value = c.gps_inside_s ?? GPS_INSIDE_DEFAULT;
+  showGpsInside();
+  $('gpsEverywhere').checked = !!c.gps_everywhere;
   $('selNameRow').hidden = true; $('renameForm').hidden = false;
   $('renameInput').focus();
 };
@@ -1892,10 +1915,13 @@ $('renameForm').onsubmit = async e => {
   const name = $('renameInput').value.trim();
   if (utf8Len(name) > 24) { say('The dog\'s name is at most 24 characters.'); return; }
   const report_s = REPORT_CHOICES[+$('reportRate').value];
+  const gps_inside_s = +$('gpsInside').value;
+  const gps_everywhere = $('gpsEverywhere').checked;
   try {
-    const r = await api(`collars/${encodeURIComponent(selected)}`, { method: 'PATCH', body: JSON.stringify({ name, report_s }) });
+    const r = await api(`collars/${encodeURIComponent(selected)}`, { method: 'PATCH', body: JSON.stringify({ name, report_s, gps_inside_s, gps_everywhere }) });
     const pending = !r.owner_sent || r.config_sent === false;
-    say(`Saved ${r.name}, reporting every ${reportLabel(report_s)}.`
+    say(`Saved ${r.name}, reporting every ${reportLabel(report_s)}, GPS inside the fence every ${gpsInsideLabel(gps_inside_s)}`
+      + (gps_everywhere ? ' everywhere inside.' : ' near the bands.')
       + (pending ? ' The collar gets the changes when it next reports.' : ''));
     endRename();
   } catch (err) { say(err.message); }

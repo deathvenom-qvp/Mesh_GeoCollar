@@ -127,6 +127,15 @@ bool sameFences(const FenceSet &a, const FenceSet &b)
     return true;
 }
 
+bool setGpsInsideSecs(Settings &s, uint8_t secs)
+{
+    const uint16_t v = secs ? secs : 1; // 1 s: Meshtastic keeps the GPS on and reports every second
+    if (s.gpsFastSecs == v)
+        return false;
+    s.gpsFastSecs = v;
+    return true;
+}
+
 void sanitizeSettings(Settings &s)
 {
     const Settings d; // the defaults, for values that make no sense at all
@@ -366,33 +375,32 @@ void FenceEngine::correctHard(Decision &d, uint32_t nowMs)
 }
 
 uint32_t gpsIntervalSecs(const Settings &s, CollarState state, float clearanceM, uint16_t alertWidthM, bool beacon,
-                         bool relayed)
+                         bool relayed, bool sameEverywhere)
 {
     if (!s.gpsPacing || state == CollarState::NoFence)
         return 0;
     const uint32_t fast = s.gpsFastSecs ? s.gpsFastSecs : 1;
-    const uint32_t lost = s.gpsLostSecs ? s.gpsLostSecs : fast;
-    if (beacon || state == CollarState::Lost) {
-        const uint32_t secs = beacon ? 2 * lost : lost;
-        return !relayed && secs < kOutOfReachGpsSecs ? kOutOfReachGpsSecs : secs;
-    }
-    const uint32_t slow = s.gpsSlowSecs > fast ? s.gpsSlowSecs : fast;
+    // A lost dog: a fix only while something can pass it on, and then once a minute.
+    if (beacon || state == CollarState::Lost)
+        return relayed ? kLostGpsSecs : kLostOffGpsSecs;
     switch (state) {
     case CollarState::Warning:
-    case CollarState::Outside:
         return fast;
+    case CollarState::Outside:
+        return fast < kOutsideGpsSecs ? fast : kOutsideGpsSecs;
     default:
         break;
     }
+    // Within kNearAlertM of the outermost band, every gpsFastSecs; from there to kMidAlertM, slower
+    // in step with the distance, up to kMidGpsSecs; further in, every kFarGpsSecs.
     const float room = clearanceM - (float)alertWidthM;
-    if (!(room > 0) || s.dogSpeedMps == 0)
+    if (sameEverywhere || !(room > kNearAlertM))
         return fast;
-    const float secs = room / (float)s.dogSpeedMps;
-    if (secs <= (float)fast)
+    if (room > kMidAlertM)
+        return fast > kFarGpsSecs ? fast : kFarGpsSecs;
+    if (fast >= kMidGpsSecs)
         return fast;
-    if (secs >= (float)slow)
-        return slow;
-    return (uint32_t)secs;
+    return fast + (uint32_t)((room - kNearAlertM) * (float)(kMidGpsSecs - fast) / (kMidAlertM - kNearAlertM));
 }
 
 void BaseLink::onSent(uint32_t nowMs)

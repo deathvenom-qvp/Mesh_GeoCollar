@@ -315,9 +315,11 @@ class MeshLink:
         protocol.encode_owner: 0 for collar firmware that does not read it."""
         self._send(node_id, protocol.encode_owner(dog, owner, phone, seq))
 
-    def send_config(self, node_id: str, report_s: int, seq: int = 0, anchor: protocol.HomeAnchor | None = None) -> None:
-        """How often the collar reports (0: the firmware's default), and the home anchor."""
-        self._send(node_id, protocol.encode_config(report_s, seq, anchor))
+    def send_config(self, node_id: str, report_s: int, seq: int = 0, anchor: protocol.HomeAnchor | None = None,
+                    gps_inside_s: int | None = None, gps_everywhere: bool = False) -> None:
+        """How often the collar reports (0: the firmware's default), the home anchor, and how often
+        it takes a GPS fix inside the fences (and whether everywhere inside, or near the bands)."""
+        self._send(node_id, protocol.encode_config(report_s, seq, anchor, gps_inside_s, gps_everywhere))
 
     def send_app_keys(self, node_id: str, keys: list[tuple[int, bytes]], seq: int) -> None:
         """The phones that may connect to the collar with the companion app (the whole list)."""

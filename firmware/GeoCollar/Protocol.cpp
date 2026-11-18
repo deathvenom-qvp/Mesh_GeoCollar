@@ -206,6 +206,8 @@ size_t encodeConfig(uint8_t *out, size_t cap, const CollarConfig &c, uint32_t se
             w.u8(static_cast<uint8_t>(c.anchor.kind));
             w.bytes(c.anchor.address, sizeof(c.anchor.address));
             w.u8(static_cast<uint8_t>(c.anchor.rssiDbm));
+            if (c.hasGpsInside)
+                w.u8(c.gpsInsideS | (c.gpsSameEverywhere ? kGpsSameEverywhereBit : 0));
         }
     }
     return w.done();
@@ -235,6 +237,14 @@ bool decodeConfig(const uint8_t *buf, size_t len, CollarConfig &c, uint32_t &seq
             tmp.hasAnchor = true;
             tmp.anchor.kind = static_cast<AnchorKind>(kind);
             tmp.anchor.rssiDbm = rssi;
+            if (r.pos < len) { // the GPS interval inside the fences (0.19.6 on)
+                const uint8_t b = r.u8();
+                tmp.gpsInsideS = b & ~kGpsSameEverywhereBit;
+                tmp.gpsSameEverywhere = (b & kGpsSameEverywhereBit) != 0;
+                if (!r.ok || tmp.gpsInsideS > kMaxGpsInsideS)
+                    return false;
+                tmp.hasGpsInside = true;
+            }
         }
     }
     c = tmp;

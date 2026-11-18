@@ -172,6 +172,27 @@ def test_config_home_anchor_matches_the_firmware():
     assert p.parse_bt_address("AA-BB-CC-01-02-03") == p.parse_bt_address("aabbcc010203") == bytes.fromhex("aabbcc010203")
 
 
+def test_config_gps_inside_matches_the_firmware():
+    # Golden vector shared with firmware/test/test_main.cpp (testProtocol, the GPS interval inside).
+    data = p.encode_config(0, 77, p.HomeAnchor(p.AnchorKind.BASE_RADIO, "", -75), 3)
+    assert data.hex() == "020700004d000000" "02000000000000b5" "03"
+    assert p.decode_config_gps_inside(data) == 3
+    assert p.decode_config_anchor(data).rssi == -75
+    assert p.decode_config_gps_inside(p.encode_config(0, 77, p.HomeAnchor())) is None
+    assert p.encode_config(0, 77, p.HomeAnchor(), 0)[-1] == 0  # always on
+    assert p.encode_config(0, 77, p.HomeAnchor(), p.MAX_GPS_INSIDE_S)[-1] == 30
+    for bad in (-1, 31):
+        with pytest.raises(ValueError):
+            p.encode_config(0, 77, p.HomeAnchor(), bad)
+    with pytest.raises(ValueError):
+        p.encode_config(0, 77, None, 3)  # it goes after the anchor
+    # Bit 7: that interval everywhere inside.
+    every = p.encode_config(0, 77, p.HomeAnchor(p.AnchorKind.BASE_RADIO, "", -75), 3, True)
+    assert every[-1:].hex() == "83"
+    assert p.decode_config_gps_inside(every) == 3 and p.decode_config_gps_everywhere(every)
+    assert not p.decode_config_gps_everywhere(data)
+
+
 def test_status_home_flag():
     s = p.Status(p.MsgType.STATUS, 3, p.CollarState.INSIDE, 80, 40.0, -75.0, 1.0, 9, 40, True, False, home=True)
     raw = p.encode_status(s)

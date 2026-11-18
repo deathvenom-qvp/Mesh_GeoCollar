@@ -104,17 +104,35 @@ struct Settings {
     uint16_t maxPdopX100 = 500;     // ignore fixes worse than PDOP 5.0
     uint8_t minSats = 5;
     uint16_t correctionMs = 1000;   // how long each beep/vibrate/shock lasts
-    // GPS pacing: fix often near the line, rarely deep inside, to save battery.
+    // GPS pacing: fix often near the line, rarely deep inside, to save battery (gpsIntervalSecs).
+    // The owner's GPS interval near the bands from the base (0.19.6 on, setGpsInsideSecs) is gpsFastSecs.
     bool gpsPacing = true;
     uint16_t gpsFastSecs = 5;       // at or near the line (10 s or less keeps the GPS always on)
-    uint16_t gpsSlowSecs = 60;      // deep inside
-    uint16_t gpsLostSecs = 15;      // while lost, for tracking
-    uint8_t dogSpeedMps = 6;        // assumed top speed: next fix before the dog can reach the margin
+    uint16_t gpsSlowSecs = 60;      // unused since 0.19.6 (kMidGpsSecs, kFarGpsSecs); kept for the state file
+    uint16_t gpsLostSecs = 15;      // unused since 0.19.6 (kLostGpsSecs); kept for the state file
+    uint8_t dogSpeedMps = 6;        // unused since 0.19.6 (pacing steps at kNearAlertM); kept for the state file
 };
 
 /// Bring settings read back from flash into the ranges the firmware relies on (levels at most 99,
 /// counts and intervals at least 1), so a damaged or foreign file cannot make it misbehave.
 void sanitizeSettings(Settings &s);
+
+/// The owner's GPS interval inside the fences: a fix every `secs` seconds while the dog is within
+/// kNearAlertM of the outermost band (0 = the GPS always on, reporting every second); further in,
+/// slower (see gpsIntervalSecs). Returns true if the settings changed.
+bool setGpsInsideSecs(Settings &s, uint8_t secs);
+
+/// Inside and at most this far from the outermost band, the collar fixes every gpsFastSecs.
+constexpr float kNearAlertM = 35.0f;
+/// From kNearAlertM to this far, the interval rises in step with the distance, to kMidGpsSecs.
+constexpr float kMidAlertM = 100.0f;
+constexpr uint32_t kMidGpsSecs = 120;
+/// Further than kMidAlertM from the outermost band, a fix every this many seconds.
+constexpr uint32_t kFarGpsSecs = 180;
+
+/// Past a line (not yet confirmed lost) the collar fixes at least this often, whatever the
+/// interval inside, so that a dog that got out is confirmed lost, or seen back inside, quickly.
+constexpr uint32_t kOutsideGpsSecs = 5;
 
 struct Fix {
     int32_t latI;
@@ -217,16 +235,20 @@ class CorrectionPulser
 };
 
 /// GPS update interval in seconds for the current state and clearance, or 0 to leave Meshtastic's
-/// own configured interval alone (no fences, or pacing turned off). Inside, the interval is the
-/// time the dog needs at dogSpeedMps to cover the distance to the outermost band (alertWidthM),
-/// clamped between gpsFastSecs and gpsSlowSecs.
-/// GPS fix interval in seconds (0 = leave the owner's setting). With the lost beacon on, fixes
-/// come half as often as in lost mode, to make the battery last. relayed = false: nothing can pass
-/// the position on (the base is out of reach and no phone app is connected, see BaseLink), so a
-/// lost dog (lost, or the beacon on) gets a fix only every kOutOfReachGpsSecs. Inside the fences
-/// the pace never depends on the base: the collar enforces the fence on its own.
+/// own configured interval alone (no fences, or pacing turned off). Inside, by the distance to the
+/// outermost band (alertWidthM): within kNearAlertM, gpsFastSecs; from there to kMidAlertM, rising
+/// in step with the distance to kMidGpsSecs; further in, kFarGpsSecs. These are the owner's
+/// choice, for battery in big yards, over steps scaled by the dog's speed: a dog that runs from
+/// just past kNearAlertM can reach the line before the next fix.
+/// GPS fix interval in seconds (0 = leave the owner's setting). A lost dog (lost, or the beacon
+/// on) gets a fix every kLostGpsSecs while something can pass its position on (relayed: the base
+/// answers, directly or through the mesh, or the phone app is connected, see BaseLink), and the GPS
+/// is powered down otherwise (kLostOffGpsSecs). Inside the fences
+/// the pace never depends on the base: the collar enforces the fence on its own. sameEverywhere:
+/// the owner chose gpsFastSecs wherever the dog is inside, whatever the distance to the bands (it
+/// changes nothing once the dog is lost or past a line).
 uint32_t gpsIntervalSecs(const Settings &s, CollarState state, float clearanceM, uint16_t alertWidthM, bool beacon = false,
-                         bool relayed = true);
+                         bool relayed = true, bool sameEverywhere = false);
 
 /// How long without a fix before the last one counts as old: the GPS interval (0 = Meshtastic's
 /// default, 2 minutes) plus a minute for the GPS to wake and search. At 10 s or less the GPS
@@ -402,8 +424,10 @@ class BaseLink
     uint32_t firstUnansweredMs_ = 0; // when the first of them went
 };
 
-/// The GPS fix interval for a lost dog while nothing can pass its position on: as often as the
-/// lost beacon's mesh message, which carries the newest position to anyone who hears it.
-constexpr uint32_t kOutOfReachGpsSecs = 5 * 60;
+/// The GPS fix interval for a lost dog while its position can be passed on (the owner's choice).
+constexpr uint32_t kLostGpsSecs = 60;
+/// While nothing can pass it on: the GPS powered down, as in home mode. Meshtastic still looks
+/// about once an hour, which also notices a dog that came home while the base was down.
+constexpr uint32_t kLostOffGpsSecs = 3600;
 
 } // namespace geocollar

@@ -161,6 +161,24 @@ it shows as the dog in the Meshtastic app and on other nodes. If the collar is o
 gets the change when it next reports. Both need collar firmware from 0.15.0 on; older collars keep
 reporting every 10 minutes and keep their Meshtastic name.
 
+The same form sets **GPS fix inside the fence**: how often the collar takes a fix while the dog is
+inside the fence, within 35 m of the outermost band, and away from the home mode anchor, from 0
+(the GPS always on, a fix every second) to every 30 seconds. 3 seconds unless you change it. A dog
+running at 6 m/s covers up to 18 m between fixes at 3 s and 180 m at 30 s: keep it short unless
+the bands are wide. Further from the bands, in a big yard, the collar waits longer to save
+battery: from 35 to 100 m in step with the distance, up to every 2 minutes, and every 3 minutes
+beyond 100 m. That is a choice for battery over coverage: a dog that bolts from 40 m out can
+reach the line before its next fix, and gets no correction on the way. Tick **Use this everywhere
+inside the fence** to keep the slider's interval however far the dog is from the bands (more
+battery in a big yard); it never applies once the dog is past a line or lost. At 10 seconds or less the GPS
+never switches off, which uses the most battery; above 10 s it sleeps between fixes, which saves
+something only if it gets its fix back quickly after waking (see
+[Battery life](../docs/hardware.md#battery-life)). Past a line the collar fixes at least every
+5 seconds whatever this says; lost mode and home mode keep their own pace. Needs collar firmware
+0.19.6 or later. Collars on older firmware ignore it and pace their GPS themselves (every 5
+seconds near the line, up to a minute deep inside); with 0.19.6 a collar the base has not sent
+it yet uses 5 seconds within 35 m and the same slower steps further in.
+
 ## When a collar has no GPS fix
 
 Indoors, under a metal roof or in a car a collar can lose its GPS fix. It then cannot tell where
@@ -217,8 +235,8 @@ mesh, and the screen's backlight while it is lit.
   seconds costs noticeably more.
 - **Lost alert.** While a dog is lost the collar reports every 30 seconds and advertises on
   Bluetooth, which drains it faster. Silence the alert once you have the dog.
-- **GPS.** Deep inside its fences a collar takes a fix about once a minute; near a line it checks
-  every second. On the Heltec Wireless Tracker that saves little: the board has one power switch
+- **GPS.** Deep inside its fences a collar takes a fix every 2 to 3 minutes; within 35 m of the
+  bands it checks every 3 seconds (or as set). On the Heltec Wireless Tracker that saves little: the board has one power switch
   for the GPS and the screen together, Meshtastic leaves it on, and so the GPS chip runs whenever
   the collar is on. Meshtastic can be told to switch it (the Position setting **GPS EN GPIO**, 3 on the
   Tracker V1.1), which turns the GPS off between fixes while the dog is deep inside, and the
@@ -238,16 +256,19 @@ When a dog has been outside its fences for 90 seconds, its collar starts asking 
   app's device list) sees the name.
 - Every 5 minutes it posts a plain text message on the public Meshtastic channel: "Please help get
   Rex home. Call Ken 555-123-4567. Last seen 40.12345,-75.12345".
-- It takes GPS fixes half as often as normal lost mode, so the battery lasts longer.
+**GPS while lost.** A lost dog's position is only useful if something can pass it on. While the
+base answers the collar, directly or through other Meshtastic nodes, or a phone with the
+GeoCollar app is connected to it, the collar takes a GPS fix every minute. Once the base has not
+answered its reports for 2 minutes and no app is connected, the GPS goes off (Meshtastic still
+looks about once an hour). The moment anything from the base gets through again, or the app
+connects, it takes a fix at once. The cost: the help message on the public channel carries the
+last position the collar had, which can be old, and the collar notices the dog has come home
+only once it is back in reach of the base. This applies only once the dog is outside its fences:
+inside, the collar keeps fixing as usual whether or not it can reach the base, because it
+enforces the fences on its own.
 
-**Out of reach.** A lost dog's position is only useful if something can pass it on. When the base
-has not answered a lost collar's reports for 2 minutes, directly or through other Meshtastic
-nodes, and no phone with the GeoCollar app is connected to it, the collar takes a GPS fix only
-every 5 minutes, enough to keep the position in its help message current. The moment anything
-from the base gets through again, or the app connects, it takes a fix at once and goes back to
-the usual lost-mode rate. This applies only once the dog is outside its fences: inside, the
-collar keeps fixing as usual whether or not it can reach the base, because it enforces the
-fences on its own.
+When the GeoCollar app connects, the collar takes a fix for it straight away, whatever state it is
+in, unless it has one from the last 10 seconds.
 
 It stops when the dog is back inside, or when you press **Silence lost alert**. Silenced, it
 stays quiet until the dog has been home and gets out again.

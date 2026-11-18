@@ -73,9 +73,9 @@ constexpr uint8_t kHomeFormat = 1;
 // HomeWatch::kLeaveMs), every 5 s while away. In 0.625 ms units.
 constexpr uint16_t kScanWindow = 160, kScanHomeItvl = 3200, kScanAwayItvl = 8000;
 constexpr uint32_t kStateMagic = 0x47434F4C; // "GCOL"
-constexpr uint16_t kStateFormat = 9; // 2: GPS pacing; 3: per-zone bands; 4: pulse intervals; 5: owner; 6: command seq;
-                                     // 7: report interval; 8: owner and config sequence numbers, owner's GPS interval;
-                                     // 9: companion app keys
+constexpr uint16_t kStateFormat = 10; // 2: GPS pacing; 3: per-zone bands; 4: pulse intervals; 5: owner; 6: command seq;
+                                      // 7: report interval; 8: owner and config sequence numbers, owner's GPS interval;
+                                      // 9: companion app keys; 10: GPS interval everywhere inside
 constexpr uint32_t kBeaconRefreshMs = 10 * 1000; // re-apply the beacon advertisement this often
 // With a companion app linked, the beacon's quiet half still advertises the collar's ordinary
 // name this often (2 s, in 0.625 ms units), so the owner's phone can connect at any moment.
@@ -650,6 +650,14 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
                 lastConfigSeq_ = seq;
                 if (c.hasAnchor)
                     setAnchor(c.anchor);
+                if (c.hasGpsInside && (setGpsInsideSecs(engine_.settings(), c.gpsInsideS) ||
+                                       c.gpsSameEverywhere != gpsSameEverywhere_)) {
+                    gpsSameEverywhere_ = c.gpsSameEverywhere;
+                    save = true;
+                    LOG_INFO("GeoCollar: GPS inside the fences every %u s%s, %s", (unsigned)c.gpsInsideS,
+                             c.gpsInsideS ? "" : " (always on)",
+                             gpsSameEverywhere_ ? "everywhere inside" : "within 35 m of the bands");
+                }
                 LOG_INFO("GeoCollar: report every %u s", (unsigned)(reportS_ ? reportS_ : GEOCOLLAR_STATUS_INTERVAL_MS / 1000));
             }
         } else if (type == proto::MsgType::AppKeys) {
@@ -912,17 +920,18 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
             saveState();
         }
         const uint32_t usual = gpsIntervalSecs(engine_.settings(), engine_.state(), lastClearance_,
-                                               alertWidthM(engine_.fences()), beacon_.active());
+                                               alertWidthM(engine_.fences()), beacon_.active(), true, gpsSameEverywhere_);
         // A lost dog's position is only worth fixing as often as something can pass it on: the
         // base (directly or through the mesh) or a phone with the companion app nearby.
         const bool relayed = link_.reachable() || (lastAppRequestMs_ && millis() - lastAppRequestMs_ < kAppNearbyMs);
         const uint32_t want = relayed ? usual
                                       : gpsIntervalSecs(engine_.settings(), engine_.state(), lastClearance_,
-                                                        alertWidthM(engine_.fences()), beacon_.active(), false);
+                                                        alertWidthM(engine_.fences()), beacon_.active(), false,
+                                                        gpsSameEverywhere_);
         const bool outOfReach = want != usual;
         if (outOfReach != gpsOutOfReach_)
-            LOG_INFO("GeoCollar: %s", outOfReach ? "lost and nothing can pass the position on: a fix every 5 minutes"
-                                                 : "the position can be passed on: lost-mode fixes as usual");
+            LOG_INFO("GeoCollar: %s", outOfReach ? "lost and nothing can pass the position on: GPS off"
+                                                 : "the position can be passed on: a fix every minute");
         // Meshtastic adds a wait after each lock to the interval it is given (gpsSettingSecs), so
         // it is given less, to make the fixes come every `want` seconds.
         // Home: as slow as Meshtastic goes, and powered down below.
@@ -933,11 +942,16 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
         }
         lastPacedSecs_ = current;
 #if GEOCOLLAR_HAS_GPS
-        // Back in reach (or a phone came): the GPS may be asleep for minutes on the slow interval,
-        // which Meshtastic fixed when it put it to sleep, so wake it for a fix now.
-        if (gpsOutOfReach_ && !outOfReach && !home_.home() && gps &&
-            config.position.gps_mode == meshtastic_Config_PositionConfig_GpsMode_ENABLED && !config.position.fixed_position)
-            gps->up();
+        // Back in reach (or a phone came): the GPS is asleep for up to an hour, which Meshtastic
+        // fixed when it put it to sleep, so wake it for a fix now. Out of reach: power it down
+        // now rather than after the fix in progress.
+        if (gpsOutOfReach_ != outOfReach && !home_.home() && gps &&
+            config.position.gps_mode == meshtastic_Config_PositionConfig_GpsMode_ENABLED && !config.position.fixed_position) {
+            if (outOfReach)
+                gps->down();
+            else
+                gps->up();
+        }
 #endif
         gpsOutOfReach_ = outOfReach;
 #if GEOCOLLAR_HAS_GPS
@@ -1332,7 +1346,11 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
         case proto::AppLink::Outcome::Reply:
             break;
         case proto::AppLink::Outcome::Request: {
-            lastAppRequestMs_ = millis() | 1; // a phone is connected, and can show where the dog is
+            // A phone is connected, and can show where the dog is. Just connected: a fix for it now,
+            // whatever the pace (the app asks again in a few seconds and gets it).
+            if (!lastAppRequestMs_ || millis() - lastAppRequestMs_ >= kAppNearbyMs)
+                fixForApp();
+            lastAppRequestMs_ = millis() | 1;
             proto::AppResult result = proto::AppResult::Done;
             if (!proto::appActionAllowed(req.action)) {
                 result = proto::AppResult::NotAllowed;
@@ -1362,6 +1380,20 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
         memcpy(p->decoded.payload.bytes, reply, n);
         p->decoded.payload.size = n;
         service->sendToPhone(p);
+    }
+
+    /// Wake the GPS for a fix for a phone that has just connected, unless the newest is fresh.
+    void fixForApp()
+    {
+#if GEOCOLLAR_HAS_GPS
+        const bool fresh = lastFixTimestamp_ != 0 && millis() - lastFix_.nowMs < 10 * 1000;
+        if (!fresh && gps && config.position.gps_mode == meshtastic_Config_PositionConfig_GpsMode_ENABLED &&
+            !config.position.fixed_position) {
+            LOG_INFO("GeoCollar: phone app connected, taking a GPS fix for it");
+            lastGpsKickMs_ = millis();
+            gps->up();
+        }
+#endif
     }
 
     /// Seconds since the position in the report was taken; kAppNoFixAge if there has been none.
@@ -1432,6 +1464,7 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
     // Persistence: [magic u32][format u16][base node u32][fence version u16][blob len u16][blob][Settings]
     // [OwnerInfo][command seq u32][report interval s u16][owner seq u32][config seq u32]
     // [owner's GPS interval s u32][that value is known u8][app keys seq u32][AppKeySet]
+    // [GPS interval everywhere inside u8]
     void saveState()
     {
         const size_t blobLen = proto::encodeFenceSet(blob_, sizeof(blob_), engine_.fences());
@@ -1459,6 +1492,8 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
         f.write(&gpsKnown, sizeof(gpsKnown));
         f.write((const uint8_t *)&lastAppKeysSeq_, sizeof(lastAppKeysSeq_));
         f.write((const uint8_t *)&appKeys_, sizeof(appKeys_));
+        const uint8_t everywhere = gpsSameEverywhere_;
+        f.write(&everywhere, sizeof(everywhere));
         if (!f.close())
             LOG_ERROR("GeoCollar: failed to save %s", kStateFile);
     }
@@ -1479,7 +1514,7 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
         uint32_t seq = 0, ownerSeq = 0, configSeq = 0, gpsSecs = 0, appSeq = 0;
         proto::AppKeySet appKeys;
         uint16_t reportS = 0;
-        uint8_t gpsKnown = 0;
+        uint8_t gpsKnown = 0, everywhere = 0;
         bool ok = f.read((uint8_t *)&magic, sizeof(magic)) == sizeof(magic) && magic == kStateMagic &&
                   f.read((uint8_t *)&format, sizeof(format)) == sizeof(format) && format >= 4 && format <= kStateFormat &&
                   f.read((uint8_t *)&base, sizeof(base)) == sizeof(base) &&
@@ -1495,7 +1530,8 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
                                   f.read(&gpsKnown, sizeof(gpsKnown)) == sizeof(gpsKnown))) &&
                   (format < 9 || (f.read((uint8_t *)&appSeq, sizeof(appSeq)) == sizeof(appSeq) &&
                                   f.read((uint8_t *)&appKeys, sizeof(appKeys)) == sizeof(appKeys) &&
-                                  appKeys.count <= proto::kMaxAppKeys));
+                                  appKeys.count <= proto::kMaxAppKeys)) &&
+                  (format < 10 || f.read(&everywhere, sizeof(everywhere)) == sizeof(everywhere));
         f.close();
         if (ok && proto::decodeFenceSet(blob_, len16, version, scratch_)) {
             engine_.setFences(scratch_);
@@ -1512,6 +1548,7 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
             reportS_ = (reportS == 0 || (reportS >= proto::kMinReportS && reportS <= proto::kMaxReportS)) ? reportS : 0;
             lastAppKeysSeq_ = appSeq;
             appKeys_ = appKeys;
+            gpsSameEverywhere_ = everywhere == 1;
         } else {
             LOG_WARN("GeoCollar: saved state unreadable, starting without fences");
         }
@@ -1560,6 +1597,7 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
     BaseLink link_;                 // whether the base answers the collar's reports
     bool gpsOutOfReach_ = false;    // applyGpsPacing() has slowed a lost dog's GPS: nothing can pass the position on
     uint32_t lastAppRequestMs_ = 0; // the companion app's latest request (0: none since boot)
+    bool gpsSameEverywhere_ = false; // the owner's GPS interval wherever the dog is inside (saved)
     bool powerSave_ = false;    // applyPowerSettings() changed a setting that has to be saved
     bool powerRestart_ = false; // and Bluetooth needs a restart to come back
     bool autoCorrection_ = false; // the correction playing came from the fence, not from the owner
