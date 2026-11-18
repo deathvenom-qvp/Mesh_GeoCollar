@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.19.5
+
+A lost dog's collar saves its GPS while nothing can pass its position on. New collar firmware.
+Tested with the firmware's PC tests and the firmware build check, **not on a real collar**: how
+quickly the base's acknowledgements come back over a real mesh, and the current saved, have not
+been measured.
+
+- **Out of reach, fewer fixes.** While the dog is lost, if the base has not answered the collar's
+  last 3 reports, over at least 2 minutes, and no phone with the GeoCollar app is connected, the
+  collar takes a GPS fix every 5 minutes instead of every 15 to 30 seconds. That still keeps the
+  position in the lost-dog help message (also every 5 minutes) current.
+- **Back in reach, back to normal.** Anything from the base, straight from its radio or relayed
+  by other Meshtastic nodes, counts: the acknowledgement of a report, a command, one of its
+  broadcasts. The collar takes a fix at once and goes back to the usual lost-mode rate. The app
+  connecting does the same.
+- **Inside the fences nothing changes.** The collar enforces its fences on its own, so it keeps
+  fixing as usual even when the base is switched off or restarting. Only a dog already lost is
+  slowed.
+- Flash collars again to get it. The base needs nothing new.
+
 ## 0.19.4
 
 The base picks up a home moved in Home Assistant. A base change only: collars need nothing new.

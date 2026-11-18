@@ -105,6 +105,9 @@ constexpr uint32_t kScreenOnSecs = 30;
 // While a correction waits for its second look and the GPS has no new reading yet, look for one
 // this often.
 constexpr int32_t kVerifyPollMs = 200;
+// The companion app asks for a report every few seconds while it is connected. A request this
+// recent means a phone nearby can show the collar's position, even with the base out of reach.
+constexpr uint32_t kAppNearbyMs = 60 * 1000;
 
 uint16_t clampU16(uint32_t v)
 {
@@ -512,10 +515,21 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
     }
 
   protected:
+    /// GeoCollar's own port, and anything else from the base (acknowledgements of the collar's
+    /// reports, its broadcasts), which only says that the base is in reach (see BaseLink).
+    bool wantPacket(const meshtastic_MeshPacket *p) override
+    {
+        return SinglePortModule::wantPacket(p) || (baseNode_ && p->from == baseNode_ && !isFromUs(p));
+    }
+
     // Only accept GeoCollar packets that are PKI direct messages from an authorized admin key,
     // i.e. the owner's base station. Everything else on our port is ignored.
     ProcessMessage handleReceived(const meshtastic_MeshPacket &mp) override
     {
+        if (baseNode_ && mp.from == baseNode_ && !isFromUs(&mp))
+            link_.onHeard();
+        if (mp.decoded.portnum != static_cast<meshtastic_PortNum>(proto::kPortNum))
+            return ProcessMessage::CONTINUE; // not ours: Meshtastic's own modules handle it as usual
         if (isFromUs(&mp)) {
             // From a client plugged into this collar itself, which for a collar means the
             // companion app over Bluetooth. Being connected proves nothing: handleApp() checks
@@ -537,6 +551,7 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
             baseNode_ = mp.from;
             save = true; // so a restart still knows where to report
         }
+        link_.onHeard();
 
         const uint8_t *buf = mp.decoded.payload.bytes;
         const size_t len = mp.decoded.payload.size;
@@ -678,6 +693,7 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
             const uint32_t now = millis();
             watchGps(now);
             runHome(now);
+            runLink(now);
             applyGpsPacing();
             report(now);
         }
@@ -858,7 +874,8 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
         if (!noFix) {
             kickWaited_ = false;
         } else if (gps && config.position.gps_mode == meshtastic_Config_PositionConfig_GpsMode_ENABLED &&
-                   !config.position.fixed_position && !home_.home() && now - lastGpsKickMs_ >= kGpsKickMs) {
+                   !config.position.fixed_position && !home_.home() && !gpsOutOfReach_ &&
+                   now - lastGpsKickMs_ >= kGpsKickMs) {
             if (gps->hasLock() && !kickWaited_) {
                 // The GPS has just locked and is about to report the fix. A restart in the moment
                 // it finishes would make Meshtastic count the search as failed and put the GPS
@@ -894,8 +911,18 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
             ownerGpsSecs_ = current;
             saveState();
         }
-        const uint32_t want = gpsIntervalSecs(engine_.settings(), engine_.state(), lastClearance_,
-                                              alertWidthM(engine_.fences()), beacon_.active());
+        const uint32_t usual = gpsIntervalSecs(engine_.settings(), engine_.state(), lastClearance_,
+                                               alertWidthM(engine_.fences()), beacon_.active());
+        // A lost dog's position is only worth fixing as often as something can pass it on: the
+        // base (directly or through the mesh) or a phone with the companion app nearby.
+        const bool relayed = link_.reachable() || (lastAppRequestMs_ && millis() - lastAppRequestMs_ < kAppNearbyMs);
+        const uint32_t want = relayed ? usual
+                                      : gpsIntervalSecs(engine_.settings(), engine_.state(), lastClearance_,
+                                                        alertWidthM(engine_.fences()), beacon_.active(), false);
+        const bool outOfReach = want != usual;
+        if (outOfReach != gpsOutOfReach_)
+            LOG_INFO("GeoCollar: %s", outOfReach ? "lost and nothing can pass the position on: a fix every 5 minutes"
+                                                 : "the position can be passed on: lost-mode fixes as usual");
         // Meshtastic adds a wait after each lock to the interval it is given (gpsSettingSecs), so
         // it is given less, to make the fixes come every `want` seconds.
         // Home: as slow as Meshtastic goes, and powered down below.
@@ -905,6 +932,14 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
             current = target;
         }
         lastPacedSecs_ = current;
+#if GEOCOLLAR_HAS_GPS
+        // Back in reach (or a phone came): the GPS may be asleep for minutes on the slow interval,
+        // which Meshtastic fixed when it put it to sleep, so wake it for a fix now.
+        if (gpsOutOfReach_ && !outOfReach && !home_.home() && gps &&
+            config.position.gps_mode == meshtastic_Config_PositionConfig_GpsMode_ENABLED && !config.position.fixed_position)
+            gps->up();
+#endif
+        gpsOutOfReach_ = outOfReach;
 #if GEOCOLLAR_HAS_GPS
         // Home mode switches the GPS off and on here, after the interval is set: Meshtastic reads
         // it to decide how long the GPS sleeps, and that it reports a fix at once when it wakes.
@@ -919,6 +954,13 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
             }
         }
 #endif
+    }
+
+    /// Whether the base is answering the collar's reports (see BaseLink). applyGpsPacing() acts on it.
+    void runLink(uint32_t now)
+    {
+        if (link_.tick(now))
+            LOG_INFO("GeoCollar: base %s", link_.reachable() ? "in reach again" : "out of reach: no answer to the last reports");
     }
 
     /// Home mode: the GPS off while the collar is close to the anchor (see HomeWatch).
@@ -1290,6 +1332,7 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
         case proto::AppLink::Outcome::Reply:
             break;
         case proto::AppLink::Outcome::Request: {
+            lastAppRequestMs_ = millis() | 1; // a phone is connected, and can show where the dog is
             proto::AppResult result = proto::AppResult::Done;
             if (!proto::appActionAllowed(req.action)) {
                 result = proto::AppResult::NotAllowed;
@@ -1343,6 +1386,7 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
         p->decoded.payload.size =
             proto::encodeAppKeysAck(p->decoded.payload.bytes, sizeof(p->decoded.payload.bytes), lastAppKeysSeq_, appKeys_.count);
         service->sendToMesh(p, RX_SRC_LOCAL, false);
+        link_.onSent(millis());
     }
 
     proto::StatusReport currentStatus() const
@@ -1379,6 +1423,7 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
         p->decoded.payload.size =
             proto::encodeStatus(p->decoded.payload.bytes, sizeof(p->decoded.payload.bytes), type, s);
         service->sendToMesh(p, RX_SRC_LOCAL, false);
+        link_.onSent(millis());
         lastStatusMs_ = millis();
         bootReported_ = true;
         reportedNoFix_ = fixWatch_.noFix();
@@ -1512,6 +1557,9 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
     HomeWatch home_;
     uint16_t homeFenceVersion_ = 0; // the fences home_ last saw
     bool gpsHome_ = false;          // applyGpsPacing() has powered the GPS down for home mode
+    BaseLink link_;                 // whether the base answers the collar's reports
+    bool gpsOutOfReach_ = false;    // applyGpsPacing() has slowed a lost dog's GPS: nothing can pass the position on
+    uint32_t lastAppRequestMs_ = 0; // the companion app's latest request (0: none since boot)
     bool powerSave_ = false;    // applyPowerSettings() changed a setting that has to be saved
     bool powerRestart_ = false; // and Bluetooth needs a restart to come back
     bool autoCorrection_ = false; // the correction playing came from the fence, not from the owner
