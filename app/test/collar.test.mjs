@@ -15,7 +15,7 @@ import { hex, unhex } from '../src/bytes.js';
 import { CollarLink, Link } from '../src/collar.js';
 import { CollarHalf, DemoDog } from '../src/demo.js';
 import { FakeNode } from '../src/fakenode.js';
-import { matchesCollar } from '../src/match.js';
+import { matchesCollar, pickConnected } from '../src/match.js';
 import { bearingDeg, compass, distanceM, formatAge, formatDistance, offset } from '../src/geo.js';
 
 const NODE = 0xa1b2c3d4;
@@ -242,6 +242,22 @@ test('picks the collar out of the Bluetooth names around', () => {
   assert.equal(seen(['lost']), false);
   assert.equal(matchesCollar({ ...collar, deviceId: 'AA:BB' }, { deviceId: 'AA:BB', names: [] }), true);
   assert.equal(matchesCollar({ ...collar, bleName: '', dog: '' }, { deviceId: 'x', names: ['_1234', ' is lost'] }), false);
+});
+
+test('finds the collar among the devices the phone is already connected to', () => {
+  const buds = { deviceId: 'EE:01', name: 'Galaxy Buds' };
+  const other = { deviceId: 'EE:02', name: 'Meshtastic_9f00' };
+  const ours = { deviceId: 'EE:03', name: 'BELL_c3d4' };
+  assert.equal(pickConnected(collar, [buds, ours]), 'EE:03');
+  assert.equal(pickConnected(collar, [other, ours], new Set(), true), 'EE:03', 'the right name first');
+  assert.equal(pickConnected(collar, [buds]), null, 'Android lists everything: the name has to match');
+  assert.equal(pickConnected(collar, [{ deviceId: 'EE:04' }]), null);
+  assert.equal(pickConnected(collar, [other], new Set(), true), 'EE:02', 'iOS lists only Meshtastic devices: worth a try');
+  assert.equal(pickConnected(collar, [other], new Set(['EE:02']), true), null, 'not one that proved to be another node');
+  assert.equal(pickConnected(collar, [ours], new Set(['EE:03'])), null);
+  assert.equal(pickConnected({ ...collar, deviceId: 'EE:05' }, [{ deviceId: 'EE:05', name: '' }]), 'EE:05', 'the one it used before');
+  assert.equal(pickConnected(collar, [], new Set(), true), null);
+  assert.equal(pickConnected(collar, undefined), null);
 });
 
 test('distances and directions', () => {
