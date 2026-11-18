@@ -1091,6 +1091,89 @@ static void testSha256()
     CHECK(!sameBytes(d, other, sizeof(d)));
 }
 
+static void testBaseLink()
+{
+    // In reach until shown otherwise, with no reports sent at all (no base yet) however long.
+    BaseLink l;
+    CHECK(l.reachable());
+    CHECK(!l.tick(0));
+    CHECK(!l.tick(100000000) && l.reachable());
+
+    // Reports answered: in reach.
+    const uint32_t t = 1000000;
+    for (uint32_t i = 0; i < 10; i++) {
+        l.onSent(t + i * 30000);
+        l.onHeard();
+        CHECK(!l.tick(t + i * 30000 + 1000) && l.reachable());
+    }
+
+    // Three unanswered reports are not enough on their own: the base has 2 minutes from the first.
+    const uint32_t u = 2000000;
+    l.onSent(u);
+    l.onSent(u + 30000);
+    l.onSent(u + 60000);
+    CHECK(!l.tick(u + 60000) && l.reachable());
+    CHECK(!l.tick(u + BaseLink::kSilentMs - 1) && l.reachable());
+    CHECK(l.tick(u + BaseLink::kSilentMs) && !l.reachable());
+    CHECK(!l.tick(u + BaseLink::kSilentMs + 1000) && !l.reachable()); // the change is told once
+
+    // Nor is a long silence after fewer reports: inside, a report goes every 10 minutes.
+    BaseLink q;
+    q.onSent(0);
+    q.onSent(600000);
+    CHECK(!q.tick(1000000) && q.reachable());
+    q.onSent(1200000);
+    CHECK(q.tick(1200000) && !q.reachable()); // 20 minutes since the first: out of reach
+
+    // Anything from the base brings it back at once, and starts the count again.
+    l.onSent(u + 150000);
+    l.onHeard();
+    CHECK(l.reachable());
+    CHECK(l.tick(u + 151000) && l.reachable());
+    CHECK(!l.tick(u + 152000));
+    l.onSent(u + 200000);
+    l.onSent(u + 230000);
+    CHECK(!l.tick(u + 1000000) && l.reachable()); // two unanswered: still in reach
+    l.onSent(u + 1000000);
+    CHECK(l.tick(u + 1000000) && !l.reachable());
+    // Heard twice in a row while in reach: no change to report.
+    l.onHeard();
+    l.onHeard();
+    CHECK(l.tick(u + 1001000) && l.reachable());
+
+    // millis() wrapping round while out of reach changes nothing.
+    BaseLink w;
+    const uint32_t near = UINT32_MAX - 60000;
+    w.onSent(near);
+    w.onSent(near + 30000);
+    w.onSent(near + 60000); // wrapped
+    CHECK(!w.tick(near + 90000) && w.reachable());
+    CHECK(w.tick(near + BaseLink::kSilentMs) && !w.reachable());
+
+    // The GPS: a lost dog nobody can hear about gets a fix every 5 minutes, beacon or not.
+    Settings s;
+    CHECK(gpsIntervalSecs(s, CollarState::Lost, -50, 10, false, true) == s.gpsLostSecs);
+    CHECK(gpsIntervalSecs(s, CollarState::Lost, -50, 10, false, false) == kOutOfReachGpsSecs);
+    CHECK(gpsIntervalSecs(s, CollarState::Lost, -50, 10, true, false) == kOutOfReachGpsSecs);
+    CHECK(gpsIntervalSecs(s, CollarState::Outside, -5, 10, true, false) == kOutOfReachGpsSecs); // beacon on, not yet confirmed
+    // Inside the fences, near a line or not yet confirmed outside, the base makes no difference:
+    // the collar enforces the fence on its own.
+    CHECK(gpsIntervalSecs(s, CollarState::Inside, 1000, 10, false, false) == 60);
+    CHECK(gpsIntervalSecs(s, CollarState::Inside, 20, 10, false, false) == 5);
+    CHECK(gpsIntervalSecs(s, CollarState::Warning, 500, 10, false, false) == 5);
+    CHECK(gpsIntervalSecs(s, CollarState::Outside, -5, 10, false, false) == 5);
+    // Pacing off or no fences: the owner's interval, as before.
+    CHECK(gpsIntervalSecs(s, CollarState::NoFence, 500, 10, false, false) == 0);
+    s.gpsPacing = false;
+    CHECK(gpsIntervalSecs(s, CollarState::Lost, -50, 10, false, false) == 0);
+    // A lost interval already slower than that is kept.
+    s.gpsPacing = true;
+    s.gpsLostSecs = 400;
+    CHECK(gpsIntervalSecs(s, CollarState::Lost, -50, 10, false, false) == 400);
+    // What Meshtastic is given, with its hold after each lock, for a fix every 5 minutes.
+    CHECK(gpsSettingSecs(kOutOfReachGpsSecs) == kOutOfReachGpsSecs - 20);
+}
+
 static void testAppLink()
 {
     using namespace proto;
@@ -1284,6 +1367,7 @@ int main()
     testPulser();
     testBeacon();
     testHomeWatch();
+    testBaseLink();
     testGpsPacing();
     testFixWatch();
     testProtocol();

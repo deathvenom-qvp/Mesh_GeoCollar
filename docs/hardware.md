@@ -121,6 +121,16 @@ What GeoCollar changes on the collar, and why (each can be turned off with a bui
 - **Meshtastic power saving forced off.** On an ESP32 it sleeps for minutes at a time (5 by
   default) with Bluetooth off. The GPS is not read and the fence is not checked in that time, so
   a dog could walk out without a single correction. Not configurable.
+- **GPS slowed for a lost dog out of reach.** While the dog is lost (or the lost beacon is on),
+  the base has not answered the collar's reports for 2 minutes and at least 3 reports in a row,
+  and no phone with the companion app has asked for anything in the last minute, the collar
+  takes a fix every 5 minutes instead of every 15 or 30 s. Nothing could pass a fresher position
+  on, except the lost beacon's mesh message, which goes every 5 minutes anyway. Anything from the
+  base (the acknowledgement of a report, a message, one of its broadcasts), directly or relayed
+  by the mesh, counts as an answer, and wakes the GPS for a fix at once. While slowed, the collar
+  also stops restarting a GPS search that finds nothing every minute, and leaves the timing to
+  Meshtastic. Inside the fences nothing changes: the collar enforces them without the base, so a
+  base that is switched off or restarting never slows the GPS there.
 - **GPS fixes on time.** For an interval over 10 s Meshtastic holds the GPS on for up to 20 s
   after each lock before it reports the fix, and counts the interval from then. GeoCollar now
   asks for an interval that much shorter, so fixes really come as often as the pacing promises
@@ -187,7 +197,11 @@ Left as they are, and why:
    warm (a few seconds) or cold (30 s or more) once Vext has been off. If it is cold, deep-inside
    pacing saves little, and the GPS could as well stay on. It is also the restart time to pick
    for home mode.
-4. Home mode: with an anchor set, watch for `GeoCollar: home, near the anchor: GPS off` in the
+4. Out of reach: force a collar lost from the base, then unplug the base radio. After about 2
+   minutes the serial log says `GeoCollar: base out of reach` and `lost and nothing can pass the
+   position on`, and the GPS current should drop to a short burst every 5 minutes. Plug the radio
+   back in: the next acknowledged report brings `base in reach again` and a fix straight away.
+5. Home mode: with an anchor set, watch for `GeoCollar: home, near the anchor: GPS off` in the
    serial log, the current dropping, and `away from the anchor: GPS on` a few seconds after
    carrying the collar out of range. If the scan cannot start, the log says
    `cannot listen for the home anchor`.

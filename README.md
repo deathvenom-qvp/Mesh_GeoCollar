@@ -55,7 +55,11 @@ least a second apart; if the two fixes are in different bands, the milder one co
 Fixes with poor PDOP or few satellites are ignored entirely.
 
 The collar also paces its own GPS: every 5 s near the line, slowing to once a minute deep inside
-(the time a running dog would need to reach the outermost band), and every 15 s while lost.
+(the time a running dog would need to reach the outermost band), and every 15 s while lost. A
+lost dog's collar that has had no answer from the base for 2 minutes (directly or through the
+mesh) and has no phone app connected takes a fix only every 5 minutes, since nothing can pass
+the position on; it goes back to the usual rate as soon as the base answers. Inside the fences
+the base makes no difference: the collar enforces them on its own.
 
 ## Repository layout
 

@@ -365,17 +365,19 @@ void FenceEngine::correctHard(Decision &d, uint32_t nowMs)
     }
 }
 
-uint32_t gpsIntervalSecs(const Settings &s, CollarState state, float clearanceM, uint16_t alertWidthM, bool beacon)
+uint32_t gpsIntervalSecs(const Settings &s, CollarState state, float clearanceM, uint16_t alertWidthM, bool beacon,
+                         bool relayed)
 {
     if (!s.gpsPacing || state == CollarState::NoFence)
         return 0;
     const uint32_t fast = s.gpsFastSecs ? s.gpsFastSecs : 1;
-    if (beacon)
-        return 2 * (s.gpsLostSecs ? s.gpsLostSecs : fast);
+    const uint32_t lost = s.gpsLostSecs ? s.gpsLostSecs : fast;
+    if (beacon || state == CollarState::Lost) {
+        const uint32_t secs = beacon ? 2 * lost : lost;
+        return !relayed && secs < kOutOfReachGpsSecs ? kOutOfReachGpsSecs : secs;
+    }
     const uint32_t slow = s.gpsSlowSecs > fast ? s.gpsSlowSecs : fast;
     switch (state) {
-    case CollarState::Lost:
-        return s.gpsLostSecs ? s.gpsLostSecs : fast;
     case CollarState::Warning:
     case CollarState::Outside:
         return fast;
@@ -391,6 +393,34 @@ uint32_t gpsIntervalSecs(const Settings &s, CollarState state, float clearanceM,
     if (secs >= (float)slow)
         return slow;
     return (uint32_t)secs;
+}
+
+void BaseLink::onSent(uint32_t nowMs)
+{
+    if (unanswered_ == 0)
+        firstUnansweredMs_ = nowMs;
+    if (unanswered_ < UINT8_MAX)
+        unanswered_++;
+}
+
+void BaseLink::onHeard()
+{
+    unanswered_ = 0;
+    if (!reachable_) {
+        reachable_ = true;
+        changed_ = true;
+    }
+}
+
+bool BaseLink::tick(uint32_t nowMs)
+{
+    if (reachable_ && unanswered_ >= kMissLimit && nowMs - firstUnansweredMs_ >= kSilentMs) {
+        reachable_ = false;
+        changed_ = true;
+    }
+    const bool changed = changed_;
+    changed_ = false;
+    return changed;
 }
 
 uint32_t fixOverdueMs(uint32_t gpsIntervalSecs)

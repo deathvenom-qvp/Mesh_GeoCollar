@@ -221,8 +221,12 @@ class CorrectionPulser
 /// time the dog needs at dogSpeedMps to cover the distance to the outermost band (alertWidthM),
 /// clamped between gpsFastSecs and gpsSlowSecs.
 /// GPS fix interval in seconds (0 = leave the owner's setting). With the lost beacon on, fixes
-/// come half as often as in lost mode, to make the battery last.
-uint32_t gpsIntervalSecs(const Settings &s, CollarState state, float clearanceM, uint16_t alertWidthM, bool beacon = false);
+/// come half as often as in lost mode, to make the battery last. relayed = false: nothing can pass
+/// the position on (the base is out of reach and no phone app is connected, see BaseLink), so a
+/// lost dog (lost, or the beacon on) gets a fix only every kOutOfReachGpsSecs. Inside the fences
+/// the pace never depends on the base: the collar enforces the fence on its own.
+uint32_t gpsIntervalSecs(const Settings &s, CollarState state, float clearanceM, uint16_t alertWidthM, bool beacon = false,
+                         bool relayed = true);
 
 /// How long without a fix before the last one counts as old: the GPS interval (0 = Meshtastic's
 /// default, 2 minutes) plus a minute for the GPS to wake and search. At 10 s or less the GPS
@@ -364,5 +368,42 @@ class HomeWatch
 
 /// The GPS update interval while home: Meshtastic powers the GPS down and leaves it there.
 constexpr uint32_t kHomeGpsSecs = 3600;
+
+// ---------------------------------------------------------------------------------------------
+// Out of reach: a lost dog's GPS slowed while nothing can pass its position on
+// ---------------------------------------------------------------------------------------------
+
+/// Whether the base station is answering, directly or through other mesh nodes. Every report to
+/// the base asks for an acknowledgement, and the base counts as heard whenever anything from it
+/// arrives: that acknowledgement, a message for the collar, or one of its broadcasts. The base is
+/// out of reach once kMissLimit reports in a row have gone unanswered and nothing has come from it
+/// for kSilentMs since the first of them; it is back in reach the moment anything from it
+/// arrives. In reach until shown otherwise, so a collar that has just started, or has no base yet,
+/// paces its GPS as usual. A forged packet "from the base" can only keep it in reach, which keeps
+/// the GPS at its usual pace: the safe side.
+class BaseLink
+{
+  public:
+    static constexpr uint8_t kMissLimit = 3;
+    static constexpr uint32_t kSilentMs = 2 * 60 * 1000;
+
+    /// A report that asks for an acknowledgement went to the base.
+    void onSent(uint32_t nowMs);
+    /// Something came from the base.
+    void onHeard();
+    /// Call about once a second. Returns true when reachable() changed (here or in onHeard).
+    bool tick(uint32_t nowMs);
+    bool reachable() const { return reachable_; }
+
+  private:
+    bool reachable_ = true;
+    bool changed_ = false;
+    uint8_t unanswered_ = 0;         // reports sent since the base was last heard
+    uint32_t firstUnansweredMs_ = 0; // when the first of them went
+};
+
+/// The GPS fix interval for a lost dog while nothing can pass its position on: as often as the
+/// lost beacon's mesh message, which carries the newest position to anyone who hears it.
+constexpr uint32_t kOutOfReachGpsSecs = 5 * 60;
 
 } // namespace geocollar
