@@ -71,7 +71,12 @@ export function fields(buf) {
 const pick = (list, field, wire) => { const f = list.find(x => x.field === field && x.wire === wire); return f ? f.value : undefined; };
 
 export const encodeWantConfig = (nonce = CONFIG_NONCE) => fVarint(3, nonce);     // ToRadio.want_config_id
-export const encodeHeartbeat = () => fBytes(7, new Uint8Array(0));                // ToRadio.heartbeat
+/// ToRadio.heartbeat. A nonce other than 0 makes each one different from the last write, which
+/// matters: the collar drops a write that is the same as the one before it on the same Bluetooth
+/// link (NimbleBluetooth's lastToRadio), and so would drop a second "want config" otherwise.
+/// Nonce 1 asks the node to broadcast its node info, so it is never used.
+export const encodeHeartbeat = (nonce = 0) =>
+  fBytes(7, nonce ? fVarint(1, nonce >>> 0) : new Uint8Array(0));
 
 /// ToRadio.packet: a GeoCollar message for node `to`, which is the node we are connected to.
 export function encodeToRadioPacket({ to, id, portnum, payload }) {
@@ -107,6 +112,33 @@ export function decodeFromRadio(buf) {
   return {};
 }
 
+const FROM_RADIO_FIELDS = {
+  2: 'packet', 3: 'my_info', 4: 'node_info', 5: 'config', 6: 'log_record', 7: 'config_complete_id', 8: 'rebooted',
+  9: 'module_config', 10: 'channel', 11: 'queue_status', 12: 'xmodem', 13: 'metadata', 14: 'mqtt_proxy',
+  15: 'file_info', 16: 'client_notification', 17: 'device_ui_config',
+};
+
+/// One line about a FromRadio message, for the debug log.
+export function describeFromRadio(buf) {
+  let m, top;
+  try {
+    top = fields(buf);
+    m = decodeFromRadio(buf);
+  } catch (e) {
+    return `unreadable (${buf.length} bytes)`;
+  }
+  if (m.configComplete !== undefined) return `config_complete_id ${m.configComplete}`;
+  if (m.myNodeNum !== undefined) return `my_info node ${m.myNodeNum.toString(16).padStart(8, '0')}`;
+  if (m.packet) {
+    const p = m.packet;
+    const h = n => n.toString(16).padStart(8, '0');
+    return `packet ${h(p.from)} -> ${h(p.to)} port ${p.portnum}, ${p.payload.length} bytes`;
+  }
+  const names = top.filter(f => f.field !== 1).map(f => FROM_RADIO_FIELDS[f.field] || `field ${f.field}`);
+  if (names.includes('packet')) return 'packet (encrypted, not for this phone)';
+  return names.join(', ') || `empty (${buf.length} bytes)`;
+}
+
 // The other direction, for the demo collar and the tests' pretend radio.
 export function decodeToRadio(buf) {
   const top = fields(buf);
@@ -118,7 +150,8 @@ export function decodeToRadio(buf) {
     const d = fields(pick(p, 4, 2) || new Uint8Array(0));
     return { packet: { to: (pick(p, 2, 5) || 0) >>> 0, id: (pick(p, 6, 5) || 0) >>> 0, portnum: pick(d, 1, 0) || 0, payload: pick(d, 2, 2) || new Uint8Array(0) } };
   }
-  if (pick(top, 7, 2)) return { heartbeat: true };
+  const beat = pick(top, 7, 2);
+  if (beat) return { heartbeat: true, ...(beat.length ? { nonce: pick(fields(beat), 1, 0) || 0 } : {}) };
   return {};
 }
 

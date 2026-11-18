@@ -5,6 +5,9 @@
 import { Action, AppSession, ErrorCode, PORT, Result } from './applink.js';
 import { MeshRadio } from './radio.js';
 import { randomBytes } from './bytes.js';
+import { describe, log } from './log.js';
+
+const hex8 = n => (n >>> 0).toString(16).padStart(8, '0');
 
 // What the link is doing, for the screen.
 export const Link = {
@@ -31,6 +34,7 @@ export class CollarLink {
     this.now = opts.now || Date.now;
     this.pollMs = opts.pollMs ?? 5000;
     this.replyMs = opts.replyMs ?? 6000;
+    this.configMs = opts.configMs ?? 20000;
     this.retryMs = opts.retryMs ?? 2000;
     this.session = new AppSession(collar.keyId, collar.key, opts.random || randomBytes);
     this.state = Link.IDLE;
@@ -46,6 +50,7 @@ export class CollarLink {
   start() {
     if (!this.stopped) return;
     this.stopped = false;
+    log('link', `start: collar ${hex8(this.collar.nodeNum)}, key id ${hex8(this.collar.keyId)}`);
     this._running = this._run();
   }
 
@@ -68,6 +73,7 @@ export class CollarLink {
     if (state === this.state && detail === this.detail) return;
     this.state = state;
     this.detail = detail;
+    log('link', `state ${state}${detail ? ': ' + detail : ''}`);
     this.onState(state, detail);
   }
 
@@ -105,11 +111,16 @@ export class CollarLink {
         await this._session(() => { wait = this.retryMs; });
       } catch (e) {
         if (this.stopped) break;
+        log('link', 'session failed:', describe(e));
         unknown = e.code === 'unknown';
-        if (unknown)
+        if (unknown) {
           this._set(Link.UNKNOWN);
-        else
-          this._set(Link.WAITING, e && e.message ? e.message : String(e));
+        } else {
+          // The transport may know more, e.g. that another app shares the collar's connection.
+          const hint = this.t.hint ? this.t.hint(e) : '';
+          const text = e && e.message ? e.message : String(e);
+          this._set(Link.WAITING, hint ? `${text} ${hint}` : text);
+        }
       } finally {
         this.session.end();
         try { await this.t.close(); } catch { /* already gone */ }
@@ -138,13 +149,15 @@ export class CollarLink {
       this.inbox.push(Uint8Array.from(p.payload));
       this._poke();
     };
-    const me = await this.radio.start();
+    const me = await this.radio.start(this.configMs);
+    log('link', `connected node is ${hex8(me)}, want ${hex8(this.collar.nodeNum)}`);
     if (me !== this.collar.nodeNum) {
       if (this.t.wrongDevice) this.t.wrongDevice();
       throw new LinkError('That was a different collar. Looking again.', 'wrong');
     }
     if (this.t.confirmed) this.t.confirmed();
     await this._enqueue(() => this._hello());
+    log('link', 'the collar accepted this phone');
     this._set(Link.ONLINE);
     onOnline();
     while (!this.stopped) {

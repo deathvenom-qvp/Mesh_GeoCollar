@@ -10,8 +10,14 @@ import {
 
 export class FakeNode {
   /// handle(payload) -> reply bytes or null (may be async): the collar's GeoCollar module.
-  constructor(nodeNum, handle) {
+  /// `sharedLink`: the Bluetooth link stays up when the app closes its connection, as it does
+  /// while the Meshtastic app or the phone itself holds the collar.
+  constructor(nodeNum, handle, { sharedLink = false } = {}) {
     this.nodeNum = nodeNum >>> 0;
+    this.sharedLink = sharedLink;
+    // Like the firmware (NimbleBluetooth's lastToRadio): a write whose bytes match the start of
+    // this buffer is dropped, and every write taken is copied over its start.
+    this.lastWrite = new Uint8Array(512);
     this.handle = handle;
     this.queue = [];
     this.notify = null;
@@ -24,13 +30,19 @@ export class FakeNode {
       open: async ({ onNotify }) => { this.queue.length = 0; this.notify = onNotify; this.isOpen = true; },
       write: async bytes => {
         if (!this.isOpen) throw new Error('not connected');
+        if (bytes.every((b, i) => b === this.lastWrite[i])) return; // "Drop duplicate ToRadio packet"
+        this.lastWrite.set(bytes);
         await this.toRadio(bytes);
       },
       read: async () => {
         if (!this.isOpen) throw new Error('not connected');
         return this.queue.shift() || new Uint8Array(0);
       },
-      close: async () => { this.isOpen = false; this.notify = null; },
+      close: async () => {
+        this.isOpen = false;
+        this.notify = null;
+        if (!this.sharedLink) this.lastWrite.fill(0); // the link went down with it
+      },
     };
   }
 
