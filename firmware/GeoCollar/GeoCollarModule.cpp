@@ -930,8 +930,8 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
                                                         gpsSameEverywhere_);
         const bool outOfReach = want != usual;
         if (outOfReach != gpsOutOfReach_)
-            LOG_INFO("GeoCollar: %s", outOfReach ? "lost and nothing can pass the position on: a fix every 5 minutes"
-                                                 : "the position can be passed on: lost-mode fixes as usual");
+            LOG_INFO("GeoCollar: %s", outOfReach ? "lost and nothing can pass the position on: GPS off"
+                                                 : "the position can be passed on: a fix every minute");
         // Meshtastic adds a wait after each lock to the interval it is given (gpsSettingSecs), so
         // it is given less, to make the fixes come every `want` seconds.
         // Home: as slow as Meshtastic goes, and powered down below.
@@ -942,11 +942,16 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
         }
         lastPacedSecs_ = current;
 #if GEOCOLLAR_HAS_GPS
-        // Back in reach (or a phone came): the GPS may be asleep for minutes on the slow interval,
-        // which Meshtastic fixed when it put it to sleep, so wake it for a fix now.
-        if (gpsOutOfReach_ && !outOfReach && !home_.home() && gps &&
-            config.position.gps_mode == meshtastic_Config_PositionConfig_GpsMode_ENABLED && !config.position.fixed_position)
-            gps->up();
+        // Back in reach (or a phone came): the GPS is asleep for up to an hour, which Meshtastic
+        // fixed when it put it to sleep, so wake it for a fix now. Out of reach: power it down
+        // now rather than after the fix in progress.
+        if (gpsOutOfReach_ != outOfReach && !home_.home() && gps &&
+            config.position.gps_mode == meshtastic_Config_PositionConfig_GpsMode_ENABLED && !config.position.fixed_position) {
+            if (outOfReach)
+                gps->down();
+            else
+                gps->up();
+        }
 #endif
         gpsOutOfReach_ = outOfReach;
 #if GEOCOLLAR_HAS_GPS
@@ -1341,7 +1346,11 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
         case proto::AppLink::Outcome::Reply:
             break;
         case proto::AppLink::Outcome::Request: {
-            lastAppRequestMs_ = millis() | 1; // a phone is connected, and can show where the dog is
+            // A phone is connected, and can show where the dog is. Just connected: a fix for it now,
+            // whatever the pace (the app asks again in a few seconds and gets it).
+            if (!lastAppRequestMs_ || millis() - lastAppRequestMs_ >= kAppNearbyMs)
+                fixForApp();
+            lastAppRequestMs_ = millis() | 1;
             proto::AppResult result = proto::AppResult::Done;
             if (!proto::appActionAllowed(req.action)) {
                 result = proto::AppResult::NotAllowed;
@@ -1371,6 +1380,20 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
         memcpy(p->decoded.payload.bytes, reply, n);
         p->decoded.payload.size = n;
         service->sendToPhone(p);
+    }
+
+    /// Wake the GPS for a fix for a phone that has just connected, unless the newest is fresh.
+    void fixForApp()
+    {
+#if GEOCOLLAR_HAS_GPS
+        const bool fresh = lastFixTimestamp_ != 0 && millis() - lastFix_.nowMs < 10 * 1000;
+        if (!fresh && gps && config.position.gps_mode == meshtastic_Config_PositionConfig_GpsMode_ENABLED &&
+            !config.position.fixed_position) {
+            LOG_INFO("GeoCollar: phone app connected, taking a GPS fix for it");
+            lastGpsKickMs_ = millis();
+            gps->up();
+        }
+#endif
     }
 
     /// Seconds since the position in the report was taken; kAppNoFixAge if there has been none.

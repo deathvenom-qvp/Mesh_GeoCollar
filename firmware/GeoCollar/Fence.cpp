@@ -380,11 +380,9 @@ uint32_t gpsIntervalSecs(const Settings &s, CollarState state, float clearanceM,
     if (!s.gpsPacing || state == CollarState::NoFence)
         return 0;
     const uint32_t fast = s.gpsFastSecs ? s.gpsFastSecs : 1;
-    const uint32_t lost = s.gpsLostSecs ? s.gpsLostSecs : fast;
-    if (beacon || state == CollarState::Lost) {
-        const uint32_t secs = beacon ? 2 * lost : lost;
-        return !relayed && secs < kOutOfReachGpsSecs ? kOutOfReachGpsSecs : secs;
-    }
+    // A lost dog: a fix only while something can pass it on, and then once a minute.
+    if (beacon || state == CollarState::Lost)
+        return relayed ? kLostGpsSecs : kLostOffGpsSecs;
     switch (state) {
     case CollarState::Warning:
         return fast;

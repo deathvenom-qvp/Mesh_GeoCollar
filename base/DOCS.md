@@ -256,16 +256,19 @@ When a dog has been outside its fences for 90 seconds, its collar starts asking 
   app's device list) sees the name.
 - Every 5 minutes it posts a plain text message on the public Meshtastic channel: "Please help get
   Rex home. Call Ken 555-123-4567. Last seen 40.12345,-75.12345".
-- It takes GPS fixes half as often as normal lost mode, so the battery lasts longer.
+**GPS while lost.** A lost dog's position is only useful if something can pass it on. While the
+base answers the collar, directly or through other Meshtastic nodes, or a phone with the
+GeoCollar app is connected to it, the collar takes a GPS fix every minute. Once the base has not
+answered its reports for 2 minutes and no app is connected, the GPS goes off (Meshtastic still
+looks about once an hour). The moment anything from the base gets through again, or the app
+connects, it takes a fix at once. The cost: the help message on the public channel carries the
+last position the collar had, which can be old, and the collar notices the dog has come home
+only once it is back in reach of the base. This applies only once the dog is outside its fences:
+inside, the collar keeps fixing as usual whether or not it can reach the base, because it
+enforces the fences on its own.
 
-**Out of reach.** A lost dog's position is only useful if something can pass it on. When the base
-has not answered a lost collar's reports for 2 minutes, directly or through other Meshtastic
-nodes, and no phone with the GeoCollar app is connected to it, the collar takes a GPS fix only
-every 5 minutes, enough to keep the position in its help message current. The moment anything
-from the base gets through again, or the app connects, it takes a fix at once and goes back to
-the usual lost-mode rate. This applies only once the dog is outside its fences: inside, the
-collar keeps fixing as usual whether or not it can reach the base, because it enforces the
-fences on its own.
+When the GeoCollar app connects, the collar takes a fix for it straight away, whatever state it is
+in, unless it has one from the last 10 seconds.
 
 It stops when the dog is back inside, or when you press **Silence lost alert**. Silenced, it
 stays quiet until the dog has been home and gets out again.

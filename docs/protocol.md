@@ -200,7 +200,8 @@ that has not yet heard from a base it trusts: every minute for 15 minutes after 
 Once the dog has been past a line for 90 s (counted from the first good fix outside, and only
 with fences loaded), the collar:
 
-- halves its GPS rate (twice the lost-mode interval, 30 s by default) to save battery;
+- keeps lost mode's GPS pace: a fix every 60 s while the base answers (directly or through the
+  mesh) or the phone app is connected, the GPS off otherwise;
 - advertises on Bluetooth as `<dog> is lost <phone>` for 90 s, then stops advertising for 90 s,
   and repeats. A collar that holds a phone app's key (section 8) does not go silent in the quiet
   90 s: it advertises its ordinary Meshtastic name every 2 s, so the owner's app can still find

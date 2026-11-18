@@ -19,8 +19,14 @@ and base. Tested with the firmware's PC tests, the firmware build check and the 
 - This replaces the collar's own pacing near the line (every 5 s). At 10 s or less the GPS never
   switches off, so the 3 s default uses more battery near the bands than before. Above 10 s it
   sleeps between fixes, which pays off only if it gets its fix back quickly after waking.
-- Just past a line the collar still fixes at least every 5 s, and lost mode and home mode keep
-  their own pace.
+- Just past a line the collar still fixes at least every 5 s, and home mode keeps its own pace.
+- **Lost dogs: a fix only when someone can get it.** While a lost collar's reports reach the
+  base, directly or through other Meshtastic nodes, or the GeoCollar app is connected, it takes a
+  fix every 60 s (was every 15 s, 30 s with the lost alert on). Otherwise its GPS is off, instead
+  of 0.19.5's fix every 5 minutes; Meshtastic still looks about once an hour. The help message on
+  the public channel then carries the last position the collar had, which can be old.
+- **A fix for the app.** When the GeoCollar app connects, the collar takes a fix for it at once,
+  unless it has one from the last 10 seconds.
 - The base sends it to every collar, the default included, when each next reports. Firmware
   before 0.19.6 ignores it and keeps pacing itself. Flash collars again to get it.
 

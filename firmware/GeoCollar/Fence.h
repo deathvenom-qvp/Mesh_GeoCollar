@@ -109,7 +109,7 @@ struct Settings {
     bool gpsPacing = true;
     uint16_t gpsFastSecs = 5;       // at or near the line (10 s or less keeps the GPS always on)
     uint16_t gpsSlowSecs = 60;      // unused since 0.19.6 (kMidGpsSecs, kFarGpsSecs); kept for the state file
-    uint16_t gpsLostSecs = 15;      // while lost, for tracking
+    uint16_t gpsLostSecs = 15;      // unused since 0.19.6 (kLostGpsSecs); kept for the state file
     uint8_t dogSpeedMps = 6;        // unused since 0.19.6 (pacing steps at kNearAlertM); kept for the state file
 };
 
@@ -240,10 +240,10 @@ class CorrectionPulser
 /// in step with the distance to kMidGpsSecs; further in, kFarGpsSecs. These are the owner's
 /// choice, for battery in big yards, over steps scaled by the dog's speed: a dog that runs from
 /// just past kNearAlertM can reach the line before the next fix.
-/// GPS fix interval in seconds (0 = leave the owner's setting). With the lost beacon on, fixes
-/// come half as often as in lost mode, to make the battery last. relayed = false: nothing can pass
-/// the position on (the base is out of reach and no phone app is connected, see BaseLink), so a
-/// lost dog (lost, or the beacon on) gets a fix only every kOutOfReachGpsSecs. Inside the fences
+/// GPS fix interval in seconds (0 = leave the owner's setting). A lost dog (lost, or the beacon
+/// on) gets a fix every kLostGpsSecs while something can pass its position on (relayed: the base
+/// answers, directly or through the mesh, or the phone app is connected, see BaseLink), and the GPS
+/// is powered down otherwise (kLostOffGpsSecs). Inside the fences
 /// the pace never depends on the base: the collar enforces the fence on its own. sameEverywhere:
 /// the owner chose gpsFastSecs wherever the dog is inside, whatever the distance to the bands (it
 /// changes nothing once the dog is lost or past a line).
@@ -424,8 +424,10 @@ class BaseLink
     uint32_t firstUnansweredMs_ = 0; // when the first of them went
 };
 
-/// The GPS fix interval for a lost dog while nothing can pass its position on: as often as the
-/// lost beacon's mesh message, which carries the newest position to anyone who hears it.
-constexpr uint32_t kOutOfReachGpsSecs = 5 * 60;
+/// The GPS fix interval for a lost dog while its position can be passed on (the owner's choice).
+constexpr uint32_t kLostGpsSecs = 60;
+/// While nothing can pass it on: the GPS powered down, as in home mode. Meshtastic still looks
+/// about once an hour, which also notices a dog that came home while the base was down.
+constexpr uint32_t kLostOffGpsSecs = 3600;
 
 } // namespace geocollar
