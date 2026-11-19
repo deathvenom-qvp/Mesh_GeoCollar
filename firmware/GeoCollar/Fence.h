@@ -28,15 +28,6 @@ constexpr uint32_t kVerifyStaleMs = 30000;
 /// and cannot notice the dog leaving.
 constexpr uint8_t kMinFixSats = 12;
 
-/// Home mode alone also takes a poorer fix as proof that the dog is inside, clear of the bands
-/// (FenceEngine::clearForHome): from at least kHomeMinSats satellites, with a usable PDOP, and
-/// at least kHomeMarginM clear of every band, so the error of such a fix cannot put a dog that is
-/// in a band or outside there. Near the house, where the anchor is, a collar often sees fewer
-/// than kMinFixSats satellites for hours, and home mode would never start. Fence decisions still
-/// take only fixes from kMinFixSats.
-constexpr uint8_t kHomeMinSats = 8;
-constexpr float kHomeMarginM = 10.0f;
-
 enum class ZoneKind : uint8_t {
     KeepIn = 0,  // the dog should stay inside this polygon
     KeepOut = 1, // the dog should stay out of this polygon (pond, road)
@@ -193,11 +184,6 @@ class FenceEngine
     /// Whether a fix is good enough to use at all: a position, PDOP no worse than maxPdopX100,
     /// and at least minSats satellites. The caller keeps a position only if it is.
     bool fixIsGood(const Fix &fix) const;
-
-    /// For home mode, a fix that fixIsGood() turns down for its satellites: whether it still
-    /// shows the dog inside and clear of every band, by kHomeMarginM or more. False with no
-    /// fences, and for a fix with fewer than kHomeMinSats satellites, no position or a poor PDOP.
-    bool clearForHome(const Fix &fix) const;
 
     /// Feed one GPS fix; returns what the collar should do now.
     ///
@@ -376,38 +362,33 @@ struct HomeAnchor {
 constexpr int8_t kMinAnchorRssi = -100, kMaxAnchorRssi = -30;
 
 /// Decides when the collar is home. Home means: the anchor has been heard at least as strong as
-/// its threshold, in every reading, for kEnterMs; and the newest GPS fix had the dog inside and
-/// clear of every band, at most kFreshMs ago (or the collar was last home that recently). That
-/// fix is what keeps an anchor heard from outside the fence from ever counting. Home ends as soon
-/// as no reading in kLeaveMs is within kStayMarginDb of the threshold, when a fix says otherwise,
-/// or when home is no longer allowed (fences changed, lost, the anchor turned off).
+/// its threshold, in every reading, for kEnterMs. No GPS fix is needed (the owner's choice,
+/// 0.19.14): a collar that hears the anchor is at the house, often indoors, where a fix may take
+/// minutes or never come. Home ends as soon as no reading in kLeaveMs is within kStayMarginDb of
+/// the threshold, or when home is no longer allowed (fences changed, past a line or lost, the
+/// lost beacon on, the anchor turned off).
 class HomeWatch
 {
   public:
     static constexpr uint32_t kEnterMs = 20 * 1000;
     static constexpr uint32_t kLeaveMs = 7 * 1000;
     static constexpr int kStayMarginDb = 6;
-    static constexpr uint32_t kFreshMs = 10 * 60 * 1000;
 
     void setThreshold(int8_t rssiDbm) { threshold_ = rssiDbm; }
-    /// The anchor or the fences changed: away, and every reading and fix so far forgotten.
+    /// The anchor or the fences changed: away, and every reading so far forgotten.
     void reset();
     /// A reading of the anchor's signal.
     void onSighting(int rssiDbm, uint32_t nowMs);
-    /// Every GPS fix good enough to use. clear = inside and clear of every band.
-    void onFix(bool clear, uint32_t nowMs);
-    /// Call about once a second. allowed: an anchor is set, fences are loaded and the dog is
-    /// inside. Returns true when home() changed (here or in onFix).
+    /// Call about once a second. allowed: an anchor is set, fences are loaded, the dog is not past
+    /// a line or lost, and the lost beacon is off. Returns true when home() changed (here or in reset).
     bool tick(uint32_t nowMs, bool allowed);
     bool home() const { return home_; }
 
   private:
-    void leave(uint32_t provenMs);
+    void leave();
     int threshold_ = -70;
     bool home_ = false;
     bool changed_ = false;
-    bool clear_ = false;   // the newest fix was clear (or the collar was home since)
-    uint32_t clearMs_ = 0; // when that was last known
     bool strong_ = false;  // an unbroken run of strong readings is going on
     uint32_t strongSinceMs_ = 0;
     uint32_t lastStrongMs_ = 0;

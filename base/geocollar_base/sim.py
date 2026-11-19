@@ -72,7 +72,6 @@ def clearance_m(zones: list[protocol.Zone], lat: float, lon: float) -> float:
 # that strongly (less a margin) for HOME_LEAVE_S.
 HOME_ENTER_S = 20
 HOME_LEAVE_S = 7
-HOME_FRESH_S = 600  # the last fix must be this recent, and inside, clear of every band
 NO_FIX_AFTER_S = 45  # without a good fix this long the collar reports "no GPS fix" (firmware fixOverdueMs)
 # Roughly what each anchor reads at 1 m, dBm: a typical beacon, and a Meshtastic radio, which
 # transmits louder. Walls, the dog's body and the collar's angle move readings by 10 dB or more.
@@ -434,7 +433,6 @@ class SimCollar:
         self.home = False
         self._near_since: float | None = None
         self._last_near = -1e9
-        self._last_clear_fix = -1e9
 
     # -- settings ---------------------------------------------------------------------------
     def settings(self) -> dict:
@@ -488,9 +486,8 @@ class SimCollar:
         self.fence_version = version
         if self.engine.state not in (protocol.CollarState.OUTSIDE, protocol.CollarState.LOST):
             self.beacon.reset()  # a dog that is out keeps its beacon, as on the collar
-        # Firmware HomeWatch::reset: new fences end home mode, and a fix must show the dog clear of
-        # them before it can start again.
-        self._last_clear_fix = -1e9
+        # Firmware HomeWatch::reset: new fences end home mode, and the anchor's 20 s start again.
+        self._near_since = None
         if self.home:
             self._leave_home(time.time(), "new fences")
         self._event("fences", f"loaded fence version {version}")
@@ -586,15 +583,16 @@ class SimCollar:
                 self._near_since = now
         elif now - self._last_near > HOME_LEAVE_S:
             self._near_since = None
-        allowed = (self.anchor is not None and self.engine.zones and self.engine.state == protocol.CollarState.INSIDE
+        # The anchor alone decides, with no GPS fix needed, except for a dog past a line or lost.
+        allowed = (self.anchor is not None and self.engine.zones
+                   and self.engine.state in (protocol.CollarState.INSIDE, protocol.CollarState.WARNING)
                    and not self.beacon.active)
         if self.home:
             if not allowed:
                 self._leave_home(now, "home mode off")
             elif now - self._last_near > HOME_LEAVE_S:
                 self._leave_home(now, "away from the home anchor")
-        elif (allowed and self._near_since is not None and now - self._near_since >= HOME_ENTER_S
-              and now - self._last_clear_fix <= HOME_FRESH_S):
+        elif allowed and self._near_since is not None and now - self._near_since >= HOME_ENTER_S:
             self.home = True
             self._report_now = True
             self._event("info", "home, near the anchor: GPS off")
@@ -612,14 +610,6 @@ class SimCollar:
             # Too few satellites: the collar uses no fix at all. No fence decision, the position
             # stays the last good one, and the base hears "no GPS fix" once that one is old.
             self._run_beacon_tick(now)
-            # Home mode alone still takes it as proof the dog is well clear of the bands
-            # (firmware FenceEngine::clearForHome).
-            if (self.sats >= protocol.HOME_MIN_SATS and self.engine.zones
-                    and self.engine.state == protocol.CollarState.INSIDE):
-                n = self.noise_m
-                lat, lon = _move(self.lat, self.lon, self.rng.uniform(0, 360), abs(self.rng.gauss(0, n / 1.5)) if n else 0)
-                if room_from_anchor_m(self.engine.zones, lat, lon) >= protocol.HOME_MARGIN_M:
-                    self._last_clear_fix = now
             if self._good_fix is None:
                 self._good_fix = now  # where it was put down counts as a fix
             if not self._ignoring:
@@ -650,8 +640,6 @@ class SimCollar:
             self._event("info", "past the line: corrections off until clear of every band")
         elif was_quiet and not self.engine._quiet:
             self._event("info", "clear of every band: corrections back on")
-        if self.engine.state == protocol.CollarState.INSIDE:  # clear of every band
-            self._last_clear_fix = now
         self._pulse(d, now)
         if d.send_breach:
             self._event("lost", "confirmed outside: corrections stop, lost mode")

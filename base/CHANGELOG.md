@@ -2,15 +2,16 @@
 
 ## 0.19.14
 
-- **Home mode turns the GPS off with fewer than 12 satellites** (new collar firmware, and the
-  simulator). Home mode starts only after a GPS fix shows the dog inside and clear of the bands,
-  and since 0.19.11 only a fix from 12 satellites or more counted. Near the house, where the
-  anchor is, a collar often sees 8 to 11 for hours, so home mode never started and the GPS stayed
-  on, searching all the time. Home mode now also takes a fix from 8 satellites or more when it
-  puts the dog at least 10 m (33 ft) clear of every band. The fences are unchanged: beeps,
-  vibrations and shocks still go by fixes from 12 or more only. The "use a closer setting, or move
-  the anchor" note on the Home mode card is advice only; it never stopped home mode. Tested with
-  the firmware's PC tests and the base's tests, **not on a real collar**.
+- **Hearing the home anchor turns the GPS off, with no GPS fix needed** (new collar firmware, and
+  the simulator). Home mode used to start only after a GPS fix from 12 satellites or more showed
+  the dog inside and clear of every band, at most 10 minutes before. Near the house, where the
+  anchor is, a collar often sees 8 to 11 satellites for hours, so home mode never started and the
+  GPS stayed on, searching all the time. Now 20 s of the anchor is enough. The anchor does not
+  count while the dog is past a line or lost (that still takes fixes to end), or while the lost
+  beacon is on, and a fix that puts the dog past a line still ends home mode. A fix in a band no
+  longer does. The "use a closer setting, or move the anchor" note on the Home mode card is advice
+  only; it never stopped home mode. Tested with the firmware's PC tests and the base's tests,
+  **not on a real collar**.
 
 ## 0.19.13
 

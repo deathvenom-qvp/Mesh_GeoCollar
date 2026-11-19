@@ -195,13 +195,6 @@ static void testStateMachine()
     d = e.onFix(fixAt(-20, 100, t += 1000, 150, 0));
     CHECK(d.fixRejected && !e.fixIsGood(fixAt(-20, 100, t, 150, 0)));
     CHECK(e.fixIsGood(fixAt(-20, 100, t, 150, 12)) && !e.fixIsGood(fixAt(-20, 100, t, 150, 11)));
-    // Home mode alone takes a fix from 8 satellites, only kHomeMarginM or more clear of every band
-    // (10 m of bands here), with a usable PDOP.
-    CHECK(kHomeMinSats == 8 && kHomeMarginM == 10.0f);
-    CHECK(e.clearForHome(fixAt(30, 100, t, 150, 8)) && !e.clearForHome(fixAt(30, 100, t, 150, 7)));
-    CHECK(!e.clearForHome(fixAt(30, 100, t, 900, 10)) && !e.clearForHome(fixAt(18, 100, t, 150, 10)));
-    CHECK(!e.clearForHome(fixAt(-20, 100, t, 150, 10)) && !e.clearForHome(Fix{0, 0, 150, 10, t}));
-    CHECK(!FenceEngine().clearForHome(fixAt(30, 100, t, 150, 10))); // no fences
 
     // Past the line: corrections stop straight away.
     d = e.onFix(fixAt(-5, 100, t += 1000));
@@ -921,11 +914,10 @@ static void testProtocol()
 
 static void testHomeWatch()
 {
-    // Readings every 2 s at -60 dBm (threshold -70), after a clear fix: home after 20 s.
+    // Readings every 2 s at -60 dBm (threshold -70): home after 20 s, with no GPS fix at all.
     {
         HomeWatch h;
         h.setThreshold(-70);
-        h.onFix(true, 1000);
         bool changed = false;
         uint32_t t = 2000;
         for (; t < 2000 + HomeWatch::kEnterMs; t += 2000) {
@@ -942,45 +934,18 @@ static void testHomeWatch()
         // Then nothing strong enough for longer than kLeaveMs: away.
         h.onSighting(-80, t + 4000);
         CHECK(h.tick(t + 2000 + HomeWatch::kLeaveMs + 1, true) && !h.home());
-        // Back near within 10 minutes: home again without a new fix (the anchor kept proving it).
-        const uint32_t back = t + 60000;
+        // Back near, however long later: home again after 20 s of the anchor.
+        const uint32_t back = t + 60 * 60 * 1000;
         for (uint32_t u = back; u <= back + HomeWatch::kEnterMs; u += 2000) {
             h.onSighting(-60, u);
             h.tick(u, true);
         }
         CHECK(h.home());
-        // A fix in a band ends home at once.
-        h.onFix(false, back + 30000);
-        CHECK(h.tick(back + 30000, true) && !h.home());
-        // And then the anchor alone cannot bring it back: the newest fix was not clear.
-        for (uint32_t u = back + 32000; u <= back + 32000 + 2 * HomeWatch::kEnterMs; u += 2000) {
-            h.onSighting(-55, u);
-            h.tick(u, true);
-        }
-        CHECK(!h.home());
-    }
-    // No clear fix at all, or an old one: never home.
-    {
-        HomeWatch h;
-        h.setThreshold(-70);
-        for (uint32_t t = 0; t <= 60000; t += 2000) {
-            h.onSighting(-50, t);
-            h.tick(t, true);
-        }
-        CHECK(!h.home());
-        h.onFix(true, 100000);
-        const uint32_t late = 100000 + HomeWatch::kFreshMs + 1000;
-        for (uint32_t t = late; t <= late + 60000; t += 2000) {
-            h.onSighting(-50, t);
-            h.tick(t, true);
-        }
-        CHECK(!h.home());
     }
     // One weak reading restarts the 20 s; a gap longer than kLeaveMs does too.
     {
         HomeWatch h;
         h.setThreshold(-70);
-        h.onFix(true, 0);
         for (uint32_t t = 2000; t <= 18000; t += 2000) {
             h.onSighting(-60, t);
             h.tick(t, true);
@@ -997,11 +962,10 @@ static void testHomeWatch()
         }
         CHECK(h.home()); // 40 s to 60 s: 20 s unbroken
     }
-    // Not allowed (lost, no fences, no anchor): never home, and home ends at once.
+    // Not allowed (past a line or lost, no fences, no anchor): never home, and home ends at once.
     {
         HomeWatch h;
         h.setThreshold(-70);
-        h.onFix(true, 0);
         for (uint32_t t = 2000; t <= 30000; t += 2000) {
             h.onSighting(-60, t);
             h.tick(t, false);
@@ -1014,11 +978,10 @@ static void testHomeWatch()
         CHECK(h.home());
         CHECK(h.tick(55000, false) && !h.home());
     }
-    // A reset (new fences or a new anchor) forgets the clear fix.
+    // A reset (new fences or a new anchor) ends home; the anchor's 20 s then start again.
     {
         HomeWatch h;
         h.setThreshold(-70);
-        h.onFix(true, 0);
         for (uint32_t t = 2000; t <= 24000; t += 2000) {
             h.onSighting(-60, t);
             h.tick(t, true);
@@ -1026,18 +989,19 @@ static void testHomeWatch()
         CHECK(h.home());
         h.reset();
         CHECK(h.tick(25000, true) && !h.home());
-        for (uint32_t t = 26000; t <= 60000; t += 2000) {
+        for (uint32_t t = 26000; t < 26000 + HomeWatch::kEnterMs; t += 2000) {
             h.onSighting(-60, t);
             h.tick(t, true);
         }
         CHECK(!h.home());
+        h.onSighting(-60, 26000 + HomeWatch::kEnterMs);
+        CHECK(h.tick(26000 + HomeWatch::kEnterMs, true) && h.home());
     }
     // The millisecond clock wrapping does not matter.
     {
         HomeWatch h;
         h.setThreshold(-70);
         const uint32_t base = 0xFFFFFFFFu - 10000;
-        h.onFix(true, base);
         for (uint32_t i = 1; i <= 12; i++) {
             h.onSighting(-60, base + i * 2000);
             h.tick(base + i * 2000, true);
@@ -1639,9 +1603,6 @@ struct WalkingCollar {
                 lastLat = f.latI;
                 lastLon = f.lonI;
                 beacon.onFix(engine.state() != CollarState::NoFence && d.clearanceM < 0, now);
-                home.onFix(engine.state() == CollarState::Inside, now);
-            } else if (!engine.fixIsGood(f) && engine.state() == CollarState::Inside && engine.clearForHome(f)) {
-                home.onFix(true, now);
             }
             if (d.correction != Correction::None)
                 corrections++;
@@ -1650,7 +1611,8 @@ struct WalkingCollar {
         beacon.tick(now);
         if (now % 2000 == 0 && std::hypot(north - anchorNorth, east - anchorEast) <= anchorRangeM)
             home.onSighting(-60, now);
-        home.tick(now, engine.state() == CollarState::Inside && !beacon.active());
+        const CollarState st = engine.state();
+        home.tick(now, (st == CollarState::Inside || st == CollarState::Warning) && !beacon.active());
         if (home.home() != wasHome) {
             // Leaving home wakes the GPS for a fix as soon as it has one (clearance 0: fix often).
             if (!home.home()) {
@@ -1772,14 +1734,42 @@ static void testZoneWalk()
         CHECK(c.path == "band > inside > home, GPS off");
     }
 
-    // The anchor heard from inside a band (a beacon too close to the line): never home.
+    // The anchor alone decides, even heard from inside a band (a beacon too close to the line):
+    // home, GPS off, and no more corrections once the fixes stop.
     {
         WalkingCollar c = fresh();
         c.anchorNorth = 100;
         c.anchorEast = 165;
         c.walkTo(100, 165, 2);
+        c.stay(60);
+        const int corrected = c.corrections;
         c.stay(120);
-        CHECK(c.engine.state() == CollarState::Warning && !c.home.home());
+        CHECK(c.engine.state() == CollarState::Warning && c.home.home() && c.corrections == corrected);
+    }
+
+    // Indoors with too few satellites for any fix to count: the anchor still turns the GPS off,
+    // and after a walk away and back (much longer than 10 minutes) it does so again.
+    {
+        WalkingCollar c = fresh();
+        c.sats = 0;
+        c.stay(30);
+        CHECK(c.home.home() && c.lastLat == 0 && c.gpsEvery() == kHomeGpsSecs);
+        c.walkTo(60, 85, 2);
+        c.stay(30 * 60);
+        CHECK(!c.home.home());
+        c.walkTo(100, 85, 2);
+        c.stay(30);
+        CHECK(c.home.home());
+        CHECK(c.path == "home, GPS off > GPS on > home, GPS off");
+    }
+
+    // Past a line or lost, the anchor does not count: the GPS stays on until fixes bring the dog in.
+    {
+        WalkingCollar c = fresh();
+        c.sats = 0; // no fix to bring it back in
+        c.engine.forceLost();
+        c.stay(120);
+        CHECK(c.engine.state() == CollarState::Lost && !c.home.home());
     }
 
     // Too few satellites: no fix counts, so nothing is decided. A dog that walks out under trees
@@ -1798,43 +1788,6 @@ static void testZoneWalk()
         c.sats = 12;
         c.stay(20);
         CHECK(c.engine.state() == CollarState::Lost && c.lastLon != lon);
-    }
-
-    // Near the house a collar may see 8 to 11 satellites for hours. Such a fix is no position for
-    // the fences, but it is proof enough for home mode that the dog is well clear of the bands.
-    {
-        WalkingCollar c = fresh();
-        c.sats = 10;
-        c.stay(60);
-        CHECK(c.home.home() && c.gpsEvery() == kHomeGpsSecs && c.lastLat == 0);
-        // Out of the anchor's range and back: home again, from a 10-satellite fix.
-        c.walkTo(60, 85, 2);
-        c.stay(15 * 60); // longer than HomeWatch::kFreshMs: only a new fix can bring it home
-        CHECK(!c.home.home());
-        c.walkTo(100, 85, 2);
-        c.stay(60);
-        CHECK(c.home.home());
-        CHECK(c.path == "home, GPS off > GPS on > home, GPS off");
-    }
-    // Fewer than 8 satellites: still never home.
-    {
-        WalkingCollar c = fresh();
-        c.sats = 7;
-        c.stay(120);
-        CHECK(!c.home.home());
-    }
-    // An anchor close to the bands: a poorer fix within 10 m of them does not count, a good one does.
-    {
-        WalkingCollar c = fresh();
-        c.anchorNorth = 100;
-        c.anchorEast = 150; // 20 m from the east line: 7 m clear of its 13 m of bands
-        c.east = 150;
-        c.sats = 10;
-        c.stay(120);
-        CHECK(c.engine.state() == CollarState::Inside && !c.home.home());
-        c.sats = 12;
-        c.stay(60);
-        CHECK(c.home.home());
     }
 }
 
