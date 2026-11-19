@@ -715,37 +715,49 @@ def test_collar_log_file(tmp_path):
 
 
 # -- The companion app -------------------------------------------------------------------------
-def test_linking_a_phone_makes_a_key_for_it_and_for_the_collar(tmp_path):
-    client, link = make(tmp_path)
-    client.post("/api/collars", json={"node_id": "!a1b2c3d4", "name": "Rex"})
-    client.app.state.store.set_collar_info("!a1b2c3d4", "ble_pin", 482913)
-    assert client.get("/api/collars/!a1b2c3d4/apps").json() == {
-        "apps": [], "synced": True, "max": 4, "pin_known": True, "sim": False}
+def keys_for(code: dict, node_id: str) -> tuple[int, bytes]:
+    """The key a collar gets for the phone that scanned `code`."""
+    return code["key_id"], protocol.collar_app_key(code["key"], node_id)
 
-    r = client.post("/api/collars/!a1b2c3d4/apps", json={"name": "  Ken's   phone "})
+
+def test_linking_a_phone_links_it_to_every_collar_on_the_base(tmp_path):
+    client, link = make(tmp_path)
+    assert client.post("/api/phones", json={}).status_code == 409  # no collars yet
+    client.post("/api/collars", json={"node_id": "!a1b2c3d4", "name": "Rex"})
+    client.post("/api/collars", json={"node_id": "!0badf00d", "name": "Bella"})
+    client.app.state.store.set_collar_info("!a1b2c3d4", "ble_pin", 482913)
+    assert client.get("/api/phones").json() == {
+        "phones": [], "max": 4, "room": 4, "synced": {"!a1b2c3d4": True, "!0badf00d": True}}
+
+    r = client.post("/api/phones", json={"name": "  Ken's   phone "})
     assert r.status_code == 200
     body = r.json()
-    assert body["app"]["name"] == "Ken's phone" and body["synced"] is False and len(body["apps"]) == 1
-    # The QR code says how to find the collar and carries the phone's key; the collar got the same key.
-    code = protocol.parse_pairing_code(body["code"])
-    assert code["node_id"] == "!a1b2c3d4" and code["dog"] == "Rex" and code["ble_name"] == "REX"
-    assert code["pin"] == "482913" and code["sim"] is False
-    assert f"{code['key_id']:08x}" == body["app"]["id"]
-    node, keys, seq = link.app_keys[-1]
-    assert node == "!a1b2c3d4" and keys == [(code["key_id"], code["key"])] and seq > 1_700_000_000
-    assert link.sent[-1][1][:2] == b"\x02\x08"
+    assert body["phone"]["name"] == "Ken's phone" and body["room"] == 3
+    assert body["phones"] == [{**body["phone"], "created": body["phones"][0]["created"], "missing": []}]
+    assert body["synced"] == {"!a1b2c3d4": False, "!0badf00d": False}
+    # One QR code for the whole base: the phone's key, and how to find each collar.
+    code = protocol.parse_home_pairing_code(body["code"])
+    assert code["home"] and f"{code['key_id']:08x}" == body["phone"]["id"] and len(code["key"]) == 16
+    assert code["collars"] == [
+        {"node_id": "!0badf00d", "pin": None, "ble_name": "BELL", "dog": "Bella", "sim": False},
+        {"node_id": "!a1b2c3d4", "pin": "482913", "ble_name": "REX", "dog": "Rex", "sim": False}]
+    # Each collar gets a key of its own, made from the phone's.
+    sent = {node: (keys, seq) for node, keys, seq in link.app_keys}
+    assert sent["!a1b2c3d4"][0] == [keys_for(code, "!a1b2c3d4")]
+    assert sent["!0badf00d"][0] == [keys_for(code, "!0badf00d")]
+    assert keys_for(code, "!a1b2c3d4") != keys_for(code, "!0badf00d")
 
     # The key is given out that once: nothing the page can ask for carries it afterwards.
-    secret, b64 = code["key"].hex(), body["code"].split("k=")[1].split("&")[0]
-    for path in ("/api/collars", "/api/collars/!a1b2c3d4/apps"):
+    b64 = body["code"].split("k=")[1].split("&")[0]
+    secrets_ = [code["key"].hex(), b64] + [keys_for(code, n)[1].hex() for n in sent]
+    for path in ("/api/collars", "/api/phones", "/api/collars/!a1b2c3d4/apps"):
         text = client.get(path).text
-        assert secret not in text and b64 not in text
-    assert secret not in client.patch("/api/collars/!a1b2c3d4", json={"report_s": 300}).text
-    c = client.get("/api/collars").json()["!a1b2c3d4"]
-    assert c["apps"] == [body["app"]] and c["apps_synced"] is False
+        assert not any(x in text for x in secrets_)
+    assert not any(x in client.post(f"/api/phones/{body['phone']['id']}/collars").text for x in secrets_)
 
-    # The collar confirms the list by its number, in a message that must really be the collar's.
+    # The collars confirm the list by its number, in a message that must really be the collar's.
     ack = client.app.state.on_app_ack
+    seq = sent["!a1b2c3d4"][1]
     client.app.state.on_status("!a1b2c3d4", {**GOOD, "apps": True})  # the base learns the collar's key
     ack("!a1b2c3d4", {"seq": seq, "count": 1, "pki": False, "sender_key": "a2V5"})  # not PKI: anyone could send it
     ack("!a1b2c3d4", {"seq": seq, "count": 1, "pki": True, "sender_key": "T1RIRVI="})  # another node's key
@@ -754,41 +766,111 @@ def test_linking_a_phone_makes_a_key_for_it_and_for_the_collar(tmp_path):
     assert client.get("/api/collars/!a1b2c3d4/apps").json()["synced"] is False
     ack("!a1b2c3d4", {"seq": seq, "count": 1, "pki": True, "sender_key": "a2V5"})
     assert client.get("/api/collars/!a1b2c3d4/apps").json()["synced"] is True
-    assert client.get("/api/collars").json()["!a1b2c3d4"]["apps_synced"] is True
+    c = client.get("/api/collars").json()
+    assert c["!a1b2c3d4"]["apps_synced"] is True and c["!a1b2c3d4"]["app_keys"] == 1
+    assert c["!0badf00d"]["apps_synced"] is False
+    assert client.get("/api/phones").json()["synced"] == {"!a1b2c3d4": True, "!0badf00d": False}
 
     # Once confirmed, reports that agree send nothing more.
-    sent = len(link.app_keys)
+    count = len(link.app_keys)
     client.app.state.on_status("!a1b2c3d4", {**GOOD, "apps": True})
-    assert len(link.app_keys) == sent
+    assert len(link.app_keys) == count
 
-    # A second phone gets its own key and the collar gets both.
-    r2 = client.post("/api/collars/!a1b2c3d4/apps", json={})
-    code2 = protocol.parse_pairing_code(r2.json()["code"])
-    assert r2.json()["app"]["name"] == "Phone 2" and code2["key"] != code["key"] and code2["key_id"] != code["key_id"]
-    assert link.app_keys[-1][1] == [(code["key_id"], code["key"]), (code2["key_id"], code2["key"])]
+    # A second phone gets its own key, and every collar gets both.
+    r2 = client.post("/api/phones", json={})
+    code2 = protocol.parse_home_pairing_code(r2.json()["code"])
+    assert r2.json()["phone"]["name"] == "Phone 2" and code2["key"] != code["key"] and code2["home"] == code["home"]
+    last = {node: keys for node, keys, _ in link.app_keys}
+    assert last["!a1b2c3d4"] == [keys_for(code, "!a1b2c3d4"), keys_for(code2, "!a1b2c3d4")]
+    assert last["!0badf00d"] == [keys_for(code, "!0badf00d"), keys_for(code2, "!0badf00d")]
 
-    # Removing the first phone sends the list without it: that is what revokes it on the collar.
-    r = client.delete(f"/api/collars/!a1b2c3d4/apps/{body['app']['id']}")
-    assert r.status_code == 200 and [a["id"] for a in r.json()["apps"]] == [r2.json()["app"]["id"]]
-    assert link.app_keys[-1][1] == [(code2["key_id"], code2["key"])] and link.app_keys[-1][2] > seq
-    assert client.delete(f"/api/collars/!a1b2c3d4/apps/{body['app']['id']}").status_code == 404
-    # Removing the last one sends an empty list, and the base waits for the collar to confirm that too.
-    r = client.delete(f"/api/collars/!a1b2c3d4/apps/{r2.json()['app']['id']}")
-    assert r.json()["apps"] == [] and r.json()["synced"] is False and link.app_keys[-1][1] == []
-    ack("!a1b2c3d4", {"seq": link.app_keys[-1][2], "count": 0, "pki": True, "sender_key": "a2V5"})
-    assert client.get("/api/collars/!a1b2c3d4/apps").json()["synced"] is True
+    # Removing the first phone sends every collar the list without it: that revokes it.
+    r = client.delete(f"/api/phones/{body['phone']['id']}")
+    assert r.status_code == 200 and [p["id"] for p in r.json()["phones"]] == [r2.json()["phone"]["id"]]
+    last = {node: (keys, s) for node, keys, s in link.app_keys}
+    assert last["!a1b2c3d4"][0] == [keys_for(code2, "!a1b2c3d4")] and last["!a1b2c3d4"][1] > seq
+    assert last["!0badf00d"][0] == [keys_for(code2, "!0badf00d")]
+    assert client.delete(f"/api/phones/{body['phone']['id']}").status_code == 404
+    # Removing the last one sends empty lists, and the base waits for the collars to confirm that too.
+    r = client.delete(f"/api/phones/{r2.json()['phone']['id']}")
+    assert r.json()["phones"] == [] and r.json()["synced"]["!a1b2c3d4"] is False and link.app_keys[-1][1] == []
+    for node, keys, s in link.app_keys[-2:]:
+        ack(node, {"seq": s, "count": 0, "pki": True, "sender_key": "a2V5"})
+    assert client.get("/api/phones").json()["synced"]["!a1b2c3d4"] is True
 
-    assert client.get("/api/collars/!nope/apps").status_code == 404
-    assert client.post("/api/collars/!nope/apps", json={}).status_code == 404
-    assert client.post("/api/collars/!a1b2c3d4/apps", json={"name": "x" * 41}).status_code == 400
+    assert client.post("/api/phones/12345678/collars").status_code == 404
+    assert client.post("/api/phones", json={"name": "x" * 41}).status_code == 400
+
+
+def test_a_collar_added_later_trusts_the_linked_phones_and_they_can_catch_up(tmp_path):
+    client, link = make(tmp_path)
+    client.post("/api/collars", json={"node_id": "!a1b2c3d4", "name": "Rex"})
+    phone = client.post("/api/phones", json={"name": "Ken"}).json()
+    code = protocol.parse_home_pairing_code(phone["code"])
+    pid = phone["phone"]["id"]
+    assert client.get("/api/phones").json()["phones"][0]["missing"] == []
+
+    # Added from the page: the collar gets the phone's key straight away.
+    client.post("/api/collars", json={"node_id": "!0badf00d", "name": "Bella"})
+    assert link.app_keys[-1][:2] == ("!0badf00d", [keys_for(code, "!0badf00d")])
+    # Found over USB or on the mesh: it gets the key with its first report.
+    client.app.state.store.upsert_collar("!0000beef", "Max")
+    client.app.state.on_status("!0000beef", GOOD)
+    assert link.app_keys[-1][:2] == ("!0000beef", [keys_for(code, "!0000beef")])
+    # And a simulated one, for the app's demo.
+    sim_id = client.post("/api/sim", json={"name": "Sim", "lat": 40.0, "lon": -75.0}).json()["node_id"]
+    assert client.get("/api/phones").json()["synced"][sim_id] is True
+
+    # The phone does not know about them yet. The collar list brings it up to date: the same
+    # base, every collar, and no key.
+    assert sorted(client.get("/api/phones").json()["phones"][0]["missing"]) == sorted(["!0badf00d", "!0000beef", sim_id])
+    r = client.post(f"/api/phones/{pid}/collars")
+    assert r.status_code == 200 and r.json()["phones"][0]["missing"] == []
+    listed = protocol.parse_home_pairing_code(r.json()["code"])
+    assert listed["home"] == code["home"] and listed["key"] is None and listed["key_id"] is None
+    assert [c["dog"] for c in listed["collars"]] == ["Bella", "Max", "Rex", "Sim"]
+    assert [c["sim"] for c in listed["collars"]] == [False, False, False, True]
+
+    # A collar whose node ID changed gets keys made for its new number.
+    client.app.state.store.move_collar("!0000beef", "!0000cafe")
+    client.app.state.on_status("!0000cafe", {**GOOD, "apps": True})
+    assert link.app_keys[-1][:2] == ("!0000cafe", [keys_for(code, "!0000cafe")])
+
+
+def test_phones_linked_to_one_collar_by_an_older_base_keep_working(tmp_path, monkeypatch):
+    client, link = make(tmp_path)
+    client.post("/api/collars", json={"node_id": "!a1b2c3d4", "name": "Rex"})
+    client.post("/api/collars", json={"node_id": "!0badf00d", "name": "Bella"})
+    st = client.app.state.store
+    old = {"id": 0x1A2B3C4D, "name": "Old phone", "key": bytes(range(16)).hex(), "created": 1.0}
+    st.set_collar_info("!a1b2c3d4", "apps", [old])
+    st.set_collar_info("!a1b2c3d4", "apps_seq", 5)
+    st.set_collar_info("!a1b2c3d4", "apps_acked", 5)
+    # As the older base left it: confirmed, and nothing to send again.
+    client.app.state.on_status("!a1b2c3d4", {**GOOD, "apps": True})
+    assert not getattr(link, "app_keys", [])
+    assert client.get("/api/collars").json()["!a1b2c3d4"]["apps"][0]["name"] == "Old phone"
+    assert client.get("/api/phones").json()["room"] == 3
+
+    # A new phone joins it on that collar, and alone on the other.
+    code = protocol.parse_home_pairing_code(client.post("/api/phones", json={}).json()["code"])
+    last = {node: keys for node, keys, _ in link.app_keys}
+    assert last["!a1b2c3d4"] == [(0x1A2B3C4D, bytes(range(16))), keys_for(code, "!a1b2c3d4")]
+    assert last["!0badf00d"] == [keys_for(code, "!0badf00d")]
+    # The old one is removed from its collar alone.
+    r = client.delete("/api/collars/!a1b2c3d4/apps/1a2b3c4d")
+    assert r.status_code == 200 and r.json()["apps"] == []
+    assert link.app_keys[-1][:2] == ("!a1b2c3d4", [keys_for(code, "!a1b2c3d4")])
+    assert client.delete("/api/collars/!a1b2c3d4/apps/1a2b3c4d").status_code == 404
+    assert client.get("/api/phones").json()["room"] == 3
 
 
 def test_at_most_four_phones_per_collar(tmp_path):
     client, link = make(tmp_path)
     client.post("/api/collars", json={"node_id": "!a1b2c3d4", "name": "Rex"})
     for _ in range(4):
-        assert client.post("/api/collars/!a1b2c3d4/apps", json={}).status_code == 200
-    assert client.post("/api/collars/!a1b2c3d4/apps", json={}).status_code == 409
+        assert client.post("/api/phones", json={}).status_code == 200
+    assert client.post("/api/phones", json={}).status_code == 409
     assert len(link.app_keys[-1][1]) == 4
     protocol.decode_app_keys(link.sent[-1][1])  # and it still fits one message
 
@@ -801,8 +883,8 @@ def test_app_keys_are_sent_again_until_the_collar_has_them(tmp_path, monkeypatch
 
     # Made while the radio was unplugged: nothing could be sent, so the phone counts as not on the collar.
     link.connected = False
-    r = client.post("/api/collars/!a1b2c3d4/apps", json={"name": "Phone"})
-    assert r.status_code == 200 and r.json()["synced"] is False and not getattr(link, "app_keys", [])
+    r = client.post("/api/phones", json={"name": "Phone"})
+    assert r.status_code == 200 and r.json()["synced"]["!a1b2c3d4"] is False and not getattr(link, "app_keys", [])
     link.connected = True
     client.app.state.on_status("!a1b2c3d4", GOOD)
     assert len(link.app_keys) == 1
@@ -844,7 +926,7 @@ def test_a_collar_holding_keys_this_base_never_gave_it_is_told_to_drop_them(tmp_
 def test_removing_a_collar_takes_its_phones_off_it(tmp_path):
     client, link = make(tmp_path)
     client.post("/api/collars", json={"node_id": "!a1b2c3d4", "name": "Rex"})
-    client.post("/api/collars/!a1b2c3d4/apps", json={})
+    client.post("/api/phones", json={})
     assert client.delete("/api/collars/!a1b2c3d4").status_code == 200
     assert link.app_keys[-1] == ("!a1b2c3d4", [], link.app_keys[-1][2]) and len(link.app_keys) == 2
 
@@ -852,9 +934,9 @@ def test_removing_a_collar_takes_its_phones_off_it(tmp_path):
 def test_a_simulated_collar_can_be_linked_for_trying_the_app(tmp_path):
     client, link = make(tmp_path)
     node_id = client.post("/api/sim", json={"name": "Sim", "lat": 40.0, "lon": -75.0}).json()["node_id"]
-    r = client.post(f"/api/collars/{node_id}/apps", json={"name": "Phone"})
-    assert r.status_code == 200 and r.json()["synced"] is True and r.json()["sim"] is True
-    assert protocol.parse_pairing_code(r.json()["code"])["sim"] is True
+    r = client.post("/api/phones", json={"name": "Phone"})
+    assert r.status_code == 200 and r.json()["synced"][node_id] is True
+    assert protocol.parse_home_pairing_code(r.json()["code"])["collars"][0]["sim"] is True
     assert not getattr(link, "app_keys", [])  # nothing goes on the air for a simulated collar
 
 

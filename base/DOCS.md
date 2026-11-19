@@ -289,20 +289,30 @@ the repository's [app/README.md](https://github.com/deathvenom-qvp/Mesh_GeoColla
 
 To link a phone:
 
-1. Select the collar and press **Connect app** in its **Phone app** panel. Say whose phone it is.
+1. Select any collar and press **Connect app** in its **Phone app** panel. Say whose phone it is.
 2. A QR code appears. In the app, tap **Add a collar** and point the phone at it. If the camera
-   cannot be used, **Copy the code as text** and paste it into the app.
-3. The base sends the phone's key to the collar with the collar's next report. The panel says
-   "Waiting for Rex to confirm" until the collar has it, then "Rex has this list". The app says
-   so too if it reaches the collar first.
-4. The first time the phone connects, it asks for the collar's Bluetooth PIN. For a collar you
-   locked to the base that is the PIN in the collar's panel, and the app shows it. Otherwise it is
-   the code on the collar's screen, or 123456 on a collar without one.
+   cannot be used, **Copy the code as text** and paste it into the app. The phone is now linked
+   to every collar on the base, and the app lists them all.
+3. The base sends each collar its key for the phone with the collar's next report. A collar's
+   panel says "Waiting for Rex to confirm" until that collar has it, then "Rex has this list".
+   The app says so too if it reaches the collar first.
+4. The first time the phone connects to a collar, it asks for that collar's Bluetooth PIN. For a
+   collar you locked to the base that is the PIN in the collar's panel, and the app shows it.
+   Otherwise it is the code on the collar's screen, or 123456 on a collar without one.
 
-The code is that phone's key to that collar and is shown once. Press **Done** when the phone has
-it. Anyone who photographs the code can link their own phone, so treat it like a house key; if in
-doubt, remove the phone from the list and make a new code. A collar takes up to 4 phones, and a
-phone can be linked to several collars.
+A collar you add to the base later trusts every linked phone at once. The phone list then says
+which phones do not list it yet: press **Add Bella** next to a phone and scan that code with
+**Add a collar** in the app. That code holds no key (only the list of collars), so it can be
+shown again at any time; the app also drops collars the base no longer has.
+
+Phones that an older version of the base linked to one collar are still listed under that collar
+as "Rex only" and keep working there. To reach every collar, remove such a phone and connect it
+again. Each collar holds at most four phones, those included.
+
+The code is that phone's key to every collar on the base and is shown once. Press **Done** when
+the phone has it. Anyone who photographs the code can link their own phone, so treat it like a
+house key; if in doubt, remove the phone from the list and make a new code. Removing a phone
+takes it off every collar. A base takes up to 4 phones.
 
 What a linked phone can do: see the collar's position, state, battery and GPS fix, mute the lost
 alert, make the collar beep or vibrate, and pause and resume its corrections. It cannot shock,
@@ -459,7 +469,8 @@ that an older version left in update mode says so in its panel; flash it over US
   old ones, so recorded radio packets cannot be played back to it. From collar firmware 0.16.0
   the dog's name, your contact details and the report rate are numbered the same way, and sending
   the fences a collar already has no longer restarts its shock limits or its lost alert.
-- A phone linked with **Connect app** gets a key of its own for one collar. The collar's
+- A phone linked with **Connect app** gets a key of its own, and each collar gets a different
+  key made from it, so a key read out of one collar's memory opens no other collar. The collar's
   Bluetooth PIN gets a phone as far as Meshtastic's own Bluetooth service; the key is what the
   collar's GeoCollar part asks for, on every request, and it only opens the short list of things
   a phone may do (no shock, no fences, no settings). Keys are random, differ per phone, are sent

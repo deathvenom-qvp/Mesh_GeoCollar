@@ -296,13 +296,33 @@ Golden bytes (key id `0x1a2b3c4d`, key `00 01 .. 0f`, app nonce `a0 .. a7`, coll
 
 ### The pairing code
 
-What the base's **Connect app** QR code says:
+What the base's **Connect app** QR code says (version 2, base 0.19.7 on). It links a phone to every
+collar on the base:
+
+`geocollar://pair?v=2&h=<base id, 8 hex digits>&i=<key id, 8 hex digits>&k=<phone key, base64url without padding>`
+
+then, for each collar on the base, `&n=<node number, 8 hex digits>` followed by any of
+`&p=<the collar's 6-digit Bluetooth PIN>`, `&b=<the collar's Meshtastic short name, which its
+Bluetooth name starts with>`, `&d=<the dog's name>` and `&s=1` for one of the base's simulated
+collars (the app then shows its demo collar, as there is nothing to connect to). A collar's fields
+follow its `n=`, in order.
+
+The phone key is the phone's for the whole base. Each collar's own key for that phone, the one in
+its AppKeys, is the first 16 bytes of HMAC-SHA256(phone key, `"GCK1"` + node number, 4 bytes
+little-endian); the key id is the same on every collar. The app works the same key out for each
+collar. The phone key is in the code and nowhere else outside the base, so the base shows such a
+code once. Golden bytes: phone key `00 01 .. 0f`, node `0xa1b2c3d4`: collar key
+`faabcb3c8ddf0f9da74afdae47c96531`.
+
+The same code without `i=` and `k=` is the base's list of collars, for a phone already linked to
+that base (the app finds its phone key by the base id). It adds the collars added since, updates
+the others' names and PINs, and drops the collars the base no longer lists. It holds no secret
+beyond the Bluetooth PINs, so the base can show it again at any time.
+
+Version 1, from bases before 0.19.7, links one collar, with that collar's own key, and the app
+still reads it:
 
 `geocollar://pair?v=1&n=<node number, 8 hex digits>&i=<key id, 8 hex digits>&k=<key, base64url without padding>`
 
-followed by any of `&p=<the collar's 6-digit Bluetooth PIN>`, `&b=<the collar's Meshtastic short
-name, which its Bluetooth name starts with>`, `&d=<the dog's name>` and `&s=1` for one of the
-base's simulated collars (the app then shows its demo collar, as there is nothing to connect to).
-The key is in the code and nowhere else outside the base and the collar, so the base shows a code
-once.
+followed by the same optional `p`, `b`, `d` and `s`.
 

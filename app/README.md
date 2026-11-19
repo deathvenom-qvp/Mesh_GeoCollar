@@ -58,17 +58,24 @@ Apple only lets a signed app onto a device. There are three ways:
   In Xcode, select the **App** target, pick your team under **Signing & Capabilities**, change
   the bundle identifier to one of your own, plug in the phone and press Run.
 
-## Link a collar
+## Link your collars
 
-1. In the base station, select the collar and press **Connect app**. Say whose phone it is.
+1. In the base station, select any collar and press **Connect app**. Say whose phone it is.
 2. In the app, tap **Add a collar** and point the camera at the QR code. Or scan it with the
    phone's own camera app, which opens GeoCollar. If no camera can be used, press **Copy the code
-   as text** on the base and paste it under *Type or paste the code instead*.
-3. Go near the collar. The first time, the phone asks for the collar's Bluetooth PIN; the app
-   shows it if the base knows it.
+   as text** on the base and paste it under *Type or paste the code instead*. The app now lists
+   every collar on the base.
+3. Go near a collar and open it. The first time, the phone asks for that collar's Bluetooth PIN;
+   the app shows it if the base knows it.
 
-The base hands the phone's key to the collar over the mesh, with the collar's next report. Until
-then the app says the collar has not been told about this phone yet, and keeps trying.
+The base hands each collar its key for the phone over the mesh, with the collar's next report.
+Until then the app says the collar has not been told about this phone yet, and keeps trying.
+
+A collar added to the base later trusts the phone at once. To list it in the app, press **Add
+Bella** next to the phone in the base's list and scan that code with **Add a collar**. That code
+is only the list of the base's collars, with no key: it works on a phone that is linked to that
+base already, and the app also drops collars the base no longer has. A code from an older base
+links one collar only, as before.
 
 **Try a demo collar** on the first screen shows the app with a pretend lost dog near you, with no
 hardware at all. One of the base station's simulated collars gets the same pretend dog, because a
@@ -94,8 +101,10 @@ simulated collar has no Bluetooth to connect to.
   The GeoCollar module on the collar answers only requests signed with a key the base gave it:
   HMAC-SHA256, a new session for every connection with fresh random numbers from both sides, and
   a counter in every request, so a recording is useless.
-- The key is 16 random bytes, different for every phone and every collar. The base shows it
-  once, in the QR code. Removing the phone on the base removes the key from the collar.
+- The phone's key is 16 random bytes, different for every phone. The base shows it once, in the
+  QR code. Each collar gets its own key made from it (HMAC-SHA256 of the collar's node number),
+  which the app works out too, so a key read out of one collar's memory opens no other collar.
+  Removing the phone on the base removes its key from every collar.
 - The app finds the collar by its Bluetooth name: the Meshtastic name (`REX_c3d4`) or, while the
   dog is lost, the beacon's name (`Rex is lost 5551234567`). A collar the phone is already
   connected to (from the phone's Bluetooth settings, the Meshtastic app, or an earlier run) stops

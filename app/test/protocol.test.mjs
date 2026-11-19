@@ -8,7 +8,7 @@ import { test } from 'node:test';
 import { Action, AppSession, ErrorCode, Msg, Result, State, messageType } from '../src/applink.js';
 import { hex, unhex } from '../src/bytes.js';
 import * as mesh from '../src/meshtastic.js';
-import { pairingCode, parsePairingCode } from '../src/pairing.js';
+import { collarKey, pairingCode, parsePairingCode } from '../src/pairing.js';
 
 const KEY_ID = 0x1a2b3c4d;
 const KEY = unhex('000102030405060708090a0b0c0d0e0f');
@@ -139,22 +139,50 @@ test('the pretend node round-trips what the app writes', () => {
 });
 
 test('pairing codes from the base station', () => {
-  // As base/tests/test_protocol.py makes it.
+  // Version 1, for one collar, as base/tests/test_protocol.py makes it.
   const code = 'geocollar://pair?v=1&n=a1b2c3d4&i=1a2b3c4d&k=AAECAwQFBgcICQoLDA0ODw&p=004711&b=BE&d=Bella%20%26%20Co';
   const c = parsePairingCode(`  ${code}\n`);
   assert.deepEqual({ ...c, key: hex(c.key) }, {
-    node: 'a1b2c3d4', nodeNum: 0xa1b2c3d4, keyId: KEY_ID, key: hex(KEY), pin: '004711', bleName: 'BE',
-    dog: 'Bella & Co', sim: false,
+    home: '', keyId: KEY_ID, key: hex(KEY), collars: [{
+      node: 'a1b2c3d4', nodeNum: 0xa1b2c3d4, pin: '004711', bleName: 'BE', dog: 'Bella & Co', sim: false }],
   });
   assert.equal(pairingCode(c), code);
-  const sim = parsePairingCode('geocollar://pair?v=1&n=000000AA&i=00000001&k=AAECAwQFBgcICQoLDA0ODw&s=1');
+  const sim = parsePairingCode('geocollar://pair?v=1&n=000000AA&i=00000001&k=AAECAwQFBgcICQoLDA0ODw&s=1').collars[0];
   assert.deepEqual([sim.node, sim.sim, sim.pin, sim.dog, sim.bleName], ['000000aa', true, '', '', '']);
   for (const bad of [
-    '', 'hello', 'https://example.com/?v=1&n=a1b2c3d4', 'geocollar://pair?v=2&n=a1b2c3d4&i=1a2b3c4d&k=AAECAwQFBgcICQoLDA0ODw',
+    '', 'hello', 'https://example.com/?v=1&n=a1b2c3d4', 'geocollar://pair?v=3&n=a1b2c3d4&i=1a2b3c4d&k=AAECAwQFBgcICQoLDA0ODw',
     'geocollar://pair?v=1&n=a1b2c3&i=1a2b3c4d&k=AAECAwQFBgcICQoLDA0ODw',
     'geocollar://pair?v=1&n=a1b2c3d4&i=00000000&k=AAECAwQFBgcICQoLDA0ODw',
     'geocollar://pair?v=1&n=a1b2c3d4&i=1a2b3c4d&k=AAECAwQFBgcICQoLDA0O',
     'geocollar://pair?v=1&n=a1b2c3d4&i=1a2b3c4d&k=!!!',
     'geocollar://pair?v=1&n=a1b2c3d4&i=1a2b3c4d&k=AAECAwQFBgcICQoLDA0ODw&p=12345',
+  ]) assert.throws(() => parsePairingCode(bad), Error, bad);
+});
+
+test('pairing codes for every collar on the base', async () => {
+  // As base/tests/test_protocol.py makes it: the phone's key, then each collar's fields after its n=.
+  const code = 'geocollar://pair?v=2&h=0badc0de&i=1a2b3c4d&k=AAECAwQFBgcICQoLDA0ODw'
+    + '&n=a1b2c3d4&p=004711&b=BE&d=Bella%20%26%20Co&n=5a000001&d=Sim&s=1';
+  const c = parsePairingCode(code);
+  assert.deepEqual({ ...c, key: hex(c.key) }, {
+    home: '0badc0de', keyId: KEY_ID, key: hex(KEY), collars: [
+      { node: 'a1b2c3d4', nodeNum: 0xa1b2c3d4, pin: '004711', bleName: 'BE', dog: 'Bella & Co', sim: false },
+      { node: '5a000001', nodeNum: 0x5a000001, pin: '', bleName: '', dog: 'Sim', sim: true }],
+  });
+  assert.equal(pairingCode(c), code);
+  // Each collar's key is made from the phone's: golden bytes shared with the base's tests.
+  assert.equal(hex(await collarKey(KEY, 0xa1b2c3d4)), 'faabcb3c8ddf0f9da74afdae47c96531');
+  assert.notEqual(hex(await collarKey(KEY, 0x5a000001)), hex(await collarKey(KEY, 0xa1b2c3d4)));
+  // The collar list: the same base, no key.
+  const list = parsePairingCode('geocollar://pair?v=2&h=0badc0de&n=5a000001&d=Sim&s=1');
+  assert.deepEqual([list.home, list.key, list.keyId, list.collars.map(x => x.dog)], ['0badc0de', null, 0, ['Sim']]);
+  assert.equal(pairingCode(list), 'geocollar://pair?v=2&h=0badc0de&n=5a000001&d=Sim&s=1');
+  for (const bad of [
+    'geocollar://pair?v=2&h=0badc0d&n=a1b2c3d4',
+    'geocollar://pair?v=2&h=0badc0de',
+    'geocollar://pair?v=2&h=0badc0de&n=a1b2c3d4&n=a1b2c3d4',
+    'geocollar://pair?v=2&h=0badc0de&i=1a2b3c4d&k=AAEC&n=a1b2c3d4',
+    'geocollar://pair?v=2&h=0badc0de&i=00000000&k=AAECAwQFBgcICQoLDA0ODw&n=a1b2c3d4',
+    'geocollar://pair?v=2&h=0badc0de&n=a1b2c3d4&p=1',
   ]) assert.throws(() => parsePairingCode(bad), Error, bad);
 });

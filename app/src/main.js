@@ -16,9 +16,9 @@ import { CollarLink, Link } from './collar.js';
 import { CollarHalf, DEMO_KEY_ID, DEMO_NODE, DemoDog, demoKey } from './demo.js';
 import { FakeNode } from './fakenode.js';
 import { bearingDeg, compass, distanceM, formatAge, formatDistance } from './geo.js';
-import { parsePairingCode } from './pairing.js';
+import { collarKey, parsePairingCode } from './pairing.js';
 import { startScanner } from './scanner.js';
-import { loadCollars, saveCollars } from './store.js';
+import { loadCollars, loadHomes, saveCollars, saveHomes } from './store.js';
 import { clearLog, describe, flushLog, log, logLines, onLog, setLogSaver } from './log.js';
 
 const $ = id => document.getElementById(id);
@@ -46,6 +46,7 @@ const PILL = {
 };
 
 let collars = [];
+let homes = [];       // the bases this phone is linked to as a whole: { id, keyId, key }
 let screen = 'home';
 let current = null;   // the collar on screen
 let link = null;
@@ -139,24 +140,57 @@ function showAddError(e) {
   $('addMsg').hidden = false;
 }
 
-/// Link this phone to the collar a pairing code names. Throws if the code is not one.
+const listNames = names => names.join(', ').replace(/, ([^,]*)$/, ' and $1');
+
+/// Link this phone to the collars a pairing code names: every collar on the base, or one collar
+/// from an older base. A code without a key (the base's collar list) adds the collars of a base
+/// this phone is linked to already, and drops the ones the base no longer has. Throws if the
+/// code is not one.
 async function addFromCode(text) {
   const p = parsePairingCode(text);
-  const c = { node: p.node, nodeNum: p.nodeNum, keyId: p.keyId, key: p.key, pin: p.pin, bleName: p.bleName, dog: p.dog, sim: p.sim };
-  const i = collars.findIndex(x => x.node === c.node && !x.demo);
-  if (i >= 0) {
-    // Linked again: a new key for the same collar. Keep what the phone knew about it.
-    c.last = collars[i].last;
-    c.deviceId = collars[i].deviceId;
-    collars[i] = c;
-  } else {
-    collars.push(c);
+  let keyId = p.keyId, key = p.key;
+  if (p.home && !key) {
+    const h = homes.find(x => x.id === p.home);
+    if (!h) throw new Error('This phone is not linked to that base station yet. On the base, press Connect app and scan that code first.');
+    ({ keyId, key } = h);
   }
+  const before = new Set(collars.filter(x => p.home && x.home === p.home).map(x => x.node));
+  const linked = [];
+  for (const e of p.collars) {
+    const c = { node: e.node, nodeNum: e.nodeNum, keyId, key: p.home ? await collarKey(key, e.nodeNum) : key,
+      pin: e.pin, bleName: e.bleName, dog: e.dog, sim: e.sim };
+    if (p.home) c.home = p.home;
+    const i = collars.findIndex(x => x.node === c.node && !x.demo);
+    if (i >= 0) {
+      // Linked again: a new key for the same collar. Keep what the phone knew about it.
+      c.last = collars[i].last;
+      c.deviceId = collars[i].deviceId;
+      collars[i] = c;
+    } else {
+      collars.push(c);
+    }
+    linked.push(c);
+  }
+  // Collars the base no longer has.
+  const gone = p.home ? collars.filter(x => x.home === p.home && !p.collars.some(e => e.node === x.node)) : [];
+  if (gone.length) collars = collars.filter(x => !gone.includes(x));
+  if (p.home && p.key) homes = [...homes.filter(x => x.id !== p.home), { id: p.home, keyId, key }];
   await persist();
+  if (p.home && p.key) await saveHomes(homes);
+  log('app', `pairing code v${p.home ? 2 : 1}${p.home ? `, base ${p.home}${p.key ? ', with key' : ', collar list'}` : ''}:`
+    + ` ${linked.map(c => c.node).join(' ')}${gone.length ? `; dropped ${gone.map(c => c.node).join(' ')}` : ''}`);
   closeAdd();
   await closeCollar();
-  openCollar(c);
-  toast(`${titleOf(c)} is linked to this phone.`);
+  if (linked.length === 1) {
+    openCollar(linked[0]);
+    toast(`${titleOf(linked[0])} is linked to this phone.`);
+    return;
+  }
+  goHome();
+  const added = linked.filter(c => !before.has(c.node));
+  if (p.key || !p.home) toast(`Linked to ${listNames(linked.map(titleOf))}.`);
+  else if (added.length) toast(`Added ${listNames(added.map(titleOf))}.`);
+  else toast(gone.length ? `Removed ${listNames(gone.map(titleOf))}.` : 'The collars are up to date.');
 }
 
 function addDemo() {
@@ -585,6 +619,7 @@ async function main() {
   $('build').textContent = BUILD_TEXT;
   await startLog();
   collars = await loadCollars();
+  homes = await loadHomes();
   goHome();
   if (native) {
     App.addListener('appStateChange', st => {

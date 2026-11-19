@@ -3,12 +3,14 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
 import re
 import secrets
 import shutil
+import struct
 import threading
 import time
 from contextlib import asynccontextmanager
@@ -390,34 +392,67 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
         store.set_collar_info(node_id, "config_seq", seq or None)
         return True
 
-    # -- The companion app: each phone gets a key of its own in a QR code, and the collar gets the
-    # list of keys over the mesh. The phone then talks to the collar over the collar's Bluetooth.
+    # -- The companion app: each phone gets a key of its own in a QR code, and the collars get the
+    # list of keys over the mesh. The phone then talks to a collar over the collar's Bluetooth.
+    #
+    # A phone is linked to the whole base ("phones" in the settings): every collar on the base,
+    # and every one added later, gets a key made from that phone's key (protocol.collar_app_key).
+    # Phones linked to one collar by an older version of the base are still in that collar's
+    # "apps" and keep working there until removed.
+    def home_id() -> str:
+        """This base's id in the pairing codes, so a phone can tell its bases apart."""
+        h = store.setting("home_id")
+        if not h:
+            h = secrets.token_hex(4)
+            store.set_setting("home_id", h)
+        return h
+
+    def phones() -> list[dict]:
+        return store.setting("phones") or []
+
     def public_apps(c: dict) -> list[dict]:
-        """A collar's linked phones without their keys: a key leaves the base once, in its QR code."""
+        """Linked phones without their keys: a key leaves the base once, in its QR code."""
         return [{"id": f"{a['id']:08x}", "name": a.get("name", ""), "created": a.get("created")}
                 for a in c.get("apps") or []]
 
-    def apps_synced(c: dict) -> bool:
-        """Whether the collar has confirmed the list of phones as it is now."""
-        return c.get("apps_seq") == c.get("apps_acked")
+    def app_keys_for(node_id: str, c: dict) -> list[tuple[int, bytes]]:
+        """The keys a collar should hold: phones linked to it alone, then the base's phones."""
+        keys = [(a["id"], bytes.fromhex(a["key"])) for a in c.get("apps") or []]
+        keys += [(p["id"], protocol.collar_app_key(bytes.fromhex(p["key"]), node_id)) for p in phones()]
+        return keys[:protocol.MAX_APP_KEYS]
 
-    def public_collar(c: dict | None) -> dict | None:
+    def keys_print(keys: list[tuple[int, bytes]]) -> str:
+        """A fingerprint of a key list, to tell whether the list on the collar is the one wanted now."""
+        return hashlib.sha256(b"".join(struct.pack("<I", i) + k for i, k in keys)).hexdigest()[:16]
+
+    def apps_synced(node_id: str, c: dict) -> bool:
+        """Whether the collar has confirmed the list of phones as it is now."""
+        keys = app_keys_for(node_id, c)
+        if c.get("apps_seq") is None:  # never sent: fine as long as there is nothing to send
+            return not keys
+        # A record from before the fingerprint was kept counts as the list it was sent with.
+        return c.get("apps_seq") == c.get("apps_acked") and c.get("apps_for", keys_print(keys)) == keys_print(keys)
+
+    def public_collar(c: dict | None, node_id: str | None = None) -> dict | None:
         """A collar as the page gets it."""
         if c is None:
             return None
         c = dict(c)
         c["gps_inside_s"] = gps_inside_for(c)
         c["gps_everywhere"] = bool(c.get("gps_everywhere"))
-        if "apps" in c:
-            c["apps_synced"] = apps_synced(c)
-            c["apps"] = public_apps(c)
+        if node_id:
+            c["apps_synced"] = apps_synced(node_id, c)
+            c["app_keys"] = len(app_keys_for(node_id, c))
+        c["apps"] = public_apps(c)
+        c.pop("apps_for", None)
         return c
 
     def push_apps(node_id: str) -> bool:
         """Send the collar the list of phones that may connect to it. The list is confirmed when
         the collar answers with its number (on_app_ack); until then on_status sends it again."""
         c = store.collar(node_id) or {}
-        keys = [(a["id"], bytes.fromhex(a["key"])) for a in c.get("apps") or []]
+        keys = app_keys_for(node_id, c)
+        store.set_collar_info(node_id, "apps_for", keys_print(keys))
         if node_id in sim:  # a simulated collar has no Bluetooth: it just agrees
             seq = store.next_command_seq()
             store.set_collar_info(node_id, "apps_seq", seq)
@@ -500,8 +535,10 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
         # when the collar's report disagrees with the base about holding any: a collar that was
         # erased has lost its keys, and one that came from another base may still hold that
         # base's. Collar firmware before 0.20 never answers, so the tries are spaced out.
-        apps = c.get("apps") or []
-        if (c.get("apps_seq") is not None and not apps_synced(c)) or bool(apps) != bool(status.get("apps")):
+        apps = app_keys_for(node_id, c)
+        if c.get("apps_for") not in (None, keys_print(apps)):
+            apps_changed(node_id)  # the list it was sent is not the one wanted now (a new node ID): no waiting
+        elif not apps_synced(node_id, c) or bool(apps) != bool(status.get("apps")):
             sent = c.get("apps_sent") or {}
             wait = min(APP_RESEND_MAX_S, 60 * 2 ** min(sent.get("tries", 0), 10) // 2)
             if time.time() - sent.get("at", 0) >= wait:
@@ -701,7 +738,7 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
         collars = store.collars()
         latest = fw.identity_of_latest(store.setting("fw_latest"))
         for node_id in list(collars):
-            c = collars[node_id] = public_collar(collars[node_id])
+            c = collars[node_id] = public_collar(collars[node_id], node_id)
             c["sim"] = sim.public(node_id)
             # Newer collar firmware is known (see the update check) and this collar runs another one.
             c["update_available"] = not c["sim"] and fw.same_firmware(latest, c.get("firmware")) is False
@@ -718,6 +755,8 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
             raise HTTPException(400, str(e)) from e
         c = store.upsert_collar(node_id, name or None)
         push_owner(node_id)
+        if phones():  # the phones linked to the base may connect to this collar too
+            apps_changed(node_id)
         found = store.setting("discovered", {}) or {}
         if found.pop(node_id, None) is not None:
             store.set_setting("discovered", found)
@@ -792,7 +831,7 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
         if body.report_s is not None or body.gps_inside_s is not None or body.gps_everywhere is not None:
             if (store.collar(node_id) or {}).get("config_sent") != config_for(node_id):
                 out["config_sent"] = push_config(node_id)
-        return {**(public_collar(store.collar(node_id)) or {}), **out}
+        return {**(public_collar(store.collar(node_id), node_id) or {}), **out}
 
     @app.get("/api/contact")
     def get_contact():
@@ -884,7 +923,7 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
     @app.delete("/api/collars/{node_id}")
     def remove_collar(node_id: str):
         # A collar leaving this base should not keep trusting phones this base linked to it.
-        if (store.collar(node_id) or {}).get("apps") and node_id not in sim and link.connected:
+        if app_keys_for(node_id, store.collar(node_id) or {}) and node_id not in sim and link.connected:
             try:
                 link.send_app_keys(node_id, [], store.next_command_seq())
             except Exception as e:  # noqa: BLE001 - the collar is removed either way
@@ -975,43 +1014,107 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
     # -- Companion app ----------------------------------------------------------------------------
     def apps_view(node_id: str) -> dict:
         c = store.collar(node_id) or {}
-        return {"apps": public_apps(c), "synced": apps_synced(c), "max": protocol.MAX_APP_KEYS,
+        return {"apps": public_apps(c), "synced": apps_synced(node_id, c), "max": protocol.MAX_APP_KEYS,
                 "pin_known": bool(c.get("ble_pin")), "sim": node_id in sim}
 
-    @app.get("/api/collars/{node_id}/apps")
-    def list_apps(node_id: str):
-        """The phones linked to this collar, and whether the collar has the list yet."""
-        require(node_id)
-        return apps_view(node_id)
+    def code_collars() -> list[dict]:
+        """Every collar on the base as a pairing code lists it: how a phone finds it."""
+        out = []
+        for node_id, c in sorted(store.collars().items(), key=lambda kv: (str(kv[1].get("name") or kv[0]).lower(), kv[0])):
+            dog = c.get("name") or ""
+            if dog == node_id:
+                dog = ""
+            out.append({"node_id": node_id, "dog": dog, "pin": c.get("ble_pin"),
+                        "ble_name": protocol.mesh_names(dog)[1] if dog else "", "sim": node_id in sim})
+        return out
 
-    @app.post("/api/collars/{node_id}/apps")
-    def link_app(node_id: str, body: AppIn):
-        """Authorize one more phone: make it a key, send the collar the new list, and return the
-        pairing code for the QR. The key is returned this once and never again."""
-        c = require(node_id)
-        apps = list(c.get("apps") or [])
-        if len(apps) >= protocol.MAX_APP_KEYS:
-            raise HTTPException(409, f"a collar takes at most {protocol.MAX_APP_KEYS} phones; remove one first")
+    def phones_room() -> int:
+        """How many more phones the base can link: every collar holds at most MAX_APP_KEYS keys."""
+        legacy = max((len(c.get("apps") or []) for c in store.collars().values()), default=0)
+        return max(0, protocol.MAX_APP_KEYS - legacy - len(phones()))
+
+    def phones_view() -> dict:
+        collars = store.collars()
+        out = []
+        for p in phones():
+            # Collars added to the base after this phone last scanned a code: it does not know them yet.
+            missing = [n for n in collars if n not in (p.get("collars") or [])]
+            out.append({"id": f"{p['id']:08x}", "name": p.get("name", ""), "created": p.get("created"),
+                        "missing": missing})
+        return {"phones": out, "max": protocol.MAX_APP_KEYS, "room": phones_room(),
+                "synced": {n: apps_synced(n, c) for n, c in collars.items()}}
+
+    def find_phone(phone_id: str) -> tuple[list[dict], dict]:
+        ps = phones()
+        for p in ps:
+            if f"{p['id']:08x}" == phone_id.lower():
+                return ps, p
+        raise HTTPException(404, "unknown phone")
+
+    def all_apps_changed() -> None:
+        for node_id in store.collars():
+            apps_changed(node_id)
+
+    @app.get("/api/phones")
+    def list_phones():
+        """The phones linked to the base, and the collars each one does not know about yet."""
+        return phones_view()
+
+    @app.post("/api/phones")
+    def link_phone(body: AppIn):
+        """Link one more phone to every collar on the base: make it a key, send each collar the
+        new list, and return the pairing code for the QR. The key is returned this once only."""
+        if not store.collars():
+            raise HTTPException(409, "add a collar first")
+        if phones_room() <= 0:
+            raise HTTPException(409, f"each collar takes at most {protocol.MAX_APP_KEYS} phones; remove one first")
         name = " ".join("".join(ch for ch in body.name if ch.isprintable()).split())
         if len(name) > MAX_APP_NAME:
             raise HTTPException(400, f"the phone's name is at most {MAX_APP_NAME} characters")
+        ps = phones()
+        taken = {p["id"] for p in ps} | {a["id"] for c in store.collars().values() for a in c.get("apps") or []}
         key_id = 0
-        while not key_id or any(a["id"] == key_id for a in apps):
+        while not key_id or key_id in taken:
             key_id = secrets.randbits(32)
         key = secrets.token_bytes(protocol.APP_KEY_LEN)
-        entry = {"id": key_id, "name": name or f"Phone {len(apps) + 1}", "key": key.hex(), "created": time.time()}
-        store.set_collar_info(node_id, "apps", apps + [entry])
-        apps_changed(node_id)
-        dog = c.get("name") or ""
-        if dog == node_id:
-            dog = ""
-        code = protocol.pairing_code(node_id, key_id, key, dog=dog, pin=c.get("ble_pin"),
-                                     ble_name=protocol.mesh_names(dog)[1] if dog else "", sim=node_id in sim)
-        return {**apps_view(node_id), "app": public_apps({"apps": [entry]})[0], "code": code}
+        listed = code_collars()
+        entry = {"id": key_id, "name": name or f"Phone {len(ps) + 1}", "key": key.hex(), "created": time.time(),
+                 "collars": [c["node_id"] for c in listed]}
+        store.set_setting("phones", ps + [entry])
+        all_apps_changed()
+        code = protocol.home_pairing_code(home_id(), listed, key_id, key)
+        return {**phones_view(), "phone": {"id": f"{key_id:08x}", "name": entry["name"]}, "code": code,
+                "collars": listed}
+
+    @app.post("/api/phones/{phone_id}/collars")
+    def phone_collar_list(phone_id: str):
+        """A code with the base's collars and no key, to bring a linked phone up to date after
+        collars were added. Anyone could read it; without the phone's key it opens nothing."""
+        ps, p = find_phone(phone_id)
+        listed = code_collars()
+        p["collars"] = [c["node_id"] for c in listed]
+        store.set_setting("phones", ps)
+        return {**phones_view(), "phone": {"id": phone_id.lower(), "name": p.get("name", "")},
+                "code": protocol.home_pairing_code(home_id(), listed), "collars": listed}
+
+    @app.delete("/api/phones/{phone_id}")
+    def unlink_phone(phone_id: str):
+        """Take a phone's access away: every collar gets the list without it."""
+        ps, p = find_phone(phone_id)
+        store.set_setting("phones", [x for x in ps if x is not p])
+        all_apps_changed()
+        return phones_view()
+
+    @app.get("/api/collars/{node_id}/apps")
+    def list_apps(node_id: str):
+        """The phones linked to this collar alone (by an older base), and whether the collar has
+        the list of phones yet."""
+        require(node_id)
+        return apps_view(node_id)
 
     @app.delete("/api/collars/{node_id}/apps/{app_id}")
     def unlink_app(node_id: str, app_id: str):
-        """Take a phone's access away: the collar gets the list without it."""
+        """Take a phone linked to this collar alone off it: the collar gets the list without it."""
         c = require(node_id)
         apps = list(c.get("apps") or [])
         keep = [a for a in apps if f"{a['id']:08x}" != app_id.lower()]
@@ -1477,7 +1580,7 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
         record_flash(node_id, m, body.via)
         if body.mode == "full":  # erased: the collar has a new key pair now
             store.set_collar_info(node_id, "public_key", None)
-        return {"node_id": node_id, "new_collar": new, "collar": public_collar(store.collar(node_id))}
+        return {"node_id": node_id, "new_collar": new, "collar": public_collar(store.collar(node_id), node_id)}
 
     @app.post("/api/collars/{node_id}/firmware/flashed")
     def firmware_flashed(node_id: str, body: FlashedIn):
@@ -1514,6 +1617,8 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
         store.upsert_collar(node_id, name or f"Simulated dog {n}")
         settings = sim.add(node_id, {"lat": body.lat, "lon": body.lon}).settings()
         push_owner(node_id)
+        if phones():
+            apps_changed(node_id)
         store.set_sim(node_id, settings)
         sim.report_now(node_id)
         return {"node_id": node_id, **settings}
