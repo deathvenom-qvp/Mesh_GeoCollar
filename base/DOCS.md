@@ -573,7 +573,13 @@ that an older version left in update mode says so in its panel; flash it over US
   vibration or shock you send from the page.
 - The page has no login of its own. So that another website open in your browser cannot send
   commands to the base behind your back, the base refuses any change that comes from a page other
-  than its own.
+  than its own, and it answers only when opened by a local address: an IP address, `localhost`, a
+  name without a dot, or a `.local`, `.lan`, `.home.arpa` or `.internal` name. A website can't reach
+  it through a trick with its own name (DNS rebinding). To open the page by another name, such as
+  a reverse proxy's, add that name to **Other names for the page** (`allowed_hosts`; in Docker,
+  `GEOCOLLAR_ALLOWED_HOSTS`).
+- In Home Assistant the page answers only through the sidebar and to Home Assistant itself, not to
+  the other apps on Home Assistant's internal network.
 - The base accepts reports only from collars you added, only PKI-encrypted, and only from the
   public key it first saw from that collar. A report signed with another key is ignored and
   flagged in the collar's panel. After a full install of a collar, set it up again (or remove and

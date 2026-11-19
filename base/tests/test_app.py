@@ -1085,3 +1085,109 @@ def test_log_and_trail_only_where_the_dog_was(tmp_path):
     # 12 is enough.
     app.state.on_status("!a1b2c3d4", {**base, "lat": 40.003, "lon": -75.003, "sats": 12})
     assert client.get("/api/collars").json()["!a1b2c3d4"]["status"]["lat"] == 40.003
+
+
+def _wait_resends(client):
+    for t in list(client.app.state.background.get("threads", [])):
+        t.join(5)
+
+
+def test_fences_go_again_until_the_collar_has_them(tmp_path):
+    # A fence packet lost on the mesh, or fences saved while the radio was away, leave the collar
+    # on its old fences: the base sends them again when a report shows another version.
+    client, link = make(tmp_path)
+    client.post("/api/collars", json={"node_id": "!a1b2c3d4", "name": "Rex"})
+    link.connected = False
+    assert client.put("/api/collars/!a1b2c3d4/fences", json=FENCE).json() == {"fence_version": 1, "chunks_sent": 0}
+    link.connected = True
+    report = {"state": "INSIDE", "fence_version": 0, "pki": True, "sender_key": "S0VZ"}
+    fences = lambda: [d for n, d in link.sent if d[1] == protocol.MsgType.FENCE_CHUNK]  # noqa: E731
+    client.app.state.on_status("!a1b2c3d4", dict(report))
+    _wait_resends(client)
+    assert len(fences()) == 1 and fences()[0][2:4] == (1).to_bytes(2, "little")
+    # Not again straight away: the next try waits a while, longer each time.
+    client.app.state.on_status("!a1b2c3d4", dict(report))
+    _wait_resends(client)
+    assert len(fences()) == 1
+    sent = client.get("/api/collars").json()["!a1b2c3d4"]["fences_sent"]
+    assert sent["version"] == 1 and sent["tries"] == 1
+    # Once the collar has them, nothing more goes.
+    client.app.state.store.set_collar_info("!a1b2c3d4", "fences_sent", {**sent, "at": 0})
+    client.app.state.on_status("!a1b2c3d4", {**report, "fence_version": 1})
+    _wait_resends(client)
+    assert len(fences()) == 1
+
+
+def test_fences_resent_past_a_newer_version_on_the_collar(tmp_path):
+    # A base restored from an older backup: the collar holds a later version and would refuse the
+    # base's, so the same fences go with a version past the collar's.
+    client, link = make(tmp_path)
+    client.post("/api/collars", json={"node_id": "!a1b2c3d4", "name": "Rex"})
+    client.put("/api/collars/!a1b2c3d4/fences", json=FENCE)
+    client.app.state.store.set_collar_info("!a1b2c3d4", "fences_sent", None)
+    link.sent.clear()
+    client.app.state.on_status("!a1b2c3d4", {"state": "INSIDE", "fence_version": 9, "pki": True, "sender_key": "S0VZ"})
+    _wait_resends(client)
+    chunks = [d for n, d in link.sent if d[1] == protocol.MsgType.FENCE_CHUNK]
+    assert len(chunks) == 1 and int.from_bytes(chunks[0][2:4], "little") == 10
+    assert client.get("/api/collars").json()["!a1b2c3d4"]["fence_version"] == 10
+
+
+def test_phone_api_refuses_a_huge_chunked_body(tmp_path):
+    client, _ = make(tmp_path)
+    phone = TestClient(client.app.state.phone_app)
+    r = phone.post(papi.PREFIX + "/collars", content=(b"x" * 4096 for _ in range(100)),
+                   headers={"content-type": "application/json"})
+    assert r.status_code == 413
+    assert client.post(papi.PREFIX + "/collars", content=(b"x" * 4096 for _ in range(100)),
+                       headers={"content-type": "application/json"}).status_code in (400, 413)
+
+
+def test_page_answers_only_by_a_local_name(tmp_path):
+    # Another website reaching the base by DNS rebinding sends its own name as Host, and an
+    # Origin to match: same_site lets that through, the name check does not.
+    client, link = make(tmp_path)
+    client.post("/api/collars", json={"node_id": "!a1b2c3d4", "name": "Rex"})
+    for host in ("192.168.1.5:8099", "127.0.0.1", "localhost:8099", "[fd00::5]:8099", "geocollar", "pi.local",
+                 "base.lan:8099", "a0d7b954-geocollar-base:8099"):
+        assert client.get("/api/collars", headers={"host": host}).status_code == 200, host
+    evil = {"host": "evil.example.com:8099", "origin": "http://evil.example.com:8099"}
+    assert client.get("/api/collars", headers=evil).status_code == 403
+    r = client.post("/api/collars/!a1b2c3d4/command", json={"action": "beep"}, headers=evil)
+    assert r.status_code == 403 and not [m for n, m in link.sent if m[1] == protocol.MsgType.COMMAND]
+    assert client.get("/", headers=evil).status_code == 403
+    with pytest.raises(Exception):
+        with client.websocket_connect("/api/firmware/setup-web", headers=evil):
+            pass
+    # The phone API is sealed with each phone's key, and reached by public names: left alone.
+    assert client.post(papi.PREFIX + "/collars", json={"phone": "00000000", "iv": "AAAAAAAAAAAAAAAA", "ct": "AA"},
+                       headers=evil).status_code == 401
+
+
+def test_page_answers_to_names_the_owner_lists(tmp_path):
+    link = FakeLink()
+    client = TestClient(create_app({"data_dir": str(tmp_path), "allowed_hosts": "GeoCollar.example.com, other.example"},
+                                   link=link))
+    assert client.get("/api/collars", headers={"host": "geocollar.example.com"}).status_code == 200
+    assert client.get("/api/collars", headers={"host": "other.example:443"}).status_code == 200
+    assert client.get("/api/collars", headers={"host": "evil.example.com"}).status_code == 403
+
+
+def test_in_home_assistant_other_apps_are_refused(tmp_path, monkeypatch):
+    from geocollar_base.app import PageGuard
+
+    async def ok(scope, receive, send):
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b""})
+
+    guard = PageGuard(ok, in_ha=True)
+
+    def scope(ip, path="/api/collars"):
+        return {"type": "http", "path": path, "client": (ip, 40000), "headers": [(b"host", b"172.30.33.4:8099")]}
+
+    assert guard.refused(scope("172.30.32.2")) is None  # the sidebar, through ingress
+    assert guard.refused(scope("172.30.32.1")) is None  # Home Assistant: the GeoCollar integration
+    assert guard.refused(scope("192.168.1.20")) is None  # a port opened on the Network tab
+    assert "another app" in guard.refused(scope("172.30.33.7"))
+    assert guard.refused(scope("172.30.33.7", papi.PREFIX + "/collars")) is None
+    assert PageGuard(ok).refused(scope("172.30.33.7")) is None  # Docker: no such network

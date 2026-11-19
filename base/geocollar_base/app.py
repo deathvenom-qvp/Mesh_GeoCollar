@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 import logging
 import os
@@ -54,6 +55,9 @@ def load_settings() -> dict:
         # Settings tab overrides it.
         "phone_url": os.environ.get("GEOCOLLAR_PHONE_URL", ""),
         "phone_port": os.environ.get("GEOCOLLAR_PHONE_PORT", str(papi.DEFAULT_PORT)),
+        # Names besides local ones that the page may be opened by, comma-separated (a reverse
+        # proxy's, for example). See PageGuard.
+        "allowed_hosts": os.environ.get("GEOCOLLAR_ALLOWED_HOSTS", ""),
     }
     options = Path(settings["data_dir"]) / "options.json"
     if options.exists():
@@ -203,6 +207,8 @@ def add_phone_middleware(app: FastAPI) -> None:
     cross-origin questions (the app in a browser, for trying it out). Only for the phone API's
     paths: the page's own API must stay closed to other websites."""
 
+    app.add_middleware(PhoneBodyLimit)
+
     @app.middleware("http")
     async def phone_api_edges(request: Request, call_next):
         path = request.scope["path"]
@@ -227,6 +233,118 @@ def add_phone_middleware(app: FastAPI) -> None:
         response = await call_next(request)
         response.headers.update(cors)
         return response
+
+
+LOCAL_SUFFIXES = (".local", ".lan", ".home.arpa", ".internal", ".localdomain")
+# Home Assistant's internal network: the Supervisor's ingress proxy is .2, Home Assistant itself
+# (and a port the owner opened on the Network tab) comes from .1, every other app has an address of its own.
+HA_NETWORK = ipaddress.ip_network("172.30.32.0/23")
+HA_TRUSTED = {ipaddress.ip_address("172.30.32.1"), ipaddress.ip_address("172.30.32.2")}
+
+
+def host_name(header: str | None) -> str:
+    """The name in a Host header, lower case, without the port or IPv6 brackets."""
+    h = (header or "").strip().lower()
+    if h.startswith("["):
+        return h[1:h.find("]")] if "]" in h else ""
+    return h.rsplit(":", 1)[0] if h.count(":") == 1 else h
+
+
+def local_host(name: str, extra: frozenset[str] = frozenset()) -> bool:
+    """Whether the page may answer to this name: an IP address, localhost, a name with no dot (the
+    machine's own, or an app's on Home Assistant's network), a home-network name (.local, .lan,
+    .home.arpa...), or one the owner listed. A public name is what another website uses to reach
+    the page through DNS rebinding: its name resolving, for a moment, to the base's address."""
+    if not name:
+        return False
+    if name in extra:
+        return True
+    try:
+        ipaddress.ip_address(name)
+        return True
+    except ValueError:
+        pass
+    return name == "localhost" or name.endswith(".localhost") or "." not in name.rstrip(".") \
+        or name.rstrip(".").endswith(LOCAL_SUFFIXES)
+
+
+def parse_hosts(text: str) -> frozenset[str]:
+    return frozenset(h for h in (host_name(x) for x in (text or "").replace(" ", ",").split(",")) if h)
+
+
+class PageGuard:
+    """The page has no login, so only those it is meant for may use it:
+
+    - Browsers only by a local name (local_host). The check against other sites (same_site) trusts
+      the Origin header, which matches the Host header when another website reaches the base by
+      DNS rebinding. That website's name is not local, so it is refused here.
+    - In Home Assistant, not the other apps on its internal network: only the Supervisor's ingress
+      (the sidebar, behind the login) and Home Assistant itself (the GeoCollar integration).
+
+    The phone API is left alone: every request to it is sealed with a phone's key."""
+
+    def __init__(self, app, extra_hosts: frozenset[str] = frozenset(), in_ha: bool = False):
+        self.app = app
+        self.extra = extra_hosts
+        self.in_ha = in_ha
+
+    def refused(self, scope) -> str | None:
+        if scope.get("path", "").find(papi.PREFIX + "/") >= 0:
+            return None
+        if self.in_ha:
+            try:
+                ip = ipaddress.ip_address((scope.get("client") or ("",))[0])
+            except ValueError:
+                ip = None
+            if ip is not None and ip in HA_NETWORK and ip not in HA_TRUSTED:
+                return f"another app on Home Assistant's network ({ip})"
+        headers = dict(scope.get("headers") or [])
+        name = host_name(headers.get(b"host", b"").decode("latin-1"))
+        if not local_host(name, self.extra):
+            return f"the name {name or '(none)'!r}, which is not a local one"
+        return None
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] not in ("http", "websocket"):
+            return await self.app(scope, receive, send)
+        why = self.refused(scope)
+        if why is None:
+            return await self.app(scope, receive, send)
+        log.warning("refused %s %s: %s. To open the page by another name, add it to allowed_hosts",
+                    scope.get("method", "WEBSOCKET"), scope.get("path"), why)
+        if scope["type"] == "websocket":
+            await send({"type": "websocket.close", "code": 1008})
+            return
+        body = json.dumps({"detail": "This page answers only on your home network, by its own address. "
+                                     "To open it by another name, add the name to allowed_hosts."}).encode()
+        await send({"type": "http.response.start", "status": 403,
+                    "headers": [(b"content-type", b"application/json"), (b"content-length", str(len(body)).encode())]})
+        await send({"type": "http.response.body", "body": body})
+
+
+class PhoneBodyLimit:
+    """Refuse a phone API body over papi.MAX_BODY as it arrives. The Content-Length check in
+    phone_api_edges does not see a chunked request, which has none: without this, one such
+    request to the port opened to the internet could fill the base's memory."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http" or scope.get("path", "").find(papi.PREFIX + "/") < 0:
+            return await self.app(scope, receive, send)
+        total = 0
+
+        async def limited():
+            nonlocal total
+            message = await receive()
+            if message["type"] == "http.request":
+                total += len(message.get("body", b""))
+                if total > papi.MAX_BODY:
+                    raise HTTPException(413, "The request is too large.")
+            return message
+
+        await self.app(scope, limited, send)
 
 
 def phone_openapi(app: FastAPI) -> dict:
@@ -546,6 +664,53 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
             return False
         return True
 
+    # -- Fences that have not reached the collar. They go in a few packets, and one lost on the
+    # mesh (or a save while the radio was not connected) leaves the collar on its old fences, with
+    # nothing but the page's "Resend" to fix it. So the base sends them again when a report shows
+    # the collar holds another version: 2 minutes after the last try, then 4, 8... up to an hour.
+    FENCE_RESEND_FIRST_S, FENCE_RESEND_MAX_S = 120, 3600
+    fence_resends: set[str] = set()  # collars whose fences are being sent again right now
+    fence_resend_lock = threading.Lock()
+    app_state: dict = {}  # filled in once the app exists (for tests: the resend threads)
+
+    def resend_fences(node_id: str, c: dict, held) -> None:
+        want = c.get("fence_version") or 0
+        if not c.get("fences") or not want or held is None or held == want or not link.connected:
+            return
+        sent = c.get("fences_sent") or {}
+        same = sent.get("version") == want
+        tries = sent.get("tries", 0) if same else 0
+        wait = min(FENCE_RESEND_MAX_S, FENCE_RESEND_FIRST_S * 2 ** min(tries, 10))
+        if same and time.time() - sent.get("at", 0) < wait:
+            return
+        with fence_resend_lock:
+            if node_id in fence_resends:
+                return
+            fence_resends.add(node_id)
+
+        def run() -> None:
+            try:
+                version = want
+                if held and 0 < (held - want) & 0xFFFF < 0x8000:
+                    # The collar holds a newer version than this base knows (a base restored from an
+                    # older backup): it would refuse this one, so number the same fences past it.
+                    version = store.set_fences(node_id, c["fences"])
+                zones = protocol.zones_from_geojson(c["fences"])
+                pulses = protocol.pulses_from_geojson(c["fences"])
+                store.set_collar_info(node_id, "fences_sent", {"version": version, "at": time.time(), "tries": tries + 1})
+                log.info("%s still reports fence version %s: sending version %s again", node_id, held, version)
+                link.send_fences(node_id, zones, version, pulses)
+            except Exception as e:  # noqa: BLE001 - tried again on a later report
+                log.warning("could not send the fences to %s again: %s", node_id, e)
+            finally:
+                with fence_resend_lock:
+                    fence_resends.discard(node_id)
+
+        # Not on the radio's thread, which this report came in on: the packets go 2 s apart.
+        t = threading.Thread(target=run, name=f"fences for {node_id}", daemon=True)
+        app_state["threads"] = [x for x in app_state.get("threads", []) if x.is_alive()] + [t]
+        t.start()
+
     def on_app_ack(node_id: str, ack: dict) -> None:
         c = store.collar(node_id)
         if c is None or not trusted(node_id, c, ack.get("pki", False), ack.get("sender_key", ""), "an app key answer"):
@@ -609,6 +774,7 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
             wait = min(APP_RESEND_MAX_S, 60 * 2 ** min(sent.get("tries", 0), 10) // 2)
             if time.time() - sent.get("at", 0) >= wait:
                 push_apps(node_id)
+        resend_fences(node_id, c, status.get("fence_version"))
 
     def ask_node_info(node_id: str) -> None:
         """The radio can't PKI-encrypt to a collar whose public key it doesn't have (one set up by
@@ -776,6 +942,9 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
         return await call_next(request)
 
     add_phone_middleware(app)
+    # Outermost: nothing of the page runs for a request it refuses.
+    app.add_middleware(PageGuard, extra_hosts=parse_hosts(settings.get("allowed_hosts", "")),
+                       in_ha=bool(os.environ.get("SUPERVISOR_TOKEN")))
     app.openapi = lambda: phone_openapi(app)
     app.state.store = store
     app.state.clog = clog
@@ -784,6 +953,7 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
     app.state.on_hello = on_hello
     app.state.on_send_error = on_send_error
     app.state.on_app_ack = on_app_ack
+    app.state.background = app_state
     # Leaflet and Leaflet-Geoman are vendored so the page works without a CDN (e.g. on a LAN).
     app.mount("/static", StaticFiles(directory=STATIC), name="static")
 
@@ -1049,6 +1219,7 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
             sim.report_now(node_id)
             sent = len(protocol.fence_chunks(zones, version, pulses))
         elif link.connected:
+            store.set_collar_info(node_id, "fences_sent", {"version": version, "at": time.time(), "tries": 0})
             sent = link.send_fences(node_id, zones, version, pulses)
             if store.collar(node_id).get("owner_sent") != owner_for(node_id):
                 push_owner(node_id)
