@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.19.8
+
+Lost collars keep checking for the base, and nothing puts them to sleep. New collar firmware; the
+base app only has a new version number. Tested with the firmware's PC tests and the firmware
+build, **not on a real collar**.
+
+- **A check for the base every 5 minutes.** While a lost collar cannot reach the base, it no
+  longer sends a report every 30 seconds that nobody hears (each one a transmission plus its
+  retries). It checks for the base every 5 minutes instead, together with its help message on the
+  public channel, directly or through the mesh. The Bluetooth name and the help message go on as
+  before.
+- **When the base answers, a fresh position.** The collar wakes its GPS, takes a fix and sends it
+  to the base as soon as it has one, so the map shows where the dog is now, then goes back to a
+  fix every minute and a report every 30 seconds.
+- **Nothing puts a collar to sleep.** Besides Meshtastic's power saving (already turned off), the
+  collar now turns off **Shutdown on battery after**, which switches it off once it has been
+  unplugged that long, and changes the **Router** and **Router Late** roles, which sleep on an
+  ESP32, to **Client Base**, which still relays. Power saving and the shutdown are also put right
+  straight away when changed over the mesh, not only at the next boot.
+- Flash collars again to get it.
+
 ## 0.19.7
 
 One **Connect app** for the whole household. Base and phone app; no new collar firmware. Tested

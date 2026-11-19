@@ -1180,6 +1180,30 @@ static void testBaseLink()
     CHECK(!w.tick(near + 90000) && w.reachable());
     CHECK(w.tick(near + BaseLink::kSilentMs) && !w.reachable());
 
+    // Reports: the owner's interval; while lost, at least every 30 s while the base answers, and
+    // a check for the base every 5 minutes, with the plea, while it does not.
+    CHECK(kLostProbeMs == LostBeacon::kMeshEveryMs && kLostProbeMs == 5 * 60 * 1000);
+    CHECK(reportIntervalMs(600000, 30000, false, true) == 600000);
+    CHECK(reportIntervalMs(600000, 30000, false, false) == 600000); // not lost: the base makes no difference
+    CHECK(reportIntervalMs(600000, 30000, true, true) == 30000);
+    CHECK(reportIntervalMs(20000, 30000, true, true) == 20000); // the owner's own is quicker
+    CHECK(reportIntervalMs(600000, 30000, true, false) == kLostProbeMs);
+    CHECK(reportIntervalMs(20000, 30000, true, false) == kLostProbeMs);
+
+    // A lost collar out of reach: one check every 5 minutes keeps it out of reach while nothing
+    // answers, and the first answer brings it back at once.
+    BaseLink lost;
+    const uint32_t v = 3000000;
+    for (uint32_t i = 0; i < 5; i++)
+        lost.onSent(v + i * 30000); // the 30 s reports while lost
+    CHECK(lost.tick(v + 4 * 30000) && !lost.reachable());
+    for (uint32_t i = 1; i <= 6; i++) {
+        lost.onSent(v + i * kLostProbeMs);
+        CHECK(!lost.tick(v + i * kLostProbeMs + 30000) && !lost.reachable());
+    }
+    lost.onHeard(); // the acknowledgement of the 6th check
+    CHECK(lost.tick(v + 6 * kLostProbeMs + 31000) && lost.reachable());
+
     // The GPS: a lost dog gets a fix every minute while its position can be passed on, and none
     // (the GPS powered down) while it cannot, beacon or not.
     Settings s;

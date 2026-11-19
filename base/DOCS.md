@@ -156,7 +156,7 @@ By hand, collars only obey messages from base nodes they trust:
 **Rename** next to a collar's name sets the dog's name and how often the collar reports its
 position, from every 30 seconds to every hour (10 minutes unless you change it). More often uses
 more battery and airtime. While a dog is lost, its collar reports every 30 seconds whatever the
-setting. The collar also takes the dog's name as its Meshtastic name ("Rex", short name "REX"), so
+setting (every 5 minutes while it cannot reach the base, see [If a dog gets lost](#if-a-dog-gets-lost)). The collar also takes the dog's name as its Meshtastic name ("Rex", short name "REX"), so
 it shows as the dog in the Meshtastic app and on other nodes. If the collar is out of reach, it
 gets the change when it next reports. Both need collar firmware from 0.15.0 on; older collars keep
 reporting every 10 minutes and keep their Meshtastic name.
@@ -233,7 +233,8 @@ mesh, and the screen's backlight while it is lit.
   in the Meshtastic app is kept.
 - **Reports.** Each report is a radio transmission. Every 10 minutes is a good default; every 30
   seconds costs noticeably more.
-- **Lost alert.** While a dog is lost the collar reports every 30 seconds and advertises on
+- **Lost alert.** While a dog is lost the collar reports every 30 seconds (every 5 minutes while
+  the base is out of reach) and advertises on
   Bluetooth, which drains it faster. Silence the alert once you have the dog.
 - **GPS.** Deep inside its fences a collar takes a fix every 2 to 3 minutes; within 35 m of the
   bands it checks every 3 seconds (or as set). On the Heltec Wireless Tracker that saves little: the board has one power switch
@@ -260,8 +261,12 @@ When a dog has been outside its fences for 90 seconds, its collar starts asking 
 base answers the collar, directly or through other Meshtastic nodes, or a phone with the
 GeoCollar app is connected to it, the collar takes a GPS fix every minute. Once the base has not
 answered its reports for 2 minutes and no app is connected, the GPS goes off (Meshtastic still
-looks about once an hour). The moment anything from the base gets through again, or the app
-connects, it takes a fix at once. The cost: the help message on the public channel carries the
+looks about once an hour), and the collar stops sending a report every 30 seconds that nobody
+hears. Instead, every 5 minutes, together with the help message, it checks whether it can reach
+the base, directly or through the mesh. The moment the base answers (that check, or anything else
+from the base getting through), the collar takes a fix and sends it to the base straight away, so
+the map shows where the dog is, and goes back to a fix every minute and a report every 30 seconds.
+It takes a fix at once when the app connects, too. The cost: the help message on the public channel carries the
 last position the collar had, which can be old, and the collar notices the dog has come home
 only once it is back in reach of the base. This applies only once the dog is outside its fences:
 inside, the collar keeps fixing as usual whether or not it can reach the base, because it

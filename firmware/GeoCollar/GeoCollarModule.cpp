@@ -691,6 +691,10 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
             nameFreshCollar();
             savePowerSettings();
         }
+        // Settings changed over the mesh or in the Meshtastic app take effect after a restart, which
+        // puts them right again; this keeps them right in the seconds before it, too.
+        if (keepAwake() && nodeDB)
+            nodeDB->saveToDisk(SEGMENT_CONFIG);
         watchForFixes();
 
         checkPosition(); // a new fix may start a correction, or stop one that is playing
@@ -726,6 +730,9 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
 
     bool hardwareDisabled() const { return GEOCOLLAR_DISABLE_PIN >= 0 && digitalRead(GEOCOLLAR_DISABLE_PIN) == LOW; }
 
+    /// Lost, or the lost beacon on: the GPS is paced and the reports go out as for a lost dog.
+    bool lostMode() const { return engine_.state() == CollarState::Lost || beacon_.active(); }
+
     /// Hellos until a base adopts the collar, then reports to that base.
     void report(uint32_t now)
     {
@@ -736,11 +743,12 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
                 sendHello();
             return;
         }
-        // The owner's report interval from the base; while lost, at least every 30 s.
+        // The owner's report interval from the base; while lost, at least every 30 s, or every 5
+        // minutes as a check for the base while it is out of reach (see runBeacon, which sends
+        // that check in step with the plea when the beacon is on).
         const uint32_t normal = reportS_ ? reportS_ * 1000u : GEOCOLLAR_STATUS_INTERVAL_MS;
-        const uint32_t interval = engine_.state() == CollarState::Lost && normal > GEOCOLLAR_LOST_STATUS_INTERVAL_MS
-                                      ? GEOCOLLAR_LOST_STATUS_INTERVAL_MS
-                                      : normal;
+        const uint32_t interval =
+            reportIntervalMs(normal, GEOCOLLAR_LOST_STATUS_INTERVAL_MS, lostMode(), link_.reachable());
         // After a restart the base hears from the collar within seconds, not a whole interval later.
         const bool bootReport = !bootReported_ && now >= kBootReportMs;
         if (bootReport || now - lastStatusMs_ >= interval)
@@ -856,6 +864,14 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
             sendStatus(proto::MsgType::Breach);
         else if (d.sendStatus)
             sendStatus(proto::MsgType::Status);
+        else if (fixForBase_ && !d.fixRejected) {
+            // The base answered a lost collar again (see runLink): the first good fix since goes to
+            // it now, so the map shows where the dog is without waiting for the next report.
+            LOG_INFO("GeoCollar: fresh position for the base");
+            sendStatus(statusType());
+        }
+        if (!d.fixRejected)
+            fixForBase_ = false;
     }
 
     /// Keeps track of whether the collar has a current fix, tells the base when that changes, and
@@ -973,8 +989,13 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
     /// Whether the base is answering the collar's reports (see BaseLink). applyGpsPacing() acts on it.
     void runLink(uint32_t now)
     {
-        if (link_.tick(now))
-            LOG_INFO("GeoCollar: base %s", link_.reachable() ? "in reach again" : "out of reach: no answer to the last reports");
+        if (!link_.tick(now))
+            return;
+        LOG_INFO("GeoCollar: base %s", link_.reachable() ? "in reach again" : "out of reach: no answer to the last reports");
+        // A lost dog's GPS has been off: applyGpsPacing() wakes it, and the first fix goes to the base.
+        fixForBase_ = link_.reachable() && lostMode();
+        if (fixForBase_)
+            LOG_INFO("GeoCollar: lost, and the base answered: taking a GPS fix for it");
     }
 
     /// Home mode: the GPS off while the collar is close to the anchor (see HomeWatch).
@@ -1081,8 +1102,16 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
         else
             name[0] = 0;
         ble_.update(name, now, appKeys_.count > 0);
-        if (beacon_.meshDue(now))
+        if (beacon_.meshDue(now)) {
             sendPlea();
+            // The 5-minute mark is also the check for a base that is out of reach: a report that
+            // asks for an acknowledgement. An answer wakes the GPS for a fix, which goes to the
+            // base (runLink, checkPosition). With the base in reach the 30 s reports go on as usual.
+            if (baseNode_ && !link_.reachable()) {
+                LOG_INFO("GeoCollar: lost, checking whether the base can be reached");
+                sendStatus(statusType());
+            }
+        }
     }
 
     /// Broadcast the plea as an ordinary text message on a channel strangers can read: the first one
@@ -1237,13 +1266,17 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
             LOG_WARN("GeoCollar: Wi-Fi turned off, to save battery and keep Bluetooth for the lost beacon");
         }
 #endif
-        // Meshtastic's power saving puts an ESP32 into light sleep for minutes at a time (ls_secs,
-        // 5 minutes by default) with Bluetooth off: no GPS readings, no fence and no corrections
-        // in that time. On a collar that costs more than it saves.
-        if (config.power.is_power_saving) {
-            config.power.is_power_saving = false;
+        if (keepAwake())
             powerSave_ = true;
-            LOG_WARN("GeoCollar: Meshtastic power saving turned off: its light sleep would leave the fence unwatched");
+        // Meshtastic treats the Router roles as power saving on an ESP32: light sleep for up to a
+        // day at a time, woken only by a packet. Client Base still relays (with a Router's priority
+        // for favorite nodes) and never sleeps. Changed before Meshtastic sets up its power states.
+        if (config.device.role == meshtastic_Config_DeviceConfig_Role_ROUTER ||
+            config.device.role == meshtastic_Config_DeviceConfig_Role_ROUTER_LATE) {
+            config.device.role = meshtastic_Config_DeviceConfig_Role_CLIENT_BASE;
+            powerSave_ = true;
+            LOG_WARN("GeoCollar: role Client Base instead of Router: a Router sleeps, and a sleeping collar "
+                     "watches no fence and cannot call for help");
         }
 #if GEOCOLLAR_NO_RELAY
         if (config.device.role == meshtastic_Config_DeviceConfig_Role_CLIENT) {
@@ -1258,6 +1291,33 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
         if (GEOCOLLAR_SCREEN_ON_SECS &&
             (config.display.screen_on_secs == 0 || config.display.screen_on_secs == kScreenOnSecs))
             config.display.screen_on_secs = GEOCOLLAR_SCREEN_ON_SECS;
+    }
+
+    /// Meshtastic settings that put the collar to sleep or switch it off on battery, which is where
+    /// a collar always is. Asleep it reads no GPS, watches no fence and corrects nothing, and a lost
+    /// collar stops its Bluetooth name, its plea every 5 minutes and its checks for the base. Put
+    /// right in RAM; returns true if anything changed, for the caller to save.
+    bool keepAwake()
+    {
+        bool changed = false;
+        // Power saving: light sleep for minutes at a time (ls_secs, 5 minutes by default) with
+        // Bluetooth off; with the Tracker or Sensor role, deep sleep after every position or
+        // telemetry broadcast instead.
+        if (config.power.is_power_saving) {
+            config.power.is_power_saving = false;
+            changed = true;
+            LOG_WARN("GeoCollar: Meshtastic power saving turned off: asleep, the collar watches no fence "
+                     "and a lost one cannot call for help");
+        }
+        // "Shutdown on battery after": off for good once unplugged that long.
+        const uint32_t shutdown = config.power.on_battery_shutdown_after_secs;
+        if (shutdown != 0 && shutdown != UINT32_MAX) {
+            config.power.on_battery_shutdown_after_secs = 0;
+            changed = true;
+            LOG_WARN("GeoCollar: Meshtastic's shutdown after %u s on battery turned off: a collar is always on battery",
+                     (unsigned)shutdown);
+        }
+        return changed;
     }
 
     /// Save what applyPowerSettings() changed, so a restart does not start Wi-Fi again.
@@ -1601,6 +1661,7 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
     bool powerSave_ = false;    // applyPowerSettings() changed a setting that has to be saved
     bool powerRestart_ = false; // and Bluetooth needs a restart to come back
     bool autoCorrection_ = false; // the correction playing came from the fence, not from the owner
+    bool fixForBase_ = false;     // lost, and the base answered again: send it the next good fix at once
     uint32_t ownerGpsSecs_ = 0;   // the owner's own GPS interval, put back when the fences do not pace it
     bool ownerGpsKnown_ = false;  // read from the state file, or recorded on the first pass
     uint32_t lastPacedSecs_ = UINT32_MAX; // nothing set yet: the first pass records the owner's value

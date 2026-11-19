@@ -431,6 +431,15 @@ bool BaseLink::tick(uint32_t nowMs)
     return changed;
 }
 
+uint32_t reportIntervalMs(uint32_t normalMs, uint32_t lostMs, bool lost, bool baseReachable)
+{
+    if (!lost)
+        return normalMs;
+    if (!baseReachable)
+        return kLostProbeMs;
+    return normalMs > lostMs ? lostMs : normalMs;
+}
+
 uint32_t fixOverdueMs(uint32_t gpsIntervalSecs)
 {
     uint32_t secs = gpsIntervalSecs ? gpsIntervalSecs : 120;
