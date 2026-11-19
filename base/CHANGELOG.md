@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.19.9
+
+- **Fix: "Method Not Allowed" when pressing Show the code under Connect app.** After updating to
+  0.19.7 or later, a browser could keep showing the older page, whose Connect app asks the base
+  in a way it no longer answers. The page is now always checked for changes, so an update shows
+  at once, and the older page's Connect app works again: it links the phone to every collar too.
+  If the panel still says "talks to this collar", reload the page once.
+
 ## 0.19.8
 
 Lost collars keep checking for the base, and nothing puts them to sleep. New collar firmware; the

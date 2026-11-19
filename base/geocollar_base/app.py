@@ -723,7 +723,9 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
 
     @app.get("/")
     def index():
-        return FileResponse(STATIC / "index.html")
+        # Always ask the base whether the page changed: a browser that kept an older page after
+        # an update calls endpoints this version no longer has ("Method Not Allowed").
+        return FileResponse(STATIC / "index.html", headers={"Cache-Control": "no-cache"})
 
     @app.get("/api/health")
     def health():
@@ -1085,6 +1087,15 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
         code = protocol.home_pairing_code(home_id(), listed, key_id, key)
         return {**phones_view(), "phone": {"id": f"{key_id:08x}", "name": entry["name"]}, "code": code,
                 "collars": listed}
+
+    @app.post("/api/collars/{node_id}/apps")
+    def link_app_from_older_page(node_id: str, body: AppIn):
+        """What "Connect app" on a page from before 0.19.7 calls, still in a browser's cache after
+        an update: it links the phone to every collar on the base too, and answers in the shape
+        that page reads."""
+        require(node_id)
+        r = link_phone(body)
+        return {**apps_view(node_id), "app": r["phone"], "code": r["code"]}
 
     @app.post("/api/phones/{phone_id}/collars")
     def phone_collar_list(phone_id: str):
