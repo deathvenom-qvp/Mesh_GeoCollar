@@ -865,6 +865,24 @@ def test_phones_linked_to_one_collar_by_an_older_base_keep_working(tmp_path, mon
     assert client.get("/api/phones").json()["room"] == 3
 
 
+def test_a_page_cached_from_before_0_19_7_can_still_link_a_phone(tmp_path):
+    client, link = make(tmp_path)
+    # The page is always checked for changes, so an update reaches the browser.
+    assert client.get("/").headers["cache-control"] == "no-cache"
+    client.post("/api/collars", json={"node_id": "!a1b2c3d4", "name": "Rex"})
+    client.post("/api/collars", json={"node_id": "!0badf00d", "name": "Bella"})
+    # The older page's "Connect app" posts to the collar: the phone is linked to the whole base.
+    r = client.post("/api/collars/!a1b2c3d4/apps", json={"name": "Ken"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["app"]["name"] == "Ken" and body["sim"] is False and body["max"] == 4
+    code = protocol.parse_home_pairing_code(body["code"])
+    assert [c["dog"] for c in code["collars"]] == ["Bella", "Rex"]
+    assert [p["name"] for p in client.get("/api/phones").json()["phones"]] == ["Ken"]
+    assert {node for node, _, _ in link.app_keys} == {"!a1b2c3d4", "!0badf00d"}
+    assert client.post("/api/collars/!nope/apps", json={}).status_code == 404
+
+
 def test_at_most_four_phones_per_collar(tmp_path):
     client, link = make(tmp_path)
     client.post("/api/collars", json={"node_id": "!a1b2c3d4", "name": "Rex"})
