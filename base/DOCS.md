@@ -351,7 +351,27 @@ reports and a minute (the collar is out of the mesh's reach), the app passes the
 on to the base every 30 seconds, with the phone's own position. The page then says "via Ken's
 phone" next to that report, on the map, in the collar's panel and in the Log.
 
-Phones talk to the base on **port 8100**, which serves nothing but the phone API. Every request and
+**In Home Assistant, there is nothing to forward or proxy.** Phones reach the base through Home
+Assistant's own address, the one you already reach Home Assistant at from outside (your reverse
+proxy's HTTPS URL, or Home Assistant Cloud), at the path `/api/geocollar/phone`. A small
+integration in Home Assistant passes that path, and nothing else, on to this app's phone API. This
+app puts it in place by itself (in `custom_components/geocollar` in Home Assistant's config folder,
+which is why it asks to write there) and tells Home Assistant about itself, so:
+
+1. After installing or updating this app, restart Home Assistant once.
+2. Under **Settings > Devices & services**, GeoCollar shows as **Discovered**: press **Add**.
+
+That's all: the integration tells the base Home Assistant's addresses every hour, and phones are
+given them (shown under **Settings > Phone app away from home**). The path needs no Home Assistant
+login, because the phone app has none; it doesn't need one either, as every request on it is
+encrypted and signed with a phone's own key, which only the base can check, and the integration
+passes on the phone API only, never the page. It can't read what passes through. If this app
+can't write to the config folder, copy `base/geocollar_base/ha_integration/geocollar` from the
+repository into `custom_components/` yourself. A base in Docker can use the integration too: add
+GeoCollar by hand under Devices & services and give it the base's phone port, like
+`http://192.168.1.5:8100`.
+
+Without the integration (or in Docker), phones talk to the base on **port 8100**, which serves nothing but the phone API. Every request and
 answer on it is encrypted and signed with that phone's own key, and old or repeated requests are
 refused, so plain http is safe there and so is a reverse proxy in between. The API is documented
 in OpenAPI 3.1, at `/api/phone/v1/openapi.json` (and `/api/phone/v1/docs`) on that port.
@@ -370,7 +390,7 @@ in OpenAPI 3.1, at `/api/phone/v1/openapi.json` (and `/api/phone/v1/docs`) on th
   (or set `GEOCOLLAR_PHONE_PORT`); `GEOCOLLAR_PHONE_URL` sets the Base URL.
 - Don't forward port 8099, the page: it has no login.
 
-**Behind a reverse proxy** such as Nginx Proxy Manager, with everything coming in over HTTPS on
+**Behind a reverse proxy of its own** (only without the integration) such as Nginx Proxy Manager, with everything coming in over HTTPS on
 port 443, point the proxy at port 8100 and give phones the proxy's address. No port number is
 needed in the Base URL, and nothing has to be forwarded on the router but 443.
 

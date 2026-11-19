@@ -152,6 +152,11 @@ class AppIn(BaseModel):
     name: str = ""  # whose phone it is, for the list
 
 
+class HaLinkIn(BaseModel):
+    external: str | None = None  # Home Assistant's address from outside, with the integration's path
+    internal: str | None = None  # and on the home network
+
+
 class PhoneAccessIn(BaseModel):
     url: str = ""  # the Base URL phones use from outside the home; empty: work it out
 
@@ -743,6 +748,8 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
             link.start()
         sim.start()
         threading.Thread(target=update_check_loop, name="firmware update check", daemon=True).start()
+        if os.environ.get("SUPERVISOR_TOKEN"):
+            threading.Thread(target=lambda: app.state.ha_setup(), name="Home Assistant setup", daemon=True).start()
         yield
         stop_checks.set()
         sim.close()
@@ -1245,27 +1252,40 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
         own = store.setting("phone_url") or settings.get("phone_url") or ""
         if own:
             items.append({"url": own, "source": "set", "label": "the Base URL set here"})
+        # Through Home Assistant's own address, when the GeoCollar integration is set up there: it
+        # tells the base its addresses (PUT /api/ha-link) on start and every hour.
+        hl = store.setting("ha_link") or {}
+        through_ha = bool(hl.get("at")) and time.time() - hl["at"] < HA_LINK_FRESH_S
+        if through_ha:
+            if hl.get("external"):
+                items.append({"url": hl["external"], "source": "external_ha",
+                              "label": "Home Assistant's own address, through the GeoCollar integration"})
+            if hl.get("internal"):
+                items.append({"url": hl["internal"], "source": "internal_ha",
+                              "label": "Home Assistant on your network, through the GeoCollar integration"})
         ha = ha_info()
-        if ha:
+        if through_ha:
+            pass  # the port is only a way in at home now
+        elif ha:
             host_port = ha.get("port")
             if ha.get("port_known") and not host_port:
                 warnings.append(f"The phone app's port ({port}) is turned off in this app's Network settings in "
                                 "Home Assistant, so phones can't reach the base. Turn it on there and restart the app.")
             hp = int(host_port or port)
+            if not own:
+                warnings.append("The GeoCollar integration is not set up in Home Assistant yet, so phones can't reach "
+                                "the base through Home Assistant's own address. " + ha_integration_hint())
             for key, label in (("external_url", "Home Assistant's external URL"), ("internal_url", "Home Assistant's internal URL")):
                 host = urlsplit(ha.get(key) or "").hostname
-                if not host:
-                    continue
-                if host.endswith(".ui.nabu.casa"):
-                    if not own:
-                        warnings.append("Home Assistant Cloud (Nabu Casa) only passes on Home Assistant itself, not "
-                                        "this app's port. To reach the base over the internet, forward the port on "
-                                        "your router or use a reverse proxy, and enter its address as the Base URL.")
-                    continue
+                if not host or host.endswith(".ui.nabu.casa"):
+                    continue  # Home Assistant Cloud passes on Home Assistant itself only, not a port
                 items.append({"url": papi.with_port(host, hp), "source": key.split("_")[0] + "_ha", "label": label})
             if ha.get("ip"):
                 items.append({"url": papi.with_port(ha["ip"], hp), "source": "ip", "label": "this machine's address on your network"})
-        else:
+        if ha and through_ha and ha.get("ip") and ha.get("port"):
+            items.append({"url": papi.with_port(ha["ip"], int(ha["port"])), "source": "ip",
+                          "label": "this machine's address on your network, on the phone port"})
+        elif not ha:
             # Docker: the address the page was opened on (not through Home Assistant), else this
             # machine's own.
             host = None
@@ -1287,7 +1307,54 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
             warnings.append("Every address here is on your home network: away from home the app can't reach the base. "
                             "Set a Base URL that works from the internet to see the dogs from anywhere.")
         return {"urls": urls, "items": [it for it in items if it["url"] in urls], "warnings": warnings,
-                "port": port, "url": own}
+                "port": port, "url": own, "ha": bool(ha), "through_ha": through_ha,
+                "integration": ha_state.get("install")}
+
+    HA_LINK_FRESH_S = 3 * 3600  # the integration says so every hour
+    ha_state: dict = {}  # "install": what install_integration did at start
+
+    def ha_integration_hint() -> str:
+        done = ha_state.get("install")
+        if done in ("installed", "updated"):
+            return "This app has just put it in Home Assistant: restart Home Assistant, then add GeoCollar where it says Discovered (Settings > Devices & services)."
+        if done == "current":
+            return "It is installed: add GeoCollar where it says Discovered under Settings > Devices & services (restart Home Assistant if it is not there)."
+        return ("Copy the folder custom_components/geocollar from this app's repository into Home Assistant's "
+                "config folder, restart Home Assistant and add GeoCollar under Settings > Devices & services.")
+
+    def ha_setup() -> None:
+        """In Home Assistant: put the GeoCollar integration in place and say where this app is,
+        so Home Assistant offers to set it up. Runs once at start, in the background."""
+        try:
+            ha_state["install"] = papi.install_integration(Path(settings.get("ha_config_dir") or "/homeassistant"))
+            log.info("Home Assistant integration: %s", ha_state["install"])
+        except OSError as e:
+            ha_state["install"] = "no_access"
+            log.warning("could not put the GeoCollar integration in Home Assistant: %s", e)
+        port = int(settings.get("phone_port") or papi.DEFAULT_PORT)
+        if not papi.announce(settings.get("supervisor_fetch"), port, int(os.environ.get("GEOCOLLAR_PORT", "8099"))):
+            log.warning("could not announce this app to Home Assistant (no GeoCollar discovery)")
+
+    app.state.ha_setup = ha_setup
+
+    @app.put("/api/ha-link")
+    def put_ha_link(body: HaLinkIn):
+        """From the GeoCollar integration in Home Assistant: Home Assistant's addresses, with the
+        path the phone API is passed on at. Phones are given them."""
+        out = {}
+        for key in ("external", "internal"):
+            v = getattr(body, key)
+            try:
+                v = papi.clean_url(v or "")
+            except ValueError as e:
+                raise HTTPException(400, str(e)) from e
+            if v and not urlsplit(v).path.endswith(papi.HA_PATH):
+                raise HTTPException(400, f"the address must end in {papi.HA_PATH}")
+            out[key] = v or None
+        before = store.setting("ha_link") or {}
+        if {k: before.get(k) for k in out} != out or time.time() - before.get("at", 0) > 600:
+            store.set_setting("ha_link", {**out, "at": time.time()})
+        return phone_urls()
 
     @app.get("/api/phone-access")
     def get_phone_access(request: Request):

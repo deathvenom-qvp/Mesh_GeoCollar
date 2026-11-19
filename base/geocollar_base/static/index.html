@@ -602,8 +602,11 @@
   <section id="accessBox">
     <h2>Phone app away from home</h2>
     <div class="muted">Linked phones fetch where the dogs are from this base, and pass on a collar's position when they are
-      near a dog whose collar can't reach the base. They talk to the base on port <span id="accessPort">8100</span>, which
-      serves nothing else, and everything they send and get is encrypted with each phone's own key. To use the app away from
+      near a dog whose collar can't reach the base. Everything they send and get is encrypted with each phone's own key.
+      In Home Assistant they reach the base through Home Assistant's own address (your reverse proxy's or Home Assistant
+      Cloud's), by way of the small GeoCollar integration this app puts in Home Assistant: restart Home Assistant once
+      and add GeoCollar where it says Discovered. Nothing else to set up. Otherwise phones use port
+      <span id="accessPort">8100</span>, which serves nothing but the phone app: to use the app away from
       home, make that port reachable from the internet (a port forward on your router, or a reverse proxy such as Nginx
       Proxy Manager pointed at port <span id="accessPort2">8100</span>) and enter its address here, for example
       <code>https://geocollar.example.com</code> or <code>https://ha.example.com/geocollar</code>. Left empty, the base uses Home Assistant's URL, else this machine's address on your network.</div>

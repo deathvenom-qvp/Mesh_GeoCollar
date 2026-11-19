@@ -1,0 +1,2 @@
+# For base/tests_ha: the Home Assistant integration, tested in a real Home Assistant.
+pytest-homeassistant-custom-component==0.13.316

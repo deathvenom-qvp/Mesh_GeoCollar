@@ -34,6 +34,12 @@ real phone or collar**.
   the code was used, and the phone list shows it. Each phone shows when it was last in touch, and
   **New code** relinks one (after reinstalling the app, or for a phone linked by 0.19.7 to 0.19.9,
   which stays Bluetooth-only until then) without new keys on the collars.
+- **Through Home Assistant's own address, with nothing to set up.** A small GeoCollar
+  integration, which this app puts in Home Assistant and announces, passes the phone API on at
+  `/api/geocollar/phone` on the address you already use for Home Assistant from outside (your
+  reverse proxy's HTTPS URL, or Home Assistant Cloud). Restart Home Assistant once and add
+  GeoCollar where it says Discovered. The app now asks to write to Home Assistant's config folder
+  for this (its own `custom_components/geocollar` only).
 - **Works behind a reverse proxy** such as Nginx Proxy Manager: a Base URL like
   `https://geocollar.example.com` (a proxy host to port 8100) or `https://ha.example.com/geocollar`
   (a custom location); the base finds its API behind such a path. DOCS.md has the steps.

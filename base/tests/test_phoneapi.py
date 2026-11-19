@@ -272,12 +272,15 @@ def test_behind_a_reverse_proxy(tmp_path):
     assert client.post("/geocollar/api/phones", json={}).status_code == 404
 
 
-def supervisor(config, addon_port=8100, ip="192.168.1.5"):
-    def fetch(url):
+def supervisor(config, addon_port=8100, ip="192.168.1.5", posted=None):
+    def fetch(url, body=None):
+        if body is not None:
+            posted.append((url, body))
+            return {"result": "ok", "data": {"uuid": "x"}}
         if url.endswith("/core/api/config"):
             return config
         if url.endswith("/addons/self/info"):
-            return {"data": {"network": {"8099/tcp": None, "8100/tcp": addon_port}}}
+            return {"data": {"hostname": "a0d7b954-geocollar-base", "network": {"8099/tcp": None, "8100/tcp": addon_port}}}
         if url.endswith("/network/info"):
             return {"data": {"interfaces": [{"primary": True, "ipv4": {"address": [f"{ip}/24"]}}]}}
         raise AssertionError(url)
@@ -289,7 +292,8 @@ def test_base_url_defaults_to_home_assistants_url_then_the_ip(tmp_path):
     client, _ = make(tmp_path, supervisor_fetch=fetch)
     a = client.get("/api/phone-access").json()
     assert a["urls"] == ["http://ha.example.com:8100", "http://homeassistant.local:8100", "http://192.168.1.5:8100"]
-    assert [i["source"] for i in a["items"]] == ["external_ha", "internal_ha", "ip"] and not a["warnings"]
+    assert [i["source"] for i in a["items"]] == ["external_ha", "internal_ha", "ip"]
+    assert len(a["warnings"]) == 1 and "integration is not set up" in a["warnings"][0]
     # The owner's own address goes first.
     a = client.put("/api/phone-access", json={"url": "https://dogs.example.net"}).json()
     assert a["urls"] == ["https://dogs.example.net", "http://ha.example.com:8100", "http://homeassistant.local:8100"]
@@ -301,10 +305,61 @@ def test_base_url_falls_back_to_the_ip_and_says_why(tmp_path):
     a = client.get("/api/phone-access").json()
     assert a["urls"] == ["http://192.168.1.5:8100"]
     text = " ".join(a["warnings"])
-    assert "Nabu Casa" in text and "turned off" in text and "home network" in text
+    assert "integration is not set up" in text and "turned off" in text and "home network" in text
     # The host port Home Assistant publishes the phone API on is the one phones are given.
     client, _ = make(tmp_path / "2", supervisor_fetch=supervisor({"external_url": "", "internal_url": ""}, addon_port=18100))
     assert client.get("/api/phone-access").json()["urls"] == ["http://192.168.1.5:18100"]
+
+
+def test_through_home_assistants_own_address(tmp_path):
+    """The GeoCollar integration passes the phone API on at Home Assistant's own address (a reverse
+    proxy's or Home Assistant Cloud's), and tells the base so: no port or proxy host of its own."""
+    fetch = supervisor({"external_url": "", "internal_url": "http://homeassistant.local:8123"}, addon_port=None)
+    client, _ = make(tmp_path, supervisor_fetch=fetch)
+    r = client.put("/api/ha-link", json={"external": "https://abcdef.ui.nabu.casa/api/geocollar/phone",
+                                         "internal": "http://homeassistant.local:8123/api/geocollar/phone"})
+    a = r.json()
+    assert r.status_code == 200 and a["through_ha"] is True
+    assert a["urls"] == ["https://abcdef.ui.nabu.casa/api/geocollar/phone", "http://homeassistant.local:8123/api/geocollar/phone"]
+    assert not a["warnings"]  # the port being off no longer matters
+    # Phones are given those, and the base answers behind the path.
+    body, phone = new_phone(client)
+    assert phone.code["urls"][0] == "https://abcdef.ui.nabu.casa/api/geocollar/phone"
+    assert phone.enroll(path="/api/geocollar/phone" + papi.PREFIX + "/enroll").status_code == 200
+    # A Base URL set by hand still comes first.
+    assert client.put("/api/phone-access", json={"url": "https://dogs.example.net"}).json()["urls"][0] == "https://dogs.example.net"
+    # Only addresses with the integration's path are taken.
+    assert client.put("/api/ha-link", json={"external": "https://evil.example/"}).status_code == 400
+    # An integration that stopped saying so for hours no longer counts.
+    st = client.app.state.store
+    st.set_setting("ha_link", {**st.setting("ha_link"), "at": time.time() - 4 * 3600})
+    client.put("/api/phone-access", json={"url": ""})
+    assert client.get("/api/phone-access").json()["through_ha"] is False
+
+
+def test_the_integration_is_put_in_place_and_announced(tmp_path):
+    posted = []
+    fetch = supervisor({"external_url": "", "internal_url": ""}, posted=posted)
+    client, _ = make(tmp_path, supervisor_fetch=fetch, ha_config_dir=str(tmp_path / "ha"))
+    # No access to Home Assistant's config folder: nothing is written, the hint says how to do it by hand.
+    client.app.state.ha_setup()
+    assert client.get("/api/phone-access").json()["integration"] == "no_access"
+    assert posted == [("http://supervisor/discovery", {"service": "geocollar", "config": {
+        "host": "a0d7b954-geocollar-base", "phone_port": 8100, "page_port": 8099}})]
+    (tmp_path / "ha").mkdir()
+    client.app.state.ha_setup()
+    dest = tmp_path / "ha" / "custom_components" / "geocollar"
+    assert (dest / "__init__.py").exists() and (dest / "config_flow.py").exists()
+    a = client.get("/api/phone-access").json()
+    assert a["integration"] == "installed" and "restart Home Assistant" in " ".join(a["warnings"])
+    client.app.state.ha_setup()
+    assert client.get("/api/phone-access").json()["integration"] == "current"
+    # An older one is replaced; a folder of that name that is not ours is left alone.
+    m = json.loads((dest / "manifest.json").read_text())
+    (dest / "manifest.json").write_text(json.dumps({**m, "version": "0.0.1"}))
+    assert papi.install_integration(tmp_path / "ha") == "updated" and papi.integration_version(dest) == m["version"]
+    (dest / "manifest.json").write_text("{}")
+    assert papi.install_integration(tmp_path / "ha") == "not_ours"
 
 
 def test_the_phone_port_serves_the_phone_api_alone(tmp_path):

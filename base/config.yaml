@@ -26,6 +26,14 @@ ports:
 uart: true
 # Home Assistant's home location (Settings > System > General), to start the map there.
 homeassistant_api: true
+# The phone app through Home Assistant's own address: this app puts the GeoCollar integration in
+# Home Assistant's custom_components (its own folder only) and announces itself, so Home
+# Assistant offers to set it up. The integration passes /api/geocollar/phone/... to port 8100.
+map:
+  - type: homeassistant_config
+    read_only: false
+discovery:
+  - geocollar
 # The port Home Assistant publishes the phone API on, and this machine's address on the network:
 # the Base URL the phone app is given when the owner has not set one.
 hassio_api: true

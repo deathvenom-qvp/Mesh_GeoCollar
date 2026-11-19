@@ -33,9 +33,11 @@ import ipaddress
 import json
 import os
 import secrets
+import shutil
 import socket
 import time
 import urllib.request
+from pathlib import Path
 from typing import Literal
 from urllib.parse import urlsplit
 
@@ -307,13 +309,16 @@ def plaintext_components() -> dict:
 
 
 # -- Where the phone can reach the base ----------------------------------------------------
-def _supervisor(path: str, fetch=None):
+def _supervisor(path: str, fetch=None, body: dict | None = None):
     token = os.environ.get("SUPERVISOR_TOKEN")
     if not token and fetch is None:
         return None
     if fetch is not None:
-        return fetch(f"http://supervisor{path}")
-    req = urllib.request.Request(f"http://supervisor{path}", headers={"Authorization": f"Bearer {token}"})
+        return fetch(f"http://supervisor{path}") if body is None else fetch(f"http://supervisor{path}", body)
+    req = urllib.request.Request(f"http://supervisor{path}", headers={"Authorization": f"Bearer {token}",
+                                                                      "Content-Type": "application/json"},
+                                 data=None if body is None else json.dumps(body).encode(),
+                                 method="GET" if body is None else "POST")
     try:
         with urllib.request.urlopen(req, timeout=5) as r:  # noqa: S310 - fixed internal URL
             return json.load(r)
@@ -340,6 +345,53 @@ def ha_lookup(fetch=None) -> dict:
         if addrs and (iface.get("primary") or "ip" not in out):
             out["ip"] = str(addrs[0]).split("/")[0]
     return out
+
+
+# -- The Home Assistant integration (ha_integration/geocollar): the phone API through Home
+# Assistant's own address, at HA_PATH, with no port or proxy host of its own.
+HA_PATH = "/api/geocollar/phone"
+INTEGRATION = Path(__file__).parent / "ha_integration" / "geocollar"
+
+
+def integration_version(folder: Path) -> str | None:
+    try:
+        m = json.loads((folder / "manifest.json").read_text())
+    except (OSError, ValueError):
+        return None
+    return m.get("version") if m.get("domain") == "geocollar" else None
+
+
+def install_integration(config_dir: Path) -> str:
+    """Copy the integration into Home Assistant's custom_components, if this app may write there
+    and it is missing or older. Returns what happened: installed, updated, current, not_ours or
+    no_access."""
+    if not config_dir.is_dir() or not os.access(config_dir, os.W_OK):
+        return "no_access"
+    dest = config_dir / "custom_components" / "geocollar"
+    have, want = integration_version(dest), integration_version(INTEGRATION)
+    if dest.exists() and have is None:
+        return "not_ours"  # someone else's folder of that name: leave it alone
+    if have == want:
+        return "current"
+    tmp = dest.with_name(".geocollar.new")
+    shutil.rmtree(tmp, ignore_errors=True)
+    shutil.copytree(INTEGRATION, tmp, ignore=shutil.ignore_patterns("__pycache__"))
+    if dest.exists():
+        shutil.rmtree(dest)
+    tmp.replace(dest)
+    return "updated" if have else "installed"
+
+
+def announce(fetch=None, phone_port: int = DEFAULT_PORT, page_port: int = 8099) -> bool:
+    """Tell Home Assistant, through the Supervisor, where this app is: it then offers to set up
+    the GeoCollar integration ("Discovered")."""
+    info = _supervisor("/addons/self/info", fetch)
+    host = ((info or {}).get("data") or {}).get("hostname")
+    if not host:
+        return False
+    r = _supervisor("/discovery", fetch, {"service": "geocollar",
+                                          "config": {"host": host, "phone_port": phone_port, "page_port": page_port}})
+    return bool(r) and (r.get("result") == "ok" if isinstance(r, dict) else True)
 
 
 def local_ip() -> str | None:
