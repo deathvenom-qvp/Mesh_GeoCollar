@@ -200,8 +200,15 @@ def add_phone_middleware(app: FastAPI) -> None:
 
     @app.middleware("http")
     async def phone_api_edges(request: Request, call_next):
-        if not request.url.path.startswith(papi.PREFIX + "/"):
+        path = request.scope["path"]
+        at = path.find(papi.PREFIX + "/")
+        if at < 0:
             return await call_next(request)
+        if at > 0:
+            # Behind a reverse proxy that passes on a path of its own in front (a Base URL like
+            # https://example.com/geocollar, forwarded without stripping /geocollar): drop it.
+            request.scope["path"] = path[at:]
+            request.scope["raw_path"] = path[at:].encode()
         cors = {"Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "GET, POST",
                 "Access-Control-Allow-Headers": "Content-Type", "Access-Control-Max-Age": "3600"}
         if request.method == "OPTIONS":

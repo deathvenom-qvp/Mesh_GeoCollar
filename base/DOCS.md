@@ -370,6 +370,23 @@ in OpenAPI 3.1, at `/api/phone/v1/openapi.json` (and `/api/phone/v1/docs`) on th
   (or set `GEOCOLLAR_PHONE_PORT`); `GEOCOLLAR_PHONE_URL` sets the Base URL.
 - Don't forward port 8099, the page: it has no login.
 
+**Behind a reverse proxy** such as Nginx Proxy Manager, with everything coming in over HTTPS on
+port 443, point the proxy at port 8100 and give phones the proxy's address. No port number is
+needed in the Base URL, and nothing has to be forwarded on the router but 443.
+
+1. In Nginx Proxy Manager, **Add Proxy Host**: a domain of its own, for example
+   `geocollar.example.com` (add the DNS name as you did for Home Assistant); scheme `http`;
+   forward host the Home Assistant machine's address (for example `192.168.1.5`), forward port
+   `8100`. Websockets support is not needed, nor any custom header.
+2. On its **SSL** tab, request a Let's Encrypt certificate and tick **Force SSL**.
+3. On the base, **Settings > Phone app away from home > Base URL**: `https://geocollar.example.com`.
+
+Rather than a domain of its own, a path on an existing one works too: in Home Assistant's proxy
+host, add a **Custom location** `/geocollar` forwarding to `http`, the same address, port `8100`,
+and set the Base URL to `https://ha.example.com/geocollar`. The base finds its API behind the
+path whether the proxy strips it or not. Either way the proxy sees only encrypted requests; the
+phone and the base check each other with the phone's key, not with the certificate.
+
 ## Finding your place on the map
 
 Type an address in the search box at the top right of the map and press Enter. The map starts

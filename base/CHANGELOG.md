@@ -34,6 +34,9 @@ real phone or collar**.
   the code was used, and the phone list shows it. Each phone shows when it was last in touch, and
   **New code** relinks one (after reinstalling the app, or for a phone linked by 0.19.7 to 0.19.9,
   which stays Bluetooth-only until then) without new keys on the collars.
+- **Works behind a reverse proxy** such as Nginx Proxy Manager: a Base URL like
+  `https://geocollar.example.com` (a proxy host to port 8100) or `https://ha.example.com/geocollar`
+  (a custom location); the base finds its API behind such a path. DOCS.md has the steps.
 - The phone must reach the base when it scans the code: be on the home Wi-Fi, or have the Base URL
   working.
 

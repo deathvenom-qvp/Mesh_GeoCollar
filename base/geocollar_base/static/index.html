@@ -604,8 +604,9 @@
     <div class="muted">Linked phones fetch where the dogs are from this base, and pass on a collar's position when they are
       near a dog whose collar can't reach the base. They talk to the base on port <span id="accessPort">8100</span>, which
       serves nothing else, and everything they send and get is encrypted with each phone's own key. To use the app away from
-      home, make that port reachable from the internet (a port forward on your router, or a reverse proxy) and enter its
-      address here. Left empty, the base uses Home Assistant's URL, else this machine's address on your network.</div>
+      home, make that port reachable from the internet (a port forward on your router, or a reverse proxy such as Nginx
+      Proxy Manager pointed at port <span id="accessPort2">8100</span>) and enter its address here, for example
+      <code>https://geocollar.example.com</code> or <code>https://ha.example.com/geocollar</code>. Left empty, the base uses Home Assistant's URL, else this machine's address on your network.</div>
     <form id="accessForm" style="margin-top:8px">
       <label class="field">Base URL <input id="accessUrl" placeholder="https://geocollar.example.com" autocomplete="off"
         spellcheck="false" inputmode="url"></label>
@@ -1903,7 +1904,7 @@ async function loadAccess() {
   if (document.activeElement !== $('accessUrl')) $('accessUrl').value = a.url || '';
 }
 function renderAccess(a) {
-  $('accessPort').textContent = a.port;
+  $('accessPort').textContent = $('accessPort2').textContent = a.port;
   const auto = a.items.filter(i => i.source !== 'set');
   $('accessUrl').placeholder = auto.length ? auto[0].url : 'https://geocollar.example.com';
   const parts = [];

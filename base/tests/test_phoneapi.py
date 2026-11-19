@@ -256,6 +256,22 @@ def test_base_url_setting(tmp_path):
     assert client.put("/api/phone-access", json={"url": ""}).json()["url"] == ""
 
 
+def test_behind_a_reverse_proxy(tmp_path):
+    """Nginx Proxy Manager and the like: https on 443, a host name or a path of its own in front."""
+    client, _ = make(tmp_path)
+    a = client.put("/api/phone-access", json={"url": "https://ha.example.com/geocollar/"}).json()
+    assert a["urls"][0] == "https://ha.example.com/geocollar" and not a["warnings"]
+    body, phone = new_phone(client)
+    assert phone.code["urls"][0] == "https://ha.example.com/geocollar"
+    # The proxy forwards /geocollar/api/phone/v1/... as it is: the base finds its API behind the prefix.
+    assert phone.enroll(path="/geocollar" + papi.PREFIX + "/enroll").status_code == 200
+    env = papi.seal(phone.key, papi.request_aad("collars", phone.phone), {"ts": int(time.time() * 1000), "body": {}})
+    r = TestClient(client.app.state.phone_app).post("/geocollar" + papi.PREFIX + "/collars", json={"phone": phone.phone, **env})
+    assert r.status_code == 200
+    # The prefix trick only reaches the phone API, never the page's own.
+    assert client.post("/geocollar/api/phones", json={}).status_code == 404
+
+
 def supervisor(config, addon_port=8100, ip="192.168.1.5"):
     def fetch(url):
         if url.endswith("/core/api/config"):
