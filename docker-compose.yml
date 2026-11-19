@@ -19,4 +19,7 @@ services:
       # GEOCOLLAR_MESH_HOST: 192.168.1.50
       # Where phones reach the base from outside (the Settings tab can set it too), e.g.
       # GEOCOLLAR_PHONE_URL: https://geocollar.example.com
+      # The page answers only by a local address (IP, localhost, .local, .lan...). To open it by
+      # another name, such as a reverse proxy's, list it (comma-separated):
+      # GEOCOLLAR_ALLOWED_HOSTS: geocollar.example.com
     restart: unless-stopped

@@ -16,6 +16,15 @@ tests and the base's tests, **not on a real collar**.
   base sends them again: 2 minutes after the last try, then 4, 8 and so on, up to once an hour. A
   collar that holds a newer version than the base knows (a base restored from an older backup)
   gets the same fences numbered past its own.
+- **The page answers only by a local address** (base). It has no login, and its check against
+  other websites trusted the Origin header, which a website can make match through DNS rebinding
+  (its own name resolving, for a moment, to the base's address). It could then have sent commands,
+  shock included, and read where the dogs are. Now the page answers only when opened by an IP
+  address, `localhost`, a name without a dot, or a `.local`, `.lan`, `.home.arpa` or `.internal`
+  name. Open it by another name (a reverse proxy's)? List it under **Other names for the page**
+  (`allowed_hosts`, or `GEOCOLLAR_ALLOWED_HOSTS` in Docker). In Home Assistant, the other apps on its
+  internal network are refused too: only the sidebar and Home Assistant itself get in. The phone
+  API is unchanged.
 - **The phone API refuses an oversized request as it arrives** (base). The size limit read only
   the Content-Length header, so a request sent in chunks, which has none, could be any size and
   fill the base's memory, from the internet when the phone port is forwarded.

@@ -1141,3 +1141,53 @@ def test_phone_api_refuses_a_huge_chunked_body(tmp_path):
     assert r.status_code == 413
     assert client.post(papi.PREFIX + "/collars", content=(b"x" * 4096 for _ in range(100)),
                        headers={"content-type": "application/json"}).status_code in (400, 413)
+
+
+def test_page_answers_only_by_a_local_name(tmp_path):
+    # Another website reaching the base by DNS rebinding sends its own name as Host, and an
+    # Origin to match: same_site lets that through, the name check does not.
+    client, link = make(tmp_path)
+    client.post("/api/collars", json={"node_id": "!a1b2c3d4", "name": "Rex"})
+    for host in ("192.168.1.5:8099", "127.0.0.1", "localhost:8099", "[fd00::5]:8099", "geocollar", "pi.local",
+                 "base.lan:8099", "a0d7b954-geocollar-base:8099"):
+        assert client.get("/api/collars", headers={"host": host}).status_code == 200, host
+    evil = {"host": "evil.example.com:8099", "origin": "http://evil.example.com:8099"}
+    assert client.get("/api/collars", headers=evil).status_code == 403
+    r = client.post("/api/collars/!a1b2c3d4/command", json={"action": "beep"}, headers=evil)
+    assert r.status_code == 403 and not [m for n, m in link.sent if m[1] == protocol.MsgType.COMMAND]
+    assert client.get("/", headers=evil).status_code == 403
+    with pytest.raises(Exception):
+        with client.websocket_connect("/api/firmware/setup-web", headers=evil):
+            pass
+    # The phone API is sealed with each phone's key, and reached by public names: left alone.
+    assert client.post(papi.PREFIX + "/collars", json={"phone": "00000000", "iv": "AAAAAAAAAAAAAAAA", "ct": "AA"},
+                       headers=evil).status_code == 401
+
+
+def test_page_answers_to_names_the_owner_lists(tmp_path):
+    link = FakeLink()
+    client = TestClient(create_app({"data_dir": str(tmp_path), "allowed_hosts": "GeoCollar.example.com, other.example"},
+                                   link=link))
+    assert client.get("/api/collars", headers={"host": "geocollar.example.com"}).status_code == 200
+    assert client.get("/api/collars", headers={"host": "other.example:443"}).status_code == 200
+    assert client.get("/api/collars", headers={"host": "evil.example.com"}).status_code == 403
+
+
+def test_in_home_assistant_other_apps_are_refused(tmp_path, monkeypatch):
+    from geocollar_base.app import PageGuard
+
+    async def ok(scope, receive, send):
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b""})
+
+    guard = PageGuard(ok, in_ha=True)
+
+    def scope(ip, path="/api/collars"):
+        return {"type": "http", "path": path, "client": (ip, 40000), "headers": [(b"host", b"172.30.33.4:8099")]}
+
+    assert guard.refused(scope("172.30.32.2")) is None  # the sidebar, through ingress
+    assert guard.refused(scope("172.30.32.1")) is None  # Home Assistant: the GeoCollar integration
+    assert guard.refused(scope("192.168.1.20")) is None  # a port opened on the Network tab
+    assert "another app" in guard.refused(scope("172.30.33.7"))
+    assert guard.refused(scope("172.30.33.7", papi.PREFIX + "/collars")) is None
+    assert PageGuard(ok).refused(scope("172.30.33.7")) is None  # Docker: no such network

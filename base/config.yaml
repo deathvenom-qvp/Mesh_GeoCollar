@@ -42,3 +42,4 @@ schema:
   mesh_host: str?
   firmware_repo: str?
   home: str?
+  allowed_hosts: str?

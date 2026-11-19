@@ -19,6 +19,12 @@ configuration:
     description: >-
       Where the map starts, as "latitude, longitude". Leave empty to use Home Assistant's own
       home location (Settings > System > General).
+  allowed_hosts:
+    name: Other names for the page
+    description: >-
+      The page answers only by a local address (an IP address, a .local or .lan name, or through
+      Home Assistant's sidebar), so that another website cannot reach it. If you open it by another
+      name, such as a reverse proxy's, list that name here (several: separate them with commas).
 network:
   8099/tcp: Web page without Home Assistant login. Leave empty unless you need it.
   8100/tcp: >-

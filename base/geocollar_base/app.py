@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 import logging
 import os
@@ -54,6 +55,9 @@ def load_settings() -> dict:
         # Settings tab overrides it.
         "phone_url": os.environ.get("GEOCOLLAR_PHONE_URL", ""),
         "phone_port": os.environ.get("GEOCOLLAR_PHONE_PORT", str(papi.DEFAULT_PORT)),
+        # Names besides local ones that the page may be opened by, comma-separated (a reverse
+        # proxy's, for example). See PageGuard.
+        "allowed_hosts": os.environ.get("GEOCOLLAR_ALLOWED_HOSTS", ""),
     }
     options = Path(settings["data_dir"]) / "options.json"
     if options.exists():
@@ -229,6 +233,93 @@ def add_phone_middleware(app: FastAPI) -> None:
         response = await call_next(request)
         response.headers.update(cors)
         return response
+
+
+LOCAL_SUFFIXES = (".local", ".lan", ".home.arpa", ".internal", ".localdomain")
+# Home Assistant's internal network: the Supervisor's ingress proxy is .2, Home Assistant itself
+# (and a port the owner opened on the Network tab) comes from .1, every other app has an address of its own.
+HA_NETWORK = ipaddress.ip_network("172.30.32.0/23")
+HA_TRUSTED = {ipaddress.ip_address("172.30.32.1"), ipaddress.ip_address("172.30.32.2")}
+
+
+def host_name(header: str | None) -> str:
+    """The name in a Host header, lower case, without the port or IPv6 brackets."""
+    h = (header or "").strip().lower()
+    if h.startswith("["):
+        return h[1:h.find("]")] if "]" in h else ""
+    return h.rsplit(":", 1)[0] if h.count(":") == 1 else h
+
+
+def local_host(name: str, extra: frozenset[str] = frozenset()) -> bool:
+    """Whether the page may answer to this name: an IP address, localhost, a name with no dot (the
+    machine's own, or an app's on Home Assistant's network), a home-network name (.local, .lan,
+    .home.arpa...), or one the owner listed. A public name is what another website uses to reach
+    the page through DNS rebinding: its name resolving, for a moment, to the base's address."""
+    if not name:
+        return False
+    if name in extra:
+        return True
+    try:
+        ipaddress.ip_address(name)
+        return True
+    except ValueError:
+        pass
+    return name == "localhost" or name.endswith(".localhost") or "." not in name.rstrip(".") \
+        or name.rstrip(".").endswith(LOCAL_SUFFIXES)
+
+
+def parse_hosts(text: str) -> frozenset[str]:
+    return frozenset(h for h in (host_name(x) for x in (text or "").replace(" ", ",").split(",")) if h)
+
+
+class PageGuard:
+    """The page has no login, so only those it is meant for may use it:
+
+    - Browsers only by a local name (local_host). The check against other sites (same_site) trusts
+      the Origin header, which matches the Host header when another website reaches the base by
+      DNS rebinding. That website's name is not local, so it is refused here.
+    - In Home Assistant, not the other apps on its internal network: only the Supervisor's ingress
+      (the sidebar, behind the login) and Home Assistant itself (the GeoCollar integration).
+
+    The phone API is left alone: every request to it is sealed with a phone's key."""
+
+    def __init__(self, app, extra_hosts: frozenset[str] = frozenset(), in_ha: bool = False):
+        self.app = app
+        self.extra = extra_hosts
+        self.in_ha = in_ha
+
+    def refused(self, scope) -> str | None:
+        if scope.get("path", "").find(papi.PREFIX + "/") >= 0:
+            return None
+        if self.in_ha:
+            try:
+                ip = ipaddress.ip_address((scope.get("client") or ("",))[0])
+            except ValueError:
+                ip = None
+            if ip is not None and ip in HA_NETWORK and ip not in HA_TRUSTED:
+                return f"another app on Home Assistant's network ({ip})"
+        headers = dict(scope.get("headers") or [])
+        name = host_name(headers.get(b"host", b"").decode("latin-1"))
+        if not local_host(name, self.extra):
+            return f"the name {name or '(none)'!r}, which is not a local one"
+        return None
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] not in ("http", "websocket"):
+            return await self.app(scope, receive, send)
+        why = self.refused(scope)
+        if why is None:
+            return await self.app(scope, receive, send)
+        log.warning("refused %s %s: %s. To open the page by another name, add it to allowed_hosts",
+                    scope.get("method", "WEBSOCKET"), scope.get("path"), why)
+        if scope["type"] == "websocket":
+            await send({"type": "websocket.close", "code": 1008})
+            return
+        body = json.dumps({"detail": "This page answers only on your home network, by its own address. "
+                                     "To open it by another name, add the name to allowed_hosts."}).encode()
+        await send({"type": "http.response.start", "status": 403,
+                    "headers": [(b"content-type", b"application/json"), (b"content-length", str(len(body)).encode())]})
+        await send({"type": "http.response.body", "body": body})
 
 
 class PhoneBodyLimit:
@@ -851,6 +942,9 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
         return await call_next(request)
 
     add_phone_middleware(app)
+    # Outermost: nothing of the page runs for a request it refuses.
+    app.add_middleware(PageGuard, extra_hosts=parse_hosts(settings.get("allowed_hosts", "")),
+                       in_ha=bool(os.environ.get("SUPERVISOR_TOKEN")))
     app.openapi = lambda: phone_openapi(app)
     app.state.store = store
     app.state.clog = clog
