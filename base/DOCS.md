@@ -579,7 +579,9 @@ that an older version left in update mode says so in its panel; flash it over US
   a reverse proxy's, add that name to **Other names for the page** (`allowed_hosts`; in Docker,
   `GEOCOLLAR_ALLOWED_HOSTS`).
 - In Home Assistant the page answers only through the sidebar and to Home Assistant itself, not to
-  the other apps on Home Assistant's internal network.
+  the other apps on Home Assistant's internal network. The sidebar works by whatever address you
+  open Home Assistant with (Nabu Casa, DuckDNS or your own domain included), because it is behind
+  Home Assistant's login; you don't need to list that name.
 - The base accepts reports only from collars you added, only PKI-encrypted, and only from the
   public key it first saw from that collar. A report signed with another key is ignored and
   flagged in the collar's panel. After a full install of a collar, set it up again (or remove and

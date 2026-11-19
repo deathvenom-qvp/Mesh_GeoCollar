@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.19.13
+
+- **The sidebar works again when Home Assistant is opened by a domain name** (base). 0.19.12 let
+  the page answer only by a local address, but Home Assistant's sidebar passes on the address you
+  opened Home Assistant with. Opened by a Nabu Casa, DuckDNS or other domain name, the sidebar got
+  "This page answers only on your home network". Requests through the sidebar are now let through
+  by any name, since Home Assistant's login already guards them. Other routes to the page keep the
+  local-address rule.
+
 ## 0.19.12
 
 Fixes from a review of the whole code. Base and collar firmware. Tested with the firmware's PC

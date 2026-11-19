@@ -1182,10 +1182,15 @@ def test_in_home_assistant_other_apps_are_refused(tmp_path, monkeypatch):
 
     guard = PageGuard(ok, in_ha=True)
 
-    def scope(ip, path="/api/collars"):
-        return {"type": "http", "path": path, "client": (ip, 40000), "headers": [(b"host", b"172.30.33.4:8099")]}
+    def scope(ip, path="/api/collars", host=b"172.30.33.4:8099"):
+        return {"type": "http", "path": path, "client": (ip, 40000), "headers": [(b"host", host)]}
 
     assert guard.refused(scope("172.30.32.2")) is None  # the sidebar, through ingress
+    # Ingress passes on the name Home Assistant was opened by, a public one included.
+    assert guard.refused(scope("172.30.32.2", host=b"abc123.ui.nabu.casa")) is None
+    assert guard.refused(scope("172.30.32.2", host=b"myhome.duckdns.org:8123")) is None
+    # Home Assistant's own address is also where a port opened on the Network tab arrives from.
+    assert "not a local one" in guard.refused(scope("172.30.32.1", host=b"evil.example.com"))
     assert guard.refused(scope("172.30.32.1")) is None  # Home Assistant: the GeoCollar integration
     assert guard.refused(scope("192.168.1.20")) is None  # a port opened on the Network tab
     assert "another app" in guard.refused(scope("172.30.33.7"))
