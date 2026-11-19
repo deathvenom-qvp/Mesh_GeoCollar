@@ -4,7 +4,8 @@ services:
   geocollar:
     build: ./base
     ports:
-      - "8099:8099"
+      - "8099:8099" # the page: no login, keep it on your home network
+      - "8100:8100" # the phone app's encrypted API alone: forward this one for the app away from home
     volumes:
       - ./base/data:/data
     # The base radio. Use its /dev/serial/by-id/... name so it survives reboots; ESP32-S3 boards
@@ -16,4 +17,6 @@ services:
       GEOCOLLAR_MESH_SERIAL: /dev/ttyUSB0
       # GEOCOLLAR_HOME: "40.0, -75.0"   # where the map starts
       # GEOCOLLAR_MESH_HOST: 192.168.1.50
+      # Where phones reach the base from outside (the Settings tab can set it too), e.g.
+      # GEOCOLLAR_PHONE_URL: https://geocollar.example.com
     restart: unless-stopped

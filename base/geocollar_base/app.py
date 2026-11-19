@@ -13,20 +13,24 @@ import shutil
 import struct
 import threading
 import time
+import contextlib
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 import asyncio
+import hmac
 from urllib.parse import urlsplit
 
-from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi import APIRouter, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi.openapi.utils import get_openapi
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from . import firmware as fw
 from .collarlog import CollarLog
 from . import geo
+from . import phoneapi as papi
 from . import protocol
 from . import radio
 from .mesh import MeshLink
@@ -46,6 +50,10 @@ def load_settings() -> dict:
         "mesh_host": os.environ.get("GEOCOLLAR_MESH_HOST", ""),
         "firmware_repo": os.environ.get("GEOCOLLAR_FIRMWARE_REPO", fw.DEFAULT_REPO),
         "home": os.environ.get("GEOCOLLAR_HOME", ""),  # "lat, lon"; else Home Assistant's home
+        # Where phones reach the base, if not the address worked out (see phone_urls). The page's
+        # Settings tab overrides it.
+        "phone_url": os.environ.get("GEOCOLLAR_PHONE_URL", ""),
+        "phone_port": os.environ.get("GEOCOLLAR_PHONE_PORT", str(papi.DEFAULT_PORT)),
     }
     options = Path(settings["data_dir"]) / "options.json"
     if options.exists():
@@ -144,6 +152,10 @@ class AppIn(BaseModel):
     name: str = ""  # whose phone it is, for the list
 
 
+class PhoneAccessIn(BaseModel):
+    url: str = ""  # the Base URL phones use from outside the home; empty: work it out
+
+
 class CommandIn(BaseModel):
     action: str  # beep, vibrate, shock, corrections_off, corrections_on, force_lost, clear_lost, request_status, silence_lost
     intensity: int = 0
@@ -179,6 +191,40 @@ def same_site(headers) -> bool:
         return True
     host = urlsplit(origin).netloc
     return bool(host) and host in (headers.get("host"), headers.get("x-forwarded-host"))
+
+
+def add_phone_middleware(app: FastAPI) -> None:
+    """For the phone API: refuse an oversized body before reading it, and answer a browser's
+    cross-origin questions (the app in a browser, for trying it out). Only for the phone API's
+    paths: the page's own API must stay closed to other websites."""
+
+    @app.middleware("http")
+    async def phone_api_edges(request: Request, call_next):
+        if not request.url.path.startswith(papi.PREFIX + "/"):
+            return await call_next(request)
+        cors = {"Access-Control-Allow-Origin": "*", "Access-Control-Allow-Methods": "GET, POST",
+                "Access-Control-Allow-Headers": "Content-Type", "Access-Control-Max-Age": "3600"}
+        if request.method == "OPTIONS":
+            return Response(status_code=204, headers=cors)
+        try:
+            size = int(request.headers.get("content-length") or 0)
+        except ValueError:
+            size = papi.MAX_BODY + 1
+        if size > papi.MAX_BODY:
+            return JSONResponse({"detail": "The request is too large.", "code": "too_large"}, status_code=413, headers=cors)
+        response = await call_next(request)
+        response.headers.update(cors)
+        return response
+
+
+def phone_openapi(app: FastAPI) -> dict:
+    """The OpenAPI document, with the schemas of what travels inside the envelopes."""
+    if app.openapi_schema:
+        return app.openapi_schema
+    doc = get_openapi(title=app.title, version=app.version, description=app.description, routes=app.routes)
+    doc.setdefault("components", {}).setdefault("schemas", {}).update(papi.plaintext_components())
+    app.openapi_schema = doc
+    return doc
 
 
 MAX_PARCELS = 500
@@ -699,12 +745,16 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
 
     @app.middleware("http")
     async def refuse_other_sites(request: Request, call_next):
-        if request.method not in ("GET", "HEAD", "OPTIONS") and not same_site(request.headers):
+        # The phone API is not for browsers, and every request to it is sealed with a phone's key.
+        if request.method not in ("GET", "HEAD", "OPTIONS") and not request.url.path.startswith(papi.PREFIX + "/") \
+                and not same_site(request.headers):
             log.warning("refused a %s to %s from another site (%s)", request.method, request.url.path,
                         request.headers.get("origin"))
             return JSONResponse({"detail": "This request came from another website and was refused."}, status_code=403)
         return await call_next(request)
 
+    add_phone_middleware(app)
+    app.openapi = lambda: phone_openapi(app)
     app.state.store = store
     app.state.clog = clog
     app.state.sim = sim
@@ -1035,14 +1085,45 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
         legacy = max((len(c.get("apps") or []) for c in store.collars().values()), default=0)
         return max(0, protocol.MAX_APP_KEYS - legacy - len(phones()))
 
+    # -- Linking codes. "Connect app" shows a QR code that is good once, for ENROLL_TTL_S (see
+    # phoneapi). The phone then fetches its keys over the network. Codes live in memory only.
+    enrolls: dict[bytes, dict] = {}  # token -> {"phone": id, "secret", "expires", "used"}
+    enroll_lock = threading.Lock()
+    seen_ivs: dict[str, dict[bytes, float]] = {}  # phone id -> request IVs seen lately -> when
+    last_seen: dict[str, float] = {}  # phone id -> when it last used the API (written out now and then)
+
+    def pending_code(phone_id: int) -> dict | None:
+        now = time.time()
+        with enroll_lock:
+            for t in [t for t, e in enrolls.items() if e["expires"] < now - 3600]:
+                del enrolls[t]  # an expired code is remembered an hour, to say so
+            return next((e for e in enrolls.values() if e["phone"] == phone_id and not e["used"] and e["expires"] > now), None)
+
+    def new_code(p: dict, request: Request | None) -> dict:
+        """A one-time code for this phone, replacing any other it had."""
+        secret, token = secrets.token_bytes(papi.SECRET_LEN), secrets.token_bytes(papi.TOKEN_LEN)
+        urls = phone_urls(request)["urls"]
+        code = papi.make_code(secret, token, home_id(), urls)
+        expires = time.time() + papi.ENROLL_TTL_S
+        with enroll_lock:
+            for t in [t for t, e in enrolls.items() if e["phone"] == p["id"] and not e["used"]]:
+                del enrolls[t]
+            enrolls[token] = {"phone": p["id"], "secret": secret, "expires": expires, "used": False}
+        return {"code": code, "expires": expires, "urls": urls}
+
     def phones_view() -> dict:
         collars = store.collars()
         out = []
         for p in phones():
-            # Collars added to the base after this phone last scanned a code: it does not know them yet.
+            pid = f"{p['id']:08x}"
+            # Collars added to the base after this phone last scanned a code: it does not know them
+            # yet. A phone on the API fetches them by itself.
             missing = [n for n in collars if n not in (p.get("collars") or [])]
-            out.append({"id": f"{p['id']:08x}", "name": p.get("name", ""), "created": p.get("created"),
-                        "missing": missing})
+            pending = pending_code(p["id"])
+            out.append({"id": pid, "name": p.get("name", ""), "created": p.get("created"), "missing": missing,
+                        "api": bool(p.get("api_key")), "legacy": p.get("v") != 3,
+                        "enrolled": p.get("enrolled"), "last_seen": last_seen.get(pid) or p.get("last_seen"),
+                        "code_expires": pending["expires"] if pending else None})
         return {"phones": out, "max": protocol.MAX_APP_KEYS, "room": phones_room(),
                 "synced": {n: apps_synced(n, c) for n, c in collars.items()}}
 
@@ -1052,6 +1133,11 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
             if f"{p['id']:08x}" == phone_id.lower():
                 return ps, p
         raise HTTPException(404, "unknown phone")
+
+    def save_phone(p: dict) -> None:
+        """Write back one phone's entry (the list may have changed since it was read)."""
+        ps = phones()
+        store.set_setting("phones", [p if x["id"] == p["id"] else x for x in ps])
 
     def all_apps_changed() -> None:
         for node_id in store.collars():
@@ -1063,9 +1149,9 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
         return phones_view()
 
     @app.post("/api/phones")
-    def link_phone(body: AppIn):
+    def link_phone(body: AppIn, request: Request):
         """Link one more phone to every collar on the base: make it a key, send each collar the
-        new list, and return the pairing code for the QR. The key is returned this once only."""
+        new list, and return a one-time code for the QR. The phone fetches its keys with it."""
         if not store.collars():
             raise HTTPException(409, "add a collar first")
         if phones_room() <= 0:
@@ -1081,26 +1167,36 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
         key = secrets.token_bytes(protocol.APP_KEY_LEN)
         listed = code_collars()
         entry = {"id": key_id, "name": name or f"Phone {len(ps) + 1}", "key": key.hex(), "created": time.time(),
-                 "collars": [c["node_id"] for c in listed]}
+                 "collars": [c["node_id"] for c in listed], "v": 3}
         store.set_setting("phones", ps + [entry])
-        all_apps_changed()
-        code = protocol.home_pairing_code(home_id(), listed, key_id, key)
-        return {**phones_view(), "phone": {"id": f"{key_id:08x}", "name": entry["name"]}, "code": code,
-                "collars": listed}
+        all_apps_changed()  # the collars start learning the key now; the phone gets it when it scans
+        code = new_code(entry, request)
+        return {**phones_view(), "phone": {"id": f"{key_id:08x}", "name": entry["name"]}, **code, "collars": listed}
+
+    @app.post("/api/phones/{phone_id}/code")
+    def phone_new_code(phone_id: str, request: Request):
+        """A new one-time code for a phone already on the list: one whose code ran out, a phone
+        that was reset or replaced, or one linked by an older base, to reach the base over the
+        network. The phone keeps its key for the collars; whichever phone scans it next gets it."""
+        ps, p = find_phone(phone_id)
+        code = new_code(p, request)
+        return {**phones_view(), "phone": {"id": phone_id.lower(), "name": p.get("name", "")}, **code,
+                "collars": code_collars()}
 
     @app.post("/api/collars/{node_id}/apps")
-    def link_app_from_older_page(node_id: str, body: AppIn):
+    def link_app_from_older_page(node_id: str, body: AppIn, request: Request):
         """What "Connect app" on a page from before 0.19.7 calls, still in a browser's cache after
         an update: it links the phone to every collar on the base too, and answers in the shape
         that page reads."""
         require(node_id)
-        r = link_phone(body)
+        r = link_phone(body, request)
         return {**apps_view(node_id), "app": r["phone"], "code": r["code"]}
 
     @app.post("/api/phones/{phone_id}/collars")
     def phone_collar_list(phone_id: str):
-        """A code with the base's collars and no key, to bring a linked phone up to date after
-        collars were added. Anyone could read it; without the phone's key it opens nothing."""
+        """A code with the base's collars and no key, to bring a phone linked by an older base up
+        to date after collars were added. Anyone could read it; without the phone's key it opens
+        nothing. Phones on the API fetch the list themselves."""
         ps, p = find_phone(phone_id)
         listed = code_collars()
         p["collars"] = [c["node_id"] for c in listed]
@@ -1110,11 +1206,287 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
 
     @app.delete("/api/phones/{phone_id}")
     def unlink_phone(phone_id: str):
-        """Take a phone's access away: every collar gets the list without it."""
+        """Take a phone's access away: its API key is deleted at once, and every collar gets the
+        list without it."""
         ps, p = find_phone(phone_id)
         store.set_setting("phones", [x for x in ps if x is not p])
+        with enroll_lock:
+            for t in [t for t, e in enrolls.items() if e["phone"] == p["id"]]:
+                del enrolls[t]
+        seen_ivs.pop(phone_id.lower(), None)
+        last_seen.pop(phone_id.lower(), None)
         all_apps_changed()
         return phones_view()
+
+    # -- Where the phone app reaches the base: the Base URL the owner set, else Home Assistant's
+    # own URL with the phone API's port, and the machine's address on the home network.
+    ha_cache: dict = {}
+
+    def ha_info() -> dict:
+        if ha_cache.get("at", 0) > time.time() - 300:
+            return ha_cache["info"]
+        info = papi.ha_lookup(settings.get("supervisor_fetch"))
+        ha_cache.update(at=time.time(), info=info)
+        return info
+
+    def phone_urls(request: Request | None = None) -> dict:
+        """The addresses a phone is given, best first, with where each came from and what may
+        stand in the way."""
+        port = int(settings.get("phone_port") or papi.DEFAULT_PORT)
+        items: list[dict] = []
+        warnings: list[str] = []
+        own = store.setting("phone_url") or settings.get("phone_url") or ""
+        if own:
+            items.append({"url": own, "source": "set", "label": "the Base URL set here"})
+        ha = ha_info()
+        if ha:
+            host_port = ha.get("port")
+            if ha.get("port_known") and not host_port:
+                warnings.append(f"The phone app's port ({port}) is turned off in this app's Network settings in "
+                                "Home Assistant, so phones can't reach the base. Turn it on there and restart the app.")
+            hp = int(host_port or port)
+            for key, label in (("external_url", "Home Assistant's external URL"), ("internal_url", "Home Assistant's internal URL")):
+                host = urlsplit(ha.get(key) or "").hostname
+                if not host:
+                    continue
+                if host.endswith(".ui.nabu.casa"):
+                    if not own:
+                        warnings.append("Home Assistant Cloud (Nabu Casa) only passes on Home Assistant itself, not "
+                                        "this app's port. To reach the base over the internet, forward the port on "
+                                        "your router or use a reverse proxy, and enter its address as the Base URL.")
+                    continue
+                items.append({"url": papi.with_port(host, hp), "source": key.split("_")[0] + "_ha", "label": label})
+            if ha.get("ip"):
+                items.append({"url": papi.with_port(ha["ip"], hp), "source": "ip", "label": "this machine's address on your network"})
+        else:
+            # Docker: the address the page was opened on (not through Home Assistant), else this
+            # machine's own.
+            host = None
+            if request is not None and not request.headers.get("x-ingress-path"):
+                host = urlsplit("//" + (request.headers.get("x-forwarded-host") or request.headers.get("host") or "")).hostname
+            if host and host not in ("localhost", "127.0.0.1", "::1", "testserver"):
+                items.append({"url": papi.with_port(host, port), "source": "page", "label": "the address this page is open on"})
+            ip = papi.local_ip()
+            if ip and not ip.startswith("127."):
+                items.append({"url": papi.with_port(ip, port), "source": "ip",
+                              "label": "this machine's address (in Docker, the container's: set the Base URL if phones can't reach it)"})
+        seen, urls = set(), []
+        for it in items:
+            if it["url"] not in seen:
+                seen.add(it["url"])
+                urls.append(it["url"])
+        urls = urls[:3]
+        if not any(not papi.is_private_host(urlsplit(u).hostname or "") for u in urls):
+            warnings.append("Every address here is on your home network: away from home the app can't reach the base. "
+                            "Set a Base URL that works from the internet to see the dogs from anywhere.")
+        return {"urls": urls, "items": [it for it in items if it["url"] in urls], "warnings": warnings,
+                "port": port, "url": own}
+
+    @app.get("/api/phone-access")
+    def get_phone_access(request: Request):
+        """The Base URL setting, and the addresses phones are given."""
+        return phone_urls(request)
+
+    @app.put("/api/phone-access")
+    def put_phone_access(body: PhoneAccessIn, request: Request):
+        """Set (or clear, with an empty url) the Base URL. Linked phones get the new addresses the
+        next time they reach the base."""
+        try:
+            url = papi.clean_url(body.url)
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from e
+        store.set_setting("phone_url", url or None)
+        return phone_urls(request)
+
+    # -- The phone API itself (see phoneapi.py and docs/phone-api.md) -----------------------------
+    phone_router = APIRouter(prefix=papi.PREFIX, tags=["phone"])
+    ERRORS = {s: {"model": papi.ApiError} for s in (400, 401, 403, 409, 410, 413)}
+
+    def fail(status: int, code: str, detail: str, **extra) -> JSONResponse:
+        return JSONResponse({"detail": detail, "code": code, **extra}, status_code=status)
+
+    def server_ms() -> int:
+        return int(time.time() * 1000)
+
+    def note_seen(pid: str, p: dict) -> None:
+        now = time.time()
+        last_seen[pid] = now
+        if now - (p.get("last_seen") or 0) > 600:  # on disk now and then, not on every call
+            p["last_seen"] = now
+            save_phone(p)
+
+    def phone_call(op: str, env: papi.PhoneRequest):
+        """Open a phone's request: (phone entry, request body, reply function), or an error response."""
+        ps = phones()
+        p = next((x for x in ps if f"{x['id']:08x}" == env.phone and x.get("api_key")), None)
+        if p is None:
+            return fail(401, "unknown_phone", "This phone is not linked to the base (it may have been removed).")
+        key = bytes.fromhex(p["api_key"])
+        try:
+            plain = papi.unseal(key, papi.request_aad(op, env.phone), env.model_dump())
+            ts = int(plain["ts"])
+            body = plain.get("body") or {}
+        except (ValueError, KeyError, TypeError):
+            return fail(401, "unknown_phone", "The request does not open with this phone's key. Link the phone again.")
+        now = time.time()
+        if abs(ts / 1000 - now) > papi.CLOCK_SKEW_S:
+            return fail(401, "clock", "The phone's clock is too far from the base's.", server_time=server_ms())
+        iv = papi.b64d(env.iv)
+        with enroll_lock:
+            ivs = seen_ivs.setdefault(env.phone, {})
+            for old in [k for k, t in ivs.items() if t < now - 2 * papi.CLOCK_SKEW_S]:
+                del ivs[old]
+            if iv in ivs:
+                return fail(409, "replay", "This request was seen before.")
+            ivs[iv] = now
+        note_seen(env.phone, p)
+
+        def reply(obj) -> dict:
+            return papi.seal(key, papi.reply_aad(op, env.phone, iv), obj)
+        return p, body, reply
+
+    def plaintext(op: str) -> dict:
+        req, rep = papi.OPERATIONS[op]
+        return {"x-plaintext": {"request": {"$ref": f"#/components/schemas/{req.__name__}"},
+                                "reply": {"$ref": f"#/components/schemas/{rep.__name__}"}}}
+
+    @phone_router.post("/enroll", response_model=papi.EnrollReply, responses=ERRORS, operation_id="enroll",
+                       summary="Link this phone with a Connect app code",
+                       openapi_extra={"x-plaintext": {"reply": {"$ref": "#/components/schemas/Welcome"}}})
+    def phone_enroll(body: papi.EnrollRequest):
+        """Link a phone with the one-time code from the QR code (see the description above)."""
+        try:
+            token, phone_pub, proof = papi.b64d(body.token), papi.b64d(body.phone_key), papi.b64d(body.proof)
+        except ValueError:
+            return fail(400, "bad_request", "The request is damaged.")
+        with enroll_lock:
+            e = enrolls.get(token)
+            if e is None or e["expires"] < time.time():
+                return fail(410, "expired", "This code has run out. Show a new one under Connect app on the base.")
+            if not hmac.compare_digest(proof, papi.enroll_proof(e["secret"], token, phone_pub)):
+                return fail(403, "bad_request", "The request does not match the code.")
+            if e["used"]:
+                return fail(410, "used", "This code was used already. Show a new one under Connect app on the base.")
+            mine = papi.new_private_key()
+            try:
+                shared = papi.ecdh(mine, phone_pub)
+            except ValueError:
+                return fail(400, "bad_request", "The phone's key is not a P-256 public key.")
+            e["used"] = True
+        ps = phones()
+        p = next((x for x in ps if x["id"] == e["phone"]), None)
+        if p is None:
+            return fail(410, "expired", "This phone was removed on the base.")
+        base_pub = papi.public_bytes(mine)
+        key = papi.api_key(shared, e["secret"], token, phone_pub, base_pub)
+        listed = code_collars()
+        p.update(api_key=key.hex(), enrolled=time.time(), v=3, collars=[c["node_id"] for c in listed])
+        save_phone(p)
+        pid = f"{p['id']:08x}"
+        seen_ivs.pop(pid, None)
+        log.info("phone %s (%s) linked over the network", pid, p.get("name"))
+        welcome = {"phone_id": pid, "home": home_id(), "ble_key_id": p["id"],
+                   "ble_key": papi.b64e(bytes.fromhex(p["key"])), "urls": phone_urls()["urls"],
+                   "collars": listed, "server_time": server_ms()}
+        return {"base_key": papi.b64e(base_pub), **papi.seal(key, papi.welcome_aad(token), welcome)}
+
+    STATUS_FIELDS = tuple(papi.CollarStatus.model_fields)
+
+    def phone_status(c: dict) -> dict | None:
+        s = c.get("status")
+        if not s or s.get("state") not in protocol.CollarState.__members__:
+            return None
+        out = {k: s[k] for k in STATUS_FIELDS if s.get(k) is not None}
+        out.update(received=s.get("received") or 0, via="sim" if c.get("sim") else s.get("via") or "mesh",
+                   via_phone=s.get("via_phone"), fix_age_s=s.get("fix_age_s"))
+        return out
+
+    @phone_router.post("/collars", response_model=papi.Envelope, responses=ERRORS, openapi_extra=plaintext("collars"),
+                       operation_id="collars", summary="Every collar with its last report")
+    def phone_collars(env: papi.PhoneRequest):
+        """Every collar on the base with its last report: what the app shows when it is not near
+        the dog. Also the addresses to use from now on."""
+        r = phone_call("collars", env)
+        if isinstance(r, JSONResponse):
+            return r
+        p, _, reply = r
+        all_c = store.collars()
+        listed = code_collars()
+        ids = [c["node_id"] for c in listed]
+        if p.get("collars") != ids:  # it has every collar now: nothing "missing" on the page
+            p["collars"] = ids
+            save_phone(p)
+        out = [{**c, "status": phone_status(all_c.get(c["node_id"]) or {})} for c in listed]
+        return reply({"home": home_id(), "urls": phone_urls()["urls"], "collars": out, "server_time": server_ms()})
+
+    RELAY_EVERY_S = 30
+    relayed: dict[str, float] = {}
+
+    def mesh_quiet(c: dict) -> bool:
+        """Whether the base has gone without the collar's own reports for longer than it should:
+        two of its report intervals and a minute (30 s each while it is out or lost)."""
+        s = c.get("status") or {}
+        heard = c.get("heard_direct")
+        if heard is None and s.get("via") != "phone":
+            heard = s.get("received")  # a report from before the base kept this
+        if not heard:
+            return True
+        every = 30 if s.get("state") in ("OUTSIDE", "LOST") or s.get("beacon_active") else (c.get("report_s") or 600)
+        return time.time() - heard > 2 * every + 60
+
+    @phone_router.post("/relay", response_model=papi.Envelope, responses=ERRORS, openapi_extra=plaintext("relay"),
+                       operation_id="relay", summary="Pass on a collar's report heard over Bluetooth")
+    def phone_relay(env: papi.PhoneRequest):
+        """A collar's report that the phone got over Bluetooth. The base keeps it when it has not
+        heard the collar over the mesh lately; otherwise the collar is getting through itself."""
+        r = phone_call("relay", env)
+        if isinstance(r, JSONResponse):
+            return r
+        p, body, reply = r
+        try:
+            req = papi.RelayRequest.model_validate(body)
+        except ValueError:
+            return fail(400, "bad_request", "The report is damaged.")
+        c = store.collar(req.node_id)
+        if c is None:
+            return reply({"recorded": False, "reason": "unknown_collar", "next_s": 3600})
+        if c.get("sim") or not mesh_quiet(c):
+            return reply({"recorded": False, "reason": "heard_over_mesh", "next_s": 120})
+        if req.age_ms > 120_000:
+            return reply({"recorded": False, "reason": "too_old", "next_s": RELAY_EVERY_S})
+        if time.time() - relayed.get(req.node_id, 0) < RELAY_EVERY_S - 5:
+            return reply({"recorded": False, "reason": "too_soon", "next_s": RELAY_EVERY_S})
+        relayed[req.node_id] = time.time()
+        status = req.status.model_dump()
+        if status["battery_pct"] is None:
+            status["battery_pct"] = 255
+        # A fix more than two minutes old is not where the dog is now: shown as the last known.
+        if req.fix_age_s is None or req.fix_age_s > 120:
+            status["no_fix"] = True
+        status.update(msg_type="STATUS", via="phone", via_phone=p.get("name") or f"{p['id']:08x}",
+                      fix_age_s=req.fix_age_s)
+        if req.phone_position:
+            status["phone_pos"] = req.phone_position.model_dump()
+        recorded = store.record_status(req.node_id, status, direct=False)
+        if recorded:
+            entry = {"t": round(recorded["received"], 3), "state": recorded.get("state"),
+                     "bat": recorded.get("battery_pct"), "sats": recorded.get("sats"), "via": "phone"}
+            if not recorded.get("no_fix") and (recorded.get("lat") or recorded.get("lon")):
+                entry["lat"], entry["lon"] = recorded["lat"], recorded["lon"]
+            try:
+                clog.add(req.node_id, entry)
+            except (OSError, ValueError) as e:
+                log.warning("could not log a report from %s: %s", req.node_id, e)
+        log.info("%s passed on a report from %s over Bluetooth", p.get("name"), req.node_id)
+        return reply({"recorded": True, "reason": "recorded", "next_s": RELAY_EVERY_S})
+
+    app.include_router(phone_router)
+    phone_app = FastAPI(title="GeoCollar phone API", version="1.0.0", description=papi.API_DESCRIPTION,
+                        openapi_url=papi.PREFIX + "/openapi.json", docs_url=papi.PREFIX + "/docs", redoc_url=None)
+    phone_app.include_router(phone_router)
+    add_phone_middleware(phone_app)
+    phone_app.openapi = lambda: phone_openapi(phone_app)
+    app.state.phone_app = phone_app
 
     @app.get("/api/collars/{node_id}/apps")
     def list_apps(node_id: str):
@@ -1649,8 +2021,29 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
 
 
 def main() -> None:
+    """The page (and everything else) on GEOCOLLAR_PORT; the phone API alone on
+    GEOCOLLAR_PHONE_PORT too, so that port can be opened to the internet without the page, which
+    has no login of its own."""
     import uvicorn
 
     logging.basicConfig(level=logging.INFO)
+    settings = load_settings()
+    app = create_app(settings)
     port = int(os.environ.get("GEOCOLLAR_PORT", "8099"))
-    uvicorn.run(create_app(), host="0.0.0.0", port=port)
+    phone_port = int(settings.get("phone_port") or papi.DEFAULT_PORT)
+    servers = [uvicorn.Server(uvicorn.Config(app, host="0.0.0.0", port=port))]
+    if phone_port and phone_port != port:
+        phone = uvicorn.Server(uvicorn.Config(app.state.phone_app, host="0.0.0.0", port=phone_port,
+                                              lifespan="off", log_level="warning"))
+        phone.capture_signals = contextlib.nullcontext  # the page's server takes Ctrl+C and SIGTERM
+        servers.append(phone)
+
+    async def run() -> None:
+        main_task = asyncio.ensure_future(servers[0].serve())
+        others = [asyncio.ensure_future(s.serve()) for s in servers[1:]]
+        await main_task
+        for s in servers[1:]:
+            s.should_exit = True
+        await asyncio.gather(*others, return_exceptions=True)
+
+    asyncio.run(run())

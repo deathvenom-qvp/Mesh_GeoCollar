@@ -373,9 +373,10 @@
 
     <section id="appBox">
       <div class="row spread"><h2 style="margin:0">Phone app</h2><button id="appConnect">Connect app</button></div>
-      <div class="muted" style="margin-top:6px">The GeoCollar app on your phone talks to your collars over Bluetooth when you are near them.
-        It shows where each dog is and can silence the lost alert. A phone linked here can connect to every collar on this base,
-        and to collars you add later. Each phone gets a code of its own.</div>
+      <div class="muted" style="margin-top:6px">The GeoCollar app on your phone shows where each dog is: from this base
+        over the internet (see <a href="#" id="appAccessLink">Phone app away from home</a> in Settings), and straight from the
+        collar over Bluetooth when you are near it, where it can also silence the lost alert. A phone linked here reaches every
+        collar on this base, and collars you add later. Each phone gets a code of its own.</div>
       <ul class="applist" id="appList"></ul>
       <div class="muted" id="appSync" style="margin-top:6px"></div>
       <form id="appForm" hidden>
@@ -596,6 +597,22 @@
       <div class="row" style="margin-top:8px;gap:8px"><button class="primary" id="contactSave">Save and send to collars</button>
         <span class="muted" id="contactMsg" role="status"></span></div>
     </form>
+  </section>
+
+  <section id="accessBox">
+    <h2>Phone app away from home</h2>
+    <div class="muted">Linked phones fetch where the dogs are from this base, and pass on a collar's position when they are
+      near a dog whose collar can't reach the base. They talk to the base on port <span id="accessPort">8100</span>, which
+      serves nothing else, and everything they send and get is encrypted with each phone's own key. To use the app away from
+      home, make that port reachable from the internet (a port forward on your router, or a reverse proxy) and enter its
+      address here. Left empty, the base uses Home Assistant's URL, else this machine's address on your network.</div>
+    <form id="accessForm" style="margin-top:8px">
+      <label class="field">Base URL <input id="accessUrl" placeholder="https://geocollar.example.com" autocomplete="off"
+        spellcheck="false" inputmode="url"></label>
+      <div class="row" style="margin-top:8px;gap:8px"><button class="primary">Save</button>
+        <span class="muted" id="accessMsg" role="status"></span></div>
+    </form>
+    <div id="accessInfo" style="margin-top:8px"></div>
   </section>
 
   <section id="homeBox">
@@ -1291,7 +1308,7 @@ function renderCollars() {
     const bits = [];
     if (!s && c.hello) bits.push(`heard ${ago(now - c.hello.seen)}`);
     if (s) {
-      bits.push(ago(now - s.received));
+      bits.push(ago(now - s.received) + (s.via === 'phone' ? ` via ${s.via_phone || 'a phone'}` : ''));
       if (s.battery_pct != null && s.battery_pct !== 255) bits.push(`battery ${s.battery_pct}%`);
       if (s.clearance_m != null && c.fence_version && !s.no_fix && !s.home) bits.push(`${len(Math.abs(s.clearance_m))} ${s.clearance_m < 0 ? 'past' : 'from'} the line`);
       if (s.home) bits.push('home, GPS off');
@@ -1345,7 +1362,8 @@ function renderSelected() {
   const s = c.status;
   const rows = [];
   if (s) {
-    rows.push(['State', stateLabel(s.state)], ['Last report', ago(Date.now() / 1000 - s.received)]);
+    rows.push(['State', stateLabel(s.state)], ['Last report', ago(Date.now() / 1000 - s.received)
+      + (s.via === 'phone' ? `, passed on by ${s.via_phone || 'a phone'} over Bluetooth: the collar can't reach the base itself` : '')]);
     if (s.battery_pct != null && s.battery_pct !== 255) rows.push(['Battery', `${s.battery_pct}%`]);
     // Collar firmware 0.16 on says when it has no current fix; its position is then the last one it knew.
     if (s.home) rows.push(['GPS', 'Off: home, near the anchor. The map shows the last fix']);
@@ -1418,16 +1436,28 @@ function qrSvg(text) {
   return svg;
 }
 
+/// How a linked phone is doing, for its row.
+function phoneNote(p) {
+  const now = Date.now() / 1000;
+  if (p.api) return p.last_seen ? `in touch ${ago(now - p.last_seen)}` : `linked ${ago(now - (p.enrolled || p.created))}`;
+  if (p.legacy) return 'Bluetooth only (linked by an older base)';
+  if (p.code_expires) return `code not scanned yet, good for ${Math.max(1, Math.round((p.code_expires - now) / 60))} min`;
+  return 'its code ran out before it was scanned';
+}
+
 function renderApps(c) {
   const rows = phonesInfo.phones.map(p => {
-    const missing = (p.missing || []).filter(id => collars[id]);
+    // A phone on the network fetches new collars itself; one linked by an older base needs a list.
+    const missing = p.api ? [] : (p.missing || []).filter(id => collars[id]);
+    const acts = [];
+    if (p.legacy && missing.length) acts.push(el('button', { class: 'link', title: `Show ${p.name} a code that adds ${dogList(missing)} to the app`, onclick: () => showCollarList(p) }, `Add ${dogList(missing)}`));
+    if (!p.api) acts.push(el('button', { class: 'link', title: p.legacy ? 'Link it again so it can see the dogs over the network too (it keeps its Bluetooth key)' : 'Show a new one-time code for this phone', onclick: () => newPhoneCode(p) }, p.legacy ? 'Link for the internet' : 'New code'));
+    else acts.push(el('button', { class: 'link', title: 'A new one-time code for this phone, e.g. after the app was reinstalled or the phone replaced. The old one stops working once it is scanned.', onclick: () => newPhoneCode(p) }, 'New code'));
+    acts.push(el('button', { class: 'link', title: 'Take this phone\'s access to every collar and to this base away', onclick: () => unlinkPhone(p) }, 'Remove'));
     return el('li', {},
-      el('span', {}, p.name, ' ', el('span', { class: 'muted' }, [p.created ? `linked ${ago(Date.now() / 1000 - p.created)}` : '',
-        missing.length ? `${p.created ? ', ' : ''}does not list ${dogList(missing)} yet` : ''].join(''))),
-      el('span', { class: 'acts' },
-        missing.length ? el('button', { class: 'link', title: `Show ${p.name} a code that adds ${dogList(missing)} to the app`, onclick: () => showCollarList(p) }, `Add ${dogList(missing)}`) : null,
-        missing.length ? ' · ' : null,
-        el('button', { class: 'link', title: 'Take this phone\'s access to every collar away', onclick: () => unlinkPhone(p) }, 'Remove')));
+      el('span', {}, p.name, ' ', el('span', { class: 'muted' }, [phoneNote(p),
+        missing.length ? `does not list ${dogList(missing)} yet` : ''].filter(Boolean).join(', '))),
+      el('span', { class: 'acts' }, acts.flatMap((a, i) => i ? [' · ', a] : [a])));
   });
   // Phones that an older version of this base linked to this collar alone.
   for (const a of c.apps || []) {
@@ -1461,7 +1491,8 @@ function pinText(c) {
   return c.pin ? String(c.pin).padStart(6, '0') : null;
 }
 
-/// Show a pairing code: `linking` for a new phone (it carries the key), else a collar list.
+/// Show a code: `linking` for a phone to scan once (it fetches its keys with it), else the collar
+/// list for a phone linked by an older base.
 function showAppCode(r, linking) {
   appCode = { code: r.code };
   $('appForm').hidden = true;
@@ -1477,12 +1508,16 @@ function showAppCode(r, linking) {
   const dogs = r.collars.map(x => x.dog || x.node_id).join(', ').replace(/, ([^,]*)$/, ' and $1');
   $('appSteps').replaceChildren(
     linking ? el('li', {}, 'Install the GeoCollar app on the phone (', el('a', { href: APP_URL, target: '_blank', rel: 'noopener' }, 'how to get it'), ').') : null,
-    el('li', {}, 'In the app, tap ', el('b', {}, 'Add a collar'), ' and point the phone at this code.'),
+    el('li', {}, 'In the app, tap ', el('b', {}, 'Add a collar'), ' and point the phone at this code.',
+      linking ? ' The phone must reach the base now: on your home Wi-Fi, or at the Base URL.' : ''),
     el('li', {}, `The app lists ${dogs}.`),
     pinLine);
+  const mins = r.expires ? Math.round((r.expires - Date.now() / 1000) / 60) : 10;
   $('appCodeNote').textContent = linking
-    ? `This code is ${r.phone.name}'s key to every collar on this base, and it is shown only this once. `
-      + 'If the scan fails, remove the phone from the list above and make a new code.'
+    ? `This code links ${r.phone.name} once, within ${mins} minutes. It holds no readable text and no lasting key: the phone `
+      + 'fetches its keys from the base with it, encrypted, and then the code is spent. If the scan fails or the time runs out, '
+      + 'press New code next to the phone. If the app says the code was used already and it was not by you, remove the phone.'
+      + (r.urls && r.urls.length ? ` The phone reaches the base at ${r.urls.join(' or ')}.` : ' The base knows no address for the phone to reach it: set the Base URL in Settings.')
     : `This code lists the collars on this base for ${r.phone.name}, which is linked already. It holds no key, so it can be shown again at any time.`;
   $('appCode').hidden = false;
   appSay('');
@@ -1519,8 +1554,16 @@ async function showCollarList(p) {
   showAppCode(r, false);
   refresh();
 }
+async function newPhoneCode(p) {
+  let r;
+  try { r = await api(`phones/${p.id}/code`, { method: 'POST' }); }
+  catch (err) { appSay(err.message); return; }
+  phonesInfo = r;
+  showAppCode(r, true);
+  refresh();
+}
 async function unlinkPhone(p) {
-  if (!confirm(`Remove ${p.name}? It can no longer connect to any collar on this base once each collar has heard of it.`)) return;
+  if (!confirm(`Remove ${p.name}? It can no longer reach this base, and no longer connect to any collar once each collar has heard of it.`)) return;
   closeAppCode();
   try { phonesInfo = await api(`phones/${p.id}`, { method: 'DELETE' }); appSay(`Removed ${p.name}.`); }
   catch (err) { appSay(err.message); }
@@ -1851,6 +1894,35 @@ async function loadContact() {
 }
 
 $('contactPhone').oninput = renderContact;
+
+// Phone app away from home: the Base URL, and the addresses phones are given.
+async function loadAccess() {
+  let a;
+  try { a = await api('phone-access'); } catch { return; }
+  renderAccess(a);
+  if (document.activeElement !== $('accessUrl')) $('accessUrl').value = a.url || '';
+}
+function renderAccess(a) {
+  $('accessPort').textContent = a.port;
+  const auto = a.items.filter(i => i.source !== 'set');
+  $('accessUrl').placeholder = auto.length ? auto[0].url : 'https://geocollar.example.com';
+  const parts = [];
+  if (a.items.length) parts.push(el('div', { class: 'muted' }, 'Phones try, in this order:'),
+    el('ul', { class: 'anchorChecks' }, a.items.map(i => el('li', {}, el('code', {}, i.url), ` (${i.label})`))));
+  else parts.push(el('div', { class: 'callout' }, 'The base knows no address phones can reach it at. Enter the Base URL above.'));
+  for (const w of a.warnings) parts.push(el('div', { class: 'callout beacon' }, w));
+  $('accessInfo').replaceChildren(...parts);
+}
+$('accessForm').onsubmit = async e => {
+  e.preventDefault();
+  try {
+    const a = await api('phone-access', { method: 'PUT', body: JSON.stringify({ url: $('accessUrl').value }) });
+    $('accessUrl').value = a.url || '';
+    renderAccess(a);
+    $('accessMsg').textContent = a.url ? 'Saved. Linked phones get it the next time they reach the base.' : 'Saved: the base works out the address.';
+  } catch (err) { $('accessMsg').textContent = err.message; }
+};
+$('appAccessLink').onclick = e => { e.preventDefault(); showTab('settings', 'accessBox'); };
 $('contactForm').onsubmit = async e => {
   e.preventDefault();
   try {
@@ -3366,6 +3438,7 @@ function showTab(name, scrollTo) {
   $('mapMain').hidden = tab !== 'collars';
   $('logMain').hidden = tab !== 'log';
   if (tab === 'collars') map.invalidateSize(); // the map was hidden: let Leaflet measure it again
+  if (tab === 'settings') loadAccess(); // Home Assistant's URL may have changed
   else if (tab === 'log') openLog();
   else { fwRefresh(); loadHomeAnchor(true); }
   const target = scrollTo && $(scrollTo);
@@ -3383,6 +3456,7 @@ document.querySelector('.tabs').addEventListener('keydown', e => {
 window.addEventListener('beforeunload', e => { if (isDirty() || Object.keys(drafts).length) { e.preventDefault(); e.returnValue = ''; } });
 
 loadContact();
+loadAccess();
 loadHomeAnchor();
 
 // Poll faster while a simulated collar is around, so it moves smoothly.

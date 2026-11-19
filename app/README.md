@@ -61,21 +61,38 @@ Apple only lets a signed app onto a device. There are three ways:
 ## Link your collars
 
 1. In the base station, select any collar and press **Connect app**. Say whose phone it is.
-2. In the app, tap **Add a collar** and point the camera at the QR code. Or scan it with the
-   phone's own camera app, which opens GeoCollar. If no camera can be used, press **Copy the code
-   as text** on the base and paste it under *Type or paste the code instead*. The app now lists
-   every collar on the base.
+2. With the phone on your home Wi-Fi, tap **Add a collar** in the app and point the camera at the
+   QR code. If no camera can be used, press **Copy the code as text** on the base and paste it
+   under *Type or paste the code instead*. The phone fetches its keys from the base with the code
+   (it works once, within 10 minutes), and the app lists every collar on the base. (The phone's
+   own camera app can't open this code; it can still open the older `geocollar://` codes.)
 3. Go near a collar and open it. The first time, the phone asks for that collar's Bluetooth PIN;
    the app shows it if the base knows it.
 
 The base hands each collar its key for the phone over the mesh, with the collar's next report.
 Until then the app says the collar has not been told about this phone yet, and keeps trying.
 
-A collar added to the base later trusts the phone at once. To list it in the app, press **Add
-Bella** next to the phone in the base's list and scan that code with **Add a collar**. That code
-is only the list of the base's collars, with no key: it works on a phone that is linked to that
-base already, and the app also drops collars the base no longer has. A code from an older base
-links one collar only, as before.
+A collar added to the base later trusts the phone at once, and the app lists it the next time it
+reaches the base. A collar removed from the phone by hand stays away until the phone is linked
+again. Codes from older bases still work: a version 2 code links a phone over Bluetooth only, and
+its collar list (**Add Bella** on such a base) adds collars; a version 1 code links one collar.
+
+## Away from home
+
+While it is open, the app asks the base every 30 seconds for each collar's last report, over your
+home network or the internet, so a dog shows on the map even when no collar is near. The first
+screen says when the app was last up to date with the base, or why it can't reach it. For that to
+work away from home, the base's phone port (8100) must be reachable from the internet and its
+address set as the **Base URL** on the base (Settings > Phone app away from home); the base's
+documentation explains it.
+
+When the app is connected to a collar over Bluetooth and the base has not heard that collar over
+the mesh lately, the app passes the collar's report, and the phone's own position, on to the base
+every 30 seconds. The collar's screen then says the base is getting the position from this phone.
+
+Everything the app and the base say to each other is encrypted with a key of this phone's own
+(`src/phoneapi.js`; the API is described in [docs/phone-api.openapi.json](../docs/phone-api.openapi.json)),
+so plain http to the base is allowed: the app uses the phone's own networking, not the web view's.
 
 **Try a demo collar** on the first screen shows the app with a pretend lost dog near you, with no
 hardware at all. One of the base station's simulated collars gets the same pretend dog, because a
@@ -87,7 +104,7 @@ simulated collar has no Bluetooth to connect to.
  Base station                         Collar                              Phone
  "Connect app" makes a key  ──mesh──► keeps the key in flash
           │                           (AppKeys, PKI encrypted)
-          └── QR code ───────────────────────────────────────────────►  keeps the key in the
+          └── one-time QR code, then the key over the phone API ──────►  keeps the key in the
                                                                          app's private storage
                                       Meshtastic's Bluetooth service ◄── pairs with the PIN,
                                       GeoCollar module               ◄── signs every request
@@ -101,8 +118,8 @@ simulated collar has no Bluetooth to connect to.
   The GeoCollar module on the collar answers only requests signed with a key the base gave it:
   HMAC-SHA256, a new session for every connection with fresh random numbers from both sides, and
   a counter in every request, so a recording is useless.
-- The phone's key is 16 random bytes, different for every phone. The base shows it once, in the
-  QR code. Each collar gets its own key made from it (HMAC-SHA256 of the collar's node number),
+- The phone's key is 16 random bytes, different for every phone. The base sends it once, encrypted,
+  when the phone uses its one-time QR code (older bases put it in the code). Each collar gets its own key made from it (HMAC-SHA256 of the collar's node number),
   which the app works out too, so a key read out of one collar's memory opens no other collar.
   Removing the phone on the base removes its key from every collar.
 - The app finds the collar by its Bluetooth name: the Meshtastic name (`REX_c3d4`) or, while the
@@ -127,10 +144,10 @@ The message layouts are in [docs/protocol.md](../docs/protocol.md#the-companion-
 
 - Someone with only the collar's Bluetooth PIN can use Meshtastic's own app on the collar, as
   before, but cannot use GeoCollar's phone commands.
-- Someone who photographs the QR code can link their own phone. They would still need the
-  Bluetooth PIN and to be within Bluetooth range, and could then see the collar's position, mute
-  the lost alert, beep, vibrate, and pause corrections. Treat the code like a house key; if in
-  doubt, remove the phone on the base and make a new code.
+- The QR code holds no key and no readable text, and works once, within 10 minutes. Someone who
+  scanned it before your phone would link theirs instead, and your app would say the code was used
+  already: then remove that phone on the base and make a new code. A photo of a used code is
+  worthless.
 - The key sits in the app's private storage on the phone and is left out of Android's cloud
   backup. Anyone who can unlock the phone can use the app.
 - Messages between the app and the collar are signed, not encrypted on their own: the Bluetooth
@@ -246,8 +263,11 @@ Tested, on a PC:
   phone, a collar that restarts.
 - The Meshtastic messages the app writes and reads, against bytes made with Meshtastic's own
   Python library.
-- The base station's real QR code, scanned by the app's scanner through a pretend camera in a
-  desktop browser.
+- The base station's real QR code, read by the app's QR reader (jsQR) from the base page, and the
+  phone then linked with it against a running base.
+- The phone API's encryption against golden values from the base's Python, and the app linking,
+  fetching the collars and passing on a report against a running base, in a desktop browser at
+  phone size.
 - The screens, in a desktop browser at phone size, with the demo collar.
 - That the Android and iOS projects compile (on GitHub, with every push that changes the app).
 
@@ -258,6 +278,8 @@ Not tested, because it needs a collar and a phone:
 - The collar's side on hardware: answering a phone through Meshtastic's phone API, and staying
   connectable in the quiet half of the lost beacon.
 - The camera, location and `geocollar://` links on a real phone.
+- Reaching the base from a real phone: Capacitor's native HTTP, plain http on Android and iOS,
+  and iOS's local network permission prompt.
 
 ## Not done yet
 

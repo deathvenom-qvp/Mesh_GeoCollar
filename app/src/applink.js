@@ -59,6 +59,7 @@ export function decodeStatusBody(b) {
     beaconSilenced: !!(flags & 0x08),
     noFix: !!(flags & 0x10),          // the position is the last one known, not a current one
     apps: !!(flags & 0x40),
+    home: !!(flags & 0x80),           // near the home anchor with the GPS off
   };
 }
 

@@ -5,6 +5,7 @@ import time
 import pytest
 from fastapi.testclient import TestClient
 
+from geocollar_base import phoneapi as papi
 from geocollar_base import protocol
 from geocollar_base.app import create_app
 
@@ -715,6 +716,16 @@ def test_collar_log_file(tmp_path):
 
 
 # -- The companion app -------------------------------------------------------------------------
+def enrolled(client, code_text: str):
+    """Scan a Connect app code as the app does. Returns what the phone got (its key for the
+    collars and the collar list) and the phone, for the phone API."""
+    phone = papi.TestPhone(client, code_text)
+    r = phone.enroll()
+    assert r.status_code == 200, r.text
+    w = phone.welcome
+    return {"home": w["home"], "key_id": w["ble_key_id"], "key": papi.b64d(w["ble_key"]), "collars": w["collars"]}, phone
+
+
 def keys_for(code: dict, node_id: str) -> tuple[int, bytes]:
     """The key a collar gets for the phone that scanned `code`."""
     return code["key_id"], protocol.collar_app_key(code["key"], node_id)
@@ -733,14 +744,19 @@ def test_linking_a_phone_links_it_to_every_collar_on_the_base(tmp_path):
     assert r.status_code == 200
     body = r.json()
     assert body["phone"]["name"] == "Ken's phone" and body["room"] == 3
-    assert body["phones"] == [{**body["phone"], "created": body["phones"][0]["created"], "missing": []}]
+    row = body["phones"][0]
+    assert row == {**body["phone"], "created": row["created"], "missing": [], "api": False, "legacy": False,
+                   "enrolled": None, "last_seen": None, "code_expires": row["code_expires"]}
+    assert 590 < row["code_expires"] - time.time() <= 600 and body["expires"] == row["code_expires"]
     assert body["synced"] == {"!a1b2c3d4": False, "!0badf00d": False}
-    # One QR code for the whole base: the phone's key, and how to find each collar.
-    code = protocol.parse_home_pairing_code(body["code"])
+    # One QR code for the whole base. Nothing in it can be read: no name, address or key.
+    assert not any(x in body["code"] for x in ("Rex", "Bella", "a1b2c3d4", "http", "geocollar", "482913"))
+    # The phone scans it and gets its key, and how to find each collar, over the network.
+    code, _ = enrolled(client, body["code"])
     assert code["home"] and f"{code['key_id']:08x}" == body["phone"]["id"] and len(code["key"]) == 16
     assert code["collars"] == [
         {"node_id": "!0badf00d", "pin": None, "ble_name": "BELL", "dog": "Bella", "sim": False},
-        {"node_id": "!a1b2c3d4", "pin": "482913", "ble_name": "REX", "dog": "Rex", "sim": False}]
+        {"node_id": "!a1b2c3d4", "pin": 482913, "ble_name": "REX", "dog": "Rex", "sim": False}]
     # Each collar gets a key of its own, made from the phone's.
     sent = {node: (keys, seq) for node, keys, seq in link.app_keys}
     assert sent["!a1b2c3d4"][0] == [keys_for(code, "!a1b2c3d4")]
@@ -748,7 +764,8 @@ def test_linking_a_phone_links_it_to_every_collar_on_the_base(tmp_path):
     assert keys_for(code, "!a1b2c3d4") != keys_for(code, "!0badf00d")
 
     # The key is given out that once: nothing the page can ask for carries it afterwards.
-    b64 = body["code"].split("k=")[1].split("&")[0]
+    b64 = papi.b64e(code["key"])
+    assert b64 not in body["code"]
     secrets_ = [code["key"].hex(), b64] + [keys_for(code, n)[1].hex() for n in sent]
     for path in ("/api/collars", "/api/phones", "/api/collars/!a1b2c3d4/apps"):
         text = client.get(path).text
@@ -778,7 +795,7 @@ def test_linking_a_phone_links_it_to_every_collar_on_the_base(tmp_path):
 
     # A second phone gets its own key, and every collar gets both.
     r2 = client.post("/api/phones", json={})
-    code2 = protocol.parse_home_pairing_code(r2.json()["code"])
+    code2, _ = enrolled(client, r2.json()["code"])
     assert r2.json()["phone"]["name"] == "Phone 2" and code2["key"] != code["key"] and code2["home"] == code["home"]
     last = {node: keys for node, keys, _ in link.app_keys}
     assert last["!a1b2c3d4"] == [keys_for(code, "!a1b2c3d4"), keys_for(code2, "!a1b2c3d4")]
@@ -806,7 +823,7 @@ def test_a_collar_added_later_trusts_the_linked_phones_and_they_can_catch_up(tmp
     client, link = make(tmp_path)
     client.post("/api/collars", json={"node_id": "!a1b2c3d4", "name": "Rex"})
     phone = client.post("/api/phones", json={"name": "Ken"}).json()
-    code = protocol.parse_home_pairing_code(phone["code"])
+    code, _ = enrolled(client, phone["code"])
     pid = phone["phone"]["id"]
     assert client.get("/api/phones").json()["phones"][0]["missing"] == []
 
@@ -853,7 +870,7 @@ def test_phones_linked_to_one_collar_by_an_older_base_keep_working(tmp_path, mon
     assert client.get("/api/phones").json()["room"] == 3
 
     # A new phone joins it on that collar, and alone on the other.
-    code = protocol.parse_home_pairing_code(client.post("/api/phones", json={}).json()["code"])
+    code, _ = enrolled(client, client.post("/api/phones", json={}).json()["code"])
     last = {node: keys for node, keys, _ in link.app_keys}
     assert last["!a1b2c3d4"] == [(0x1A2B3C4D, bytes(range(16))), keys_for(code, "!a1b2c3d4")]
     assert last["!0badf00d"] == [keys_for(code, "!0badf00d")]
@@ -876,7 +893,7 @@ def test_a_page_cached_from_before_0_19_7_can_still_link_a_phone(tmp_path):
     assert r.status_code == 200
     body = r.json()
     assert body["app"]["name"] == "Ken" and body["sim"] is False and body["max"] == 4
-    code = protocol.parse_home_pairing_code(body["code"])
+    code, _ = enrolled(client, body["code"])
     assert [c["dog"] for c in code["collars"]] == ["Bella", "Rex"]
     assert [p["name"] for p in client.get("/api/phones").json()["phones"]] == ["Ken"]
     assert {node for node, _, _ in link.app_keys} == {"!a1b2c3d4", "!0badf00d"}
@@ -954,7 +971,7 @@ def test_a_simulated_collar_can_be_linked_for_trying_the_app(tmp_path):
     node_id = client.post("/api/sim", json={"name": "Sim", "lat": 40.0, "lon": -75.0}).json()["node_id"]
     r = client.post("/api/phones", json={"name": "Phone"})
     assert r.status_code == 200 and r.json()["synced"][node_id] is True
-    assert protocol.parse_home_pairing_code(r.json()["code"])["collars"][0]["sim"] is True
+    assert enrolled(client, r.json()["code"])[0]["collars"][0]["sim"] is True
     assert not getattr(link, "app_keys", [])  # nothing goes on the air for a simulated collar
 
 

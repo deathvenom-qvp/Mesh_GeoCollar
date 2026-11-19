@@ -4,19 +4,20 @@
 
 import L from 'leaflet';
 import { App } from '@capacitor/app';
-import { Capacitor } from '@capacitor/core';
+import { Capacitor, CapacitorHttp } from '@capacitor/core';
 import { Directory, Encoding, Filesystem } from '@capacitor/filesystem';
 import { Preferences } from '@capacitor/preferences';
 import { Share } from '@capacitor/share';
 
 import { Action, State } from './applink.js';
 import { bleTransport } from './ble.js';
-import { randomBytes } from './bytes.js';
+import { fromBase64Url, randomBytes } from './bytes.js';
 import { CollarLink, Link } from './collar.js';
 import { CollarHalf, DEMO_KEY_ID, DEMO_NODE, DemoDog, demoKey } from './demo.js';
 import { FakeNode } from './fakenode.js';
 import { bearingDeg, compass, distanceM, formatAge, formatDistance } from './geo.js';
 import { collarKey, parsePairingCode } from './pairing.js';
+import { BaseApi, enroll, fetchHttp, fromBase, isApiCode, readCode, relayBody } from './phoneapi.js';
 import { startScanner } from './scanner.js';
 import { loadCollars, loadHomes, saveCollars, saveHomes } from './store.js';
 import { clearLog, describe, flushLog, log, logLines, onLog, setLogSaver } from './log.js';
@@ -60,6 +61,24 @@ let lastSaved = 0;
 let toastTimer = 0;
 let map, collarMark, meMark, line, follow = true, placed = false;
 let logReturn = 'home'; // the screen the debug log goes back to
+let active = true;      // the app is on the screen (not in the background)
+let linking = false;    // a code is being used
+
+// The base stations this phone reaches over the network (phoneapi.js).
+const SYNC_MS = 30000;
+const apis = new Map();      // base id -> BaseApi
+const baseState = new Map(); // base id -> { ok: when it last answered, error, busy }
+const relayAt = new Map();   // collar node -> when a report from it may next be passed on
+
+async function nativeHttp(url, body) {
+  const r = await CapacitorHttp.request({ url, method: 'POST', headers: { 'Content-Type': 'application/json' }, data: body,
+    connectTimeout: 10000, readTimeout: 10000, responseType: 'json' });
+  let data = r.data;
+  if (typeof data === 'string') { try { data = JSON.parse(data); } catch { data = null; } }
+  return { status: r.status, data };
+}
+// The app's own HTTP: no browser rules about other sites or plain http. Everything is encrypted anyway.
+const http = native ? nativeHttp : fetchHttp();
 
 const nameOf = c => c.dog || 'the collar';
 const titleOf = c => c.dog || `Collar ${c.node}`;
@@ -106,6 +125,23 @@ function renderHome() {
   }
   $('empty').hidden = collars.length > 0;
   $('demo').hidden = collars.some(c => c.demo);
+  renderBases();
+}
+
+function renderBases() {
+  const lines = [];
+  for (const h of homes) {
+    if (!collars.some(c => c.home === h.id)) continue;
+    const st = baseState.get(h.id) || {};
+    let text, bad = false;
+    if (!h.api) text = 'Bluetooth only. To see the dogs from anywhere, press "Link for the internet" next to this phone on the base station and scan its code.';
+    else if (h.api.removed) { text = 'The base station no longer knows this phone. Link it again under Connect app on the base.'; bad = true; }
+    else if (st.error && (!st.ok || st.failedAt > st.ok)) { text = `${st.error}${st.ok ? `. Last up to date ${formatAge((Date.now() - st.ok) / 1000)}` : ''}.`; bad = true; }
+    else if (st.ok) text = `Up to date with the base station, ${formatAge((Date.now() - st.ok) / 1000)}.`;
+    else text = 'Reaching the base station…';
+    lines.push(el('p', bad ? 'bad' : '', text));
+  }
+  $('bases').replaceChildren(...lines);
 }
 
 function goHome() {
@@ -142,11 +178,90 @@ function showAddError(e) {
 
 const listNames = names => names.join(', ').replace(/, ([^,]*)$/, ' and $1');
 
+/// A collar as the base's API lists it, as parsePairingCode gives it.
+const fromApiCollar = e => {
+  const node = String(e.node_id || '').replace(/^!/, '').toLowerCase();
+  return { node, nodeNum: parseInt(node, 16), pin: e.pin ? String(e.pin).padStart(6, '0') : '',
+    bleName: (e.ble_name || '').slice(0, 8), dog: (e.dog || '').slice(0, 40), sim: !!e.sim };
+};
+
+/// Bring the collars of base `h` on this phone in line with the base's list: add new ones, update
+/// names and PINs, drop the ones the base no longer has. Collars removed from this phone by hand
+/// stay away. Returns { linked, added, gone }.
+async function applyList(h, entries) {
+  const before = new Set(collars.filter(x => x.home === h.id).map(x => x.node));
+  const hidden = new Set(h.hidden || []);
+  const linked = [];
+  for (const e of entries) {
+    if (!/^[0-9a-f]{8}$/.test(e.node) || hidden.has(e.node)) continue;
+    const fields = { node: e.node, nodeNum: e.nodeNum, keyId: h.keyId, key: await collarKey(h.key, e.nodeNum),
+      pin: e.pin, bleName: e.bleName, dog: e.dog, sim: e.sim, home: h.id };
+    const old = collars.find(x => x.node === e.node && !x.demo);
+    if (old) Object.assign(old, fields); // the same object: the screen may be showing it
+    else collars.push(fields);
+    linked.push(old || fields);
+  }
+  const gone = collars.filter(x => x.home === h.id && !entries.some(e => e.node === x.node));
+  if (gone.length) collars = collars.filter(x => !gone.includes(x));
+  return { linked, added: linked.filter(c => !before.has(c.node)), gone };
+}
+
+function apiFor(h) {
+  if (!h || !h.api || h.api.removed) return null;
+  let a = apis.get(h.id);
+  if (!a || a.api !== h.api) {
+    a = new BaseApi(h.api, http, { onChange: () => saveHomes(homes).catch(() => {}) });
+    apis.set(h.id, a);
+  }
+  return a;
+}
+
+/// Link this phone with a code from a base that has the phone API: the phone fetches its keys
+/// from the base with it.
+async function addFromApiCode(text) {
+  const code = await readCode(text);
+  $('addMsg').hidden = true;
+  $('camMsg').textContent = 'Linking with the base station…';
+  log('app', `code for base ${code.home}, addresses ${code.urls.join(' ')}`);
+  let r;
+  try {
+    r = await enroll(code, http);
+  } finally {
+    $('camMsg').textContent = 'Point the camera at the code on the base station';
+  }
+  const w = r.welcome;
+  // Linked again: every collar shows again, even ones removed from this phone by hand.
+  const h = { id: w.home, keyId: w.ble_key_id, key: fromBase64Url(w.ble_key), api: r.api, hidden: [] };
+  homes = [...homes.filter(x => x.id !== w.home), h];
+  apis.delete(h.id);
+  baseState.set(h.id, { ok: Date.now() });
+  await saveHomes(homes);
+  const { linked } = await applyList(h, w.collars.map(fromApiCollar));
+  await persist();
+  log('app', `linked to base ${h.id} as phone ${r.api.phone} at ${r.url}: ${linked.map(c => c.node).join(' ')}`);
+  closeAdd();
+  await closeCollar();
+  goHome();
+  toast(linked.length ? `Linked to ${listNames(linked.map(titleOf))}.` : 'Linked to the base station. It has no collars yet.');
+  syncBases();
+}
+
 /// Link this phone to the collars a pairing code names: every collar on the base, or one collar
 /// from an older base. A code without a key (the base's collar list) adds the collars of a base
 /// this phone is linked to already, and drops the ones the base no longer has. Throws if the
 /// code is not one.
 async function addFromCode(text) {
+  if (linking) return;
+  linking = true;
+  try {
+    if (isApiCode(text)) await addFromApiCode(text);
+    else await addFromOldCode(text);
+  } finally {
+    linking = false;
+  }
+}
+
+async function addFromOldCode(text) {
   const p = parsePairingCode(text);
   let keyId = p.keyId, key = p.key;
   if (p.home && !key) {
@@ -191,6 +306,71 @@ async function addFromCode(text) {
   if (p.key || !p.home) toast(`Linked to ${listNames(linked.map(titleOf))}.`);
   else if (added.length) toast(`Added ${listNames(added.map(titleOf))}.`);
   else toast(gone.length ? `Removed ${listNames(gone.map(titleOf))}.` : 'The collars are up to date.');
+}
+
+/// Ask each base this phone reaches over the network for its collars and their last reports.
+async function syncBases() {
+  for (const h of homes) {
+    const api = apiFor(h);
+    if (!api) continue;
+    const st = baseState.get(h.id) || {};
+    if (st.busy) continue;
+    baseState.set(h.id, st);
+    st.busy = true;
+    try {
+      const r = await api.call('collars');
+      st.ok = Date.now();
+      st.error = '';
+      const { added, gone } = await applyList(h, r.collars.map(fromApiCollar));
+      for (const e of r.collars) {
+        const c = collars.find(x => x.home === h.id && x.node === fromApiCollar(e).node);
+        const s = c && fromBase(e.status, r.server_time);
+        if (!s) continue;
+        c.base = s;
+        if (!c.last || s.at > c.last.at + 1000) c.last = s; // newer than what Bluetooth gave
+      }
+      persist();
+      if (added.length || gone.length) {
+        log('base', `${h.id}: added ${added.map(c => c.node).join(' ') || 'none'}, dropped ${gone.map(c => c.node).join(' ') || 'none'}`);
+        if (screen === 'home' && added.length) toast(`Added ${listNames(added.map(titleOf))}.`);
+        if (current && gone.includes(current)) { await closeCollar(); goHome(); }
+      }
+    } catch (e) {
+      st.failedAt = Date.now();
+      st.error = e.code === 'offline' ? "Can't reach the base station" : e.message;
+      log('base', `${h.id}: ${e.code || ''} ${describe(e)}${e.cause ? ` (${describe(e.cause)})` : ''}`);
+      if (e.code === 'removed') {
+        h.api.removed = true;
+        apis.delete(h.id);
+        saveHomes(homes).catch(() => {});
+      }
+    } finally {
+      st.busy = false;
+    }
+  }
+  if (screen === 'home') renderHome();
+  else if (screen === 'collarScreen' && current) {
+    if (!live && current.last) status = current.last;
+    render();
+  }
+}
+
+/// A report heard over Bluetooth goes to the base, when the base has not heard the collar over
+/// the mesh lately: the base answers which, and when to offer the next one.
+function maybeRelay(c, st) {
+  const h = homes.find(x => x.id === c.home);
+  const api = !c.demo && !c.sim && apiFor(h);
+  if (!api || Date.now() < (relayAt.get(c.node) || 0)) return;
+  relayAt.set(c.node, Date.now() + 30000);
+  api.call('relay', relayBody(c.node, st, me)).then(r => {
+    relayAt.set(c.node, Date.now() + Math.max(10, r.next_s || 30) * 1000);
+    c.relay = { at: Date.now(), recorded: r.recorded, reason: r.reason };
+    log('base', `report from ${c.node} ${r.recorded ? 'passed on to the base' : `not needed by the base: ${r.reason}`}`);
+    if (current === c) render();
+  }).catch(e => {
+    relayAt.set(c.node, Date.now() + 60000);
+    log('base', `passing on ${c.node}'s report failed: ${e.code || ''} ${describe(e)}`);
+  });
 }
 
 function addDemo() {
@@ -247,15 +427,18 @@ function openCollar(c) {
     onState: () => { if (link && link.state !== Link.ONLINE) live = false; render(); },
     onStatus: st => {
       if (current !== c) return;
+      st.src = 'ble';
       status = st;
       live = true;
       c.last = { ...st };
+      maybeRelay(c, st);
       if (Date.now() - lastSaved > 30000) { lastSaved = Date.now(); persist(); }
       render();
     },
   });
   link.start();
   watchPhone();
+  syncBases();
   clearInterval(ticker);
   ticker = setInterval(render, 5000);
   render();
@@ -287,8 +470,8 @@ function linkMessage(c, state, detail) {
   const name = nameOf(c);
   switch (state) {
     case Link.SEARCHING:
-      return [`Looking for ${name === 'the collar' ? 'the collar' : name + "'s collar"}. Bluetooth reaches a few dozen metres, so go to where it was last seen.`
-        + (hasPosition(status) ? ' The map shows the last position this phone got.' : '')];
+      return [`Looking for ${name === 'the collar' ? 'the collar' : name + "'s collar"} over Bluetooth, which reaches a few dozen metres.`
+        + (hasPosition(status) ? ' The map shows the last position known.' : ' Go to where it was last seen.')];
     case Link.PAIRING:
       return c.pin
         ? ["Your phone is asking for the collar's Bluetooth PIN. It is ", el('b', '', `${c.pin.slice(0, 3)} ${c.pin.slice(3)}`), '.']
@@ -360,12 +543,21 @@ function render() {
     }
     facts.push(...fact('Battery', s.batteryPct === null ? 'Unknown' : `${s.batteryPct}%`));
     let gps;
-    if (!hasPosition(s) || s.fixAgeS === null) gps = 'No GPS fix yet';
+    if (hasPosition(s) && s.home) gps = 'Off at home, near the anchor';
+    else if (hasPosition(s) && s.noFix && s.fixAgeS === null) gps = 'No fix right now. The map shows the last position known';
+    else if (!hasPosition(s) || s.fixAgeS === null) gps = 'No GPS fix yet';
     else if (s.noFix) gps = `No fix right now. Last one ${formatAge(s.fixAgeS + (Date.now() - s.at) / 1000)}`;
     else gps = `Fix ${formatAge(s.fixAgeS + (Date.now() - s.at) / 1000)}, ${s.sats} satellites`;
     facts.push(...fact('GPS', gps));
     if (!s.corrections) facts.push(...fact('Corrections', 'Paused'));
-    if (!live) facts.push(...fact('Heard', formatAge((Date.now() - s.at) / 1000)));
+    if (!live) {
+      const from = s.src === 'base' ? (s.via === 'phone' ? `, from the base station (passed on by ${s.viaPhone || 'a phone'})` : ', from the base station')
+        : ', over Bluetooth';
+      facts.push(...fact('Heard', formatAge((Date.now() - s.at) / 1000) + from));
+    }
+    if (live && c.relay && c.relay.recorded && Date.now() - c.relay.at < 120000) {
+      facts.push(...fact('Base station', "Getting this position from this phone: the collar can't reach it"));
+    }
   }
   $('facts').replaceChildren(...facts);
 
@@ -485,6 +677,11 @@ function logHeader() {
       + `${c.deviceId ? `, address ${c.deviceId}` : ''}${c.demo ? ', demo' : c.sim ? ', simulated' : ''}`
       + `${c.last ? `, last heard ${new Date(c.last.at).toISOString()}` : ', never heard'}`);
   }
+  for (const h of homes) {
+    const st = baseState.get(h.id) || {};
+    out.push(`Base: ${h.id}, ${h.api ? `phone ${h.api.phone}${h.api.removed ? ' (removed)' : ''}, addresses ${(h.api.urls || []).join(' ')}`
+      + `${h.api.good ? `, last worked ${h.api.good}` : ''}${st.ok ? `, up to date ${new Date(st.ok).toISOString()}` : ''}${st.error ? `, ${st.error}` : ''}` : 'Bluetooth only'}`);
+  }
   if (current && link) out.push(`On screen: ${current.node}, link ${link.state}${link.detail ? `: ${link.detail}` : ''}`);
   return out.join('\n');
 }
@@ -598,6 +795,8 @@ $('remove').addEventListener('click', async () => {
   if (!confirm(`Remove ${titleOf(c)} from this phone?` + (real ? ' To stop the collar accepting this phone at all, also remove the phone under "Connect app" on the base station.' : ''))) return;
   await closeCollar();
   collars = collars.filter(x => x !== c);
+  const h = homes.find(x => x.id === c.home);
+  if (h && h.api) { h.hidden = [...new Set([...(h.hidden || []), c.node])]; await saveHomes(homes); }
   await persist();
   goHome();
 });
@@ -621,10 +820,14 @@ async function main() {
   collars = await loadCollars();
   homes = await loadHomes();
   goHome();
+  syncBases();
+  setInterval(() => { if (active) syncBases(); else if (screen === 'home') renderBases(); }, SYNC_MS);
   if (native) {
     App.addListener('appStateChange', st => {
       log('app', st.isActive ? 'came to the front' : 'went to the background');
+      active = st.isActive;
       if (!st.isActive) flushLog();
+      else syncBases();
     });
     App.addListener('appUrlOpen', e => openUrl(e.url));
     App.addListener('backButton', () => { if (screen === 'home') App.exitApp(); else back(); });

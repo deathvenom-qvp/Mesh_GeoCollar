@@ -1,5 +1,42 @@
 # Changelog
 
+## 0.19.10
+
+The phone app sees the dogs **away from home**, over the internet. Base and phone app; no new
+collar firmware. Tested with the base's and the app's own tests, the app against a running base
+in a desktop browser at phone size, and the app's QR scanner on the base page's code, **not on a
+real phone or collar**.
+
+- **The app gets every collar's last report from the base.** Linked phones ask the base every 30
+  seconds while the app is open, so the map, state and battery are there even when no collar is in
+  Bluetooth range. Collars added on the base later show up in the app by themselves; no more
+  "Add Bella" code.
+- **A phone near a dog passes its position on.** When the app is connected to a collar over
+  Bluetooth and the base has not heard that collar over the mesh lately (two missed reports and a
+  minute), the app sends the collar's report to the base every 30 seconds, with the phone's own
+  position. The map, the collar's panel and the Log say "via Ken's phone".
+- **An encrypted API for phones, documented with OpenAPI** (`docs/phone-api.openapi.json`, also at
+  `/api/phone/v1/openapi.json` and `/api/phone/v1/docs` on the base). Every request and answer is
+  encrypted and signed with a key of that phone's own (AES-256-GCM), so plain http is safe and a
+  proxy can't read it; old or replayed requests are refused. Removing a phone on the base locks it
+  out at once.
+- **Its own port, 8100**, which serves the phone API and nothing else, so it can be forwarded from
+  the internet without exposing the page (which has no login). In Home Assistant it is on by
+  default under the app's **Network** settings; in Docker, map it as in `docker-compose.yml`.
+- **Base URL** in Settings, under **Phone app away from home**: the address phones use from
+  outside. Left empty, the base gives phones Home Assistant's URL (external, then internal) with
+  the phone port, then this machine's address on your network, and warns when none of them works
+  from the internet (Home Assistant Cloud only passes on Home Assistant itself).
+- **The Connect app QR code has no readable text and no lasting key.** It is good once, for 10
+  minutes. The app makes a fresh key pair, proves it read the code, and the base and the phone work
+  out the phone's key together (ECDH); the phone's key for the collars comes encrypted in the
+  answer. A photo of a used code is worthless; if someone uses a code first, the real phone is told
+  the code was used, and the phone list shows it. Each phone shows when it was last in touch, and
+  **New code** relinks one (after reinstalling the app, or for a phone linked by 0.19.7 to 0.19.9,
+  which stays Bluetooth-only until then) without new keys on the collars.
+- The phone must reach the base when it scans the code: be on the home Wi-Fi, or have the Base URL
+  working.
+
 ## 0.19.9
 
 - **Fix: "Method Not Allowed" when pressing Show the code under Connect app.** After updating to

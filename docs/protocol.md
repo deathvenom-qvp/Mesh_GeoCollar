@@ -294,10 +294,23 @@ Golden bytes (key id `0x1a2b3c4d`, key `00 01 .. 0f`, app nonce `a0 .. a7`, coll
 | AppRequest, counter 1, silence the lost beacon | `0212 4d3c2b1a 01000000 0f 00 0000 d2b8917361311478` |
 | AppError, no session | `0214 4d3c2b1a 02` |
 
-### The pairing code
+### The linking code (version 3, base 0.19.10 on)
 
-What the base's **Connect app** QR code says (version 2, base 0.19.7 on). It links a phone to every
-collar on the base:
+The base's **Connect app** QR code is one opaque base64url string with no readable text in it:
+version byte `3`, a 16-byte one-time secret, then AES-128-GCM (key and IV from
+HKDF-SHA256(secret, info `"GeoCollar QR v3"`), associated data the version byte) of
+`{"h": <base id>, "t": <8-byte token, base64url>, "u": [<addresses of the phone API>]}`. It holds
+no lasting key: the phone uses it once, within 10 minutes, to fetch its keys from the base over
+the network, encrypted, through the phone API. That API, its encryption and its schemas are in
+[phone-api.openapi.json](phone-api.openapi.json) (OpenAPI 3.1; the reference implementations are
+`base/geocollar_base/phoneapi.py` and `app/src/phoneapi.js`, with shared golden values). The
+phone's key for the collars (below) comes in the enrolment answer instead of in the code.
+
+### The pairing code (versions 1 and 2)
+
+What the base's **Connect app** QR code said from base 0.19.7 to 0.19.9 (version 2). The app still
+reads it, and the base still shows the collar list form of it for phones those bases linked. It
+links a phone to every collar on the base:
 
 `geocollar://pair?v=2&h=<base id, 8 hex digits>&i=<key id, 8 hex digits>&k=<phone key, base64url without padding>`
 

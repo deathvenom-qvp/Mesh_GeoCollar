@@ -15,9 +15,11 @@ COPY geocollar_base ./geocollar_base
 
 ENV GEOCOLLAR_DATA_DIR=/data \
     GEOCOLLAR_PORT=8099 \
+    GEOCOLLAR_PHONE_PORT=8100 \
     PYTHONUNBUFFERED=1
 VOLUME ["/data"]
-EXPOSE 8099
+# 8099: the page. 8100: the phone app's encrypted API alone, the one to forward from the internet.
+EXPOSE 8099 8100
 HEALTHCHECK --interval=60s --timeout=5s --start-period=20s \
     CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8099/api/health', timeout=4)"
 CMD ["python", "-m", "geocollar_base"]

@@ -34,7 +34,7 @@ test('a session matches the collar byte for byte', async () => {
   assert.deepEqual(st, {
     counter: 1, result: Result.DONE, fenceVersion: 3, state: State.LOST, batteryPct: 87,
     lat: 40.0001234, lon: -75.0004321, pdop: 1.8, sats: 9, clearanceM: -12,
-    corrections: true, shock: false, beacon: false, beaconSilenced: false, noFix: false, apps: false,
+    corrections: true, shock: false, beacon: false, beaconSilenced: false, noFix: false, apps: false, home: false,
     fixAgeS: 42,
   });
   assert.equal((await s.request(Action.BEEP, 0, 1000)).counter, 2);
