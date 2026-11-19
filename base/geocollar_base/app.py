@@ -239,7 +239,8 @@ LOCAL_SUFFIXES = (".local", ".lan", ".home.arpa", ".internal", ".localdomain")
 # Home Assistant's internal network: the Supervisor's ingress proxy is .2, Home Assistant itself
 # (and a port the owner opened on the Network tab) comes from .1, every other app has an address of its own.
 HA_NETWORK = ipaddress.ip_network("172.30.32.0/23")
-HA_TRUSTED = {ipaddress.ip_address("172.30.32.1"), ipaddress.ip_address("172.30.32.2")}
+HA_INGRESS = ipaddress.ip_address("172.30.32.2")
+HA_TRUSTED = {ipaddress.ip_address("172.30.32.1"), HA_INGRESS}
 
 
 def host_name(header: str | None) -> str:
@@ -280,6 +281,9 @@ class PageGuard:
       DNS rebinding. That website's name is not local, so it is refused here.
     - In Home Assistant, not the other apps on its internal network: only the Supervisor's ingress
       (the sidebar, behind the login) and Home Assistant itself (the GeoCollar integration).
+    - The sidebar is let through by whatever name Home Assistant was opened by. Ingress passes on
+      the browser's Host header (a Nabu Casa or DuckDNS name, say), and it forwards only requests
+      with a session from Home Assistant's login, whose cookie a rebinding site never has.
 
     The phone API is left alone: every request to it is sealed with a phone's key."""
 
@@ -296,6 +300,8 @@ class PageGuard:
                 ip = ipaddress.ip_address((scope.get("client") or ("",))[0])
             except ValueError:
                 ip = None
+            if ip == HA_INGRESS:
+                return None
             if ip is not None and ip in HA_NETWORK and ip not in HA_TRUSTED:
                 return f"another app on Home Assistant's network ({ip})"
         headers = dict(scope.get("headers") or [])
