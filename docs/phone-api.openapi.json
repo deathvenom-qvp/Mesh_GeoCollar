@@ -36,7 +36,7 @@
             }
           },
           "400": {
-            "description": "Bad Request",
+            "description": "Damaged request",
             "content": {
               "application/json": {
                 "schema": {
@@ -46,7 +46,7 @@
             }
           },
           "401": {
-            "description": "Unauthorized",
+            "description": "Unknown phone, or clock too far off",
             "content": {
               "application/json": {
                 "schema": {
@@ -56,7 +56,7 @@
             }
           },
           "403": {
-            "description": "Forbidden",
+            "description": "Does not match the code",
             "content": {
               "application/json": {
                 "schema": {
@@ -66,7 +66,7 @@
             }
           },
           "409": {
-            "description": "Conflict",
+            "description": "Seen before",
             "content": {
               "application/json": {
                 "schema": {
@@ -76,7 +76,7 @@
             }
           },
           "410": {
-            "description": "Gone",
+            "description": "Code ran out or was used",
             "content": {
               "application/json": {
                 "schema": {
@@ -86,7 +86,7 @@
             }
           },
           "413": {
-            "description": "Content Too Large",
+            "description": "Too large",
             "content": {
               "application/json": {
                 "schema": {
@@ -143,7 +143,7 @@
             }
           },
           "400": {
-            "description": "Bad Request",
+            "description": "Damaged request",
             "content": {
               "application/json": {
                 "schema": {
@@ -153,7 +153,7 @@
             }
           },
           "401": {
-            "description": "Unauthorized",
+            "description": "Unknown phone, or clock too far off",
             "content": {
               "application/json": {
                 "schema": {
@@ -163,7 +163,7 @@
             }
           },
           "403": {
-            "description": "Forbidden",
+            "description": "Does not match the code",
             "content": {
               "application/json": {
                 "schema": {
@@ -173,7 +173,7 @@
             }
           },
           "409": {
-            "description": "Conflict",
+            "description": "Seen before",
             "content": {
               "application/json": {
                 "schema": {
@@ -183,7 +183,7 @@
             }
           },
           "410": {
-            "description": "Gone",
+            "description": "Code ran out or was used",
             "content": {
               "application/json": {
                 "schema": {
@@ -193,7 +193,7 @@
             }
           },
           "413": {
-            "description": "Content Too Large",
+            "description": "Too large",
             "content": {
               "application/json": {
                 "schema": {
@@ -253,7 +253,7 @@
             }
           },
           "400": {
-            "description": "Bad Request",
+            "description": "Damaged request",
             "content": {
               "application/json": {
                 "schema": {
@@ -263,7 +263,7 @@
             }
           },
           "401": {
-            "description": "Unauthorized",
+            "description": "Unknown phone, or clock too far off",
             "content": {
               "application/json": {
                 "schema": {
@@ -273,7 +273,7 @@
             }
           },
           "403": {
-            "description": "Forbidden",
+            "description": "Does not match the code",
             "content": {
               "application/json": {
                 "schema": {
@@ -283,7 +283,7 @@
             }
           },
           "409": {
-            "description": "Conflict",
+            "description": "Seen before",
             "content": {
               "application/json": {
                 "schema": {
@@ -293,7 +293,7 @@
             }
           },
           "410": {
-            "description": "Gone",
+            "description": "Code ran out or was used",
             "content": {
               "application/json": {
                 "schema": {
@@ -303,7 +303,7 @@
             }
           },
           "413": {
-            "description": "Content Too Large",
+            "description": "Too large",
             "content": {
               "application/json": {
                 "schema": {

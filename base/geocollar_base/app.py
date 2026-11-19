@@ -1300,7 +1300,10 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
 
     # -- The phone API itself (see phoneapi.py and docs/phone-api.md) -----------------------------
     phone_router = APIRouter(prefix=papi.PREFIX, tags=["phone"])
-    ERRORS = {s: {"model": papi.ApiError} for s in (400, 401, 403, 409, 410, 413)}
+    # Descriptions spelled out: Python's own names for the codes differ between versions.
+    ERRORS = {s: {"model": papi.ApiError, "description": d} for s, d in (
+        (400, "Damaged request"), (401, "Unknown phone, or clock too far off"), (403, "Does not match the code"),
+        (409, "Seen before"), (410, "Code ran out or was used"), (413, "Too large"))}
 
     def fail(status: int, code: str, detail: str, **extra) -> JSONResponse:
         return JSONResponse({"detail": detail, "code": code, **extra}, status_code=status)
