@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.19.14
+
+- **Home mode turns the GPS off with fewer than 12 satellites** (new collar firmware, and the
+  simulator). Home mode starts only after a GPS fix shows the dog inside and clear of the bands,
+  and since 0.19.11 only a fix from 12 satellites or more counted. Near the house, where the
+  anchor is, a collar often sees 8 to 11 for hours, so home mode never started and the GPS stayed
+  on, searching all the time. Home mode now also takes a fix from 8 satellites or more when it
+  puts the dog at least 10 m (33 ft) clear of every band. The fences are unchanged: beeps,
+  vibrations and shocks still go by fixes from 12 or more only. The "use a closer setting, or move
+  the anchor" note on the Home mode card is advice only; it never stopped home mode. Tested with
+  the firmware's PC tests and the base's tests, **not on a real collar**.
+
 ## 0.19.13
 
 - **The sidebar works again when Home Assistant is opened by a domain name** (base). 0.19.12 let

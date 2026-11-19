@@ -394,6 +394,29 @@ def test_new_fences_end_home_mode_in_the_simulator():
     assert not sim.home  # the anchor's 20 s start again from the new fences' first clear fix
 
 
+def test_home_mode_from_poorer_fixes_in_the_simulator():
+    """Near the house a collar may see 8 to 11 satellites for hours: not enough for the fences, but
+    enough for home mode, from a fix well clear of the bands. Fewer than 8 never starts it."""
+    from geocollar_base import sim as simmod
+
+    anchor = protocol.HomeAnchor(protocol.AnchorKind.BEACON, "AA:BB:CC:01:02:03", -85)
+    for sats, home in ((10, True), (8, True), (7, False)):
+        sim = walker()
+        sim.update({"sats": sats})
+        sim.set_anchor(anchor, (40.0, -75.0))
+        for t in range(1000, 1000 + simmod.HOME_ENTER_S + 3):
+            sim.step(1.0, now=t)
+        assert sim.home is home, sats
+    # Within HOME_MARGIN_M of the bands, a poorer fix does not count.
+    edge = (39.9991 + 15 / 111_000, -75.0)  # 15 m inside the south line: 5 m clear of its 10 m of bands
+    sim = walker()
+    sim.update({"sats": 10, "lat": edge[0], "lon": edge[1], "noise_m": 0})
+    sim.set_anchor(anchor, edge)
+    for t in range(1000, 1000 + simmod.HOME_ENTER_S + 3):
+        sim.step(1.0, now=t)
+    assert sim.engine.state == S.INSIDE and not sim.home
+
+
 def test_too_few_satellites_in_the_simulator(tmp_path):
     """Fixes from fewer than 12 satellites are not used: no fence decision, the position stays the
     last good one, and the base hears "no GPS fix" once that is old. A dog that walks out under

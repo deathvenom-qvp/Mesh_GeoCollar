@@ -38,6 +38,10 @@ APP_NO_FIX_AGE = 0xFFFF
 MAX_GPS_INSIDE_S = 30  # the GPS interval inside the fences, 0..this (firmware kMaxGpsInsideS); 0 = always on
 DEFAULT_GPS_INSIDE_S = 3
 MIN_FIX_SATS = 12  # a GPS fix from fewer satellites is not a position (firmware kMinFixSats)
+# Home mode alone also takes a fix from HOME_MIN_SATS satellites as proof the dog is clear of the
+# bands, if it is HOME_MARGIN_M clear of them (firmware kHomeMinSats, kHomeMarginM).
+HOME_MIN_SATS = 8
+HOME_MARGIN_M = 10.0
 MIN_ANCHOR_RSSI = -100  # home anchor signal threshold limits, dBm (kMinAnchorRssi..kMaxAnchorRssi)
 MAX_ANCHOR_RSSI = -30
 

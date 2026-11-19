@@ -178,7 +178,10 @@ longer.
 - **When the GPS goes off.** The anchor must be heard at the threshold or stronger for 20 s,
   the collar's last fix must have shown the dog inside and clear of every band (and be at most
   10 minutes old, while the anchor has been heard), and the lost beacon must be off. New fences
-  also need a fresh fix first.
+  also need a fresh fix first. That fix may be one the fences ignore for having fewer than 12
+  satellites, from 8 or more, if it puts the dog at least 10 m clear of every band (0.19.14 on):
+  near the house a collar often sees 8 to 11 satellites for hours, and home mode would never
+  start. Beeps, vibrations and shocks still go by fixes from 12 or more only.
 - **While home.** The GPS is put to sleep, with Meshtastic's GPS interval at an hour, so it still
   takes about one fix an hour. If that fix is not inside and clear, home mode ends at once. The
   scan runs every 2 s. Reports say "home, GPS off" (status bit 7) and carry the last fix.

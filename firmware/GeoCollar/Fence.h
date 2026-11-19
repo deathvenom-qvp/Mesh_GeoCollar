@@ -28,6 +28,15 @@ constexpr uint32_t kVerifyStaleMs = 30000;
 /// and cannot notice the dog leaving.
 constexpr uint8_t kMinFixSats = 12;
 
+/// Home mode alone also takes a poorer fix as proof that the dog is inside, clear of the bands
+/// (FenceEngine::clearForHome): from at least kHomeMinSats satellites, with a usable PDOP, and
+/// at least kHomeMarginM clear of every band, so the error of such a fix cannot put a dog that is
+/// in a band or outside there. Near the house, where the anchor is, a collar often sees fewer
+/// than kMinFixSats satellites for hours, and home mode would never start. Fence decisions still
+/// take only fixes from kMinFixSats.
+constexpr uint8_t kHomeMinSats = 8;
+constexpr float kHomeMarginM = 10.0f;
+
 enum class ZoneKind : uint8_t {
     KeepIn = 0,  // the dog should stay inside this polygon
     KeepOut = 1, // the dog should stay out of this polygon (pond, road)
@@ -184,6 +193,11 @@ class FenceEngine
     /// Whether a fix is good enough to use at all: a position, PDOP no worse than maxPdopX100,
     /// and at least minSats satellites. The caller keeps a position only if it is.
     bool fixIsGood(const Fix &fix) const;
+
+    /// For home mode, a fix that fixIsGood() turns down for its satellites: whether it still
+    /// shows the dog inside and clear of every band, by kHomeMarginM or more. False with no
+    /// fences, and for a fix with fewer than kHomeMinSats satellites, no position or a poor PDOP.
+    bool clearForHome(const Fix &fix) const;
 
     /// Feed one GPS fix; returns what the collar should do now.
     ///

@@ -195,6 +195,13 @@ static void testStateMachine()
     d = e.onFix(fixAt(-20, 100, t += 1000, 150, 0));
     CHECK(d.fixRejected && !e.fixIsGood(fixAt(-20, 100, t, 150, 0)));
     CHECK(e.fixIsGood(fixAt(-20, 100, t, 150, 12)) && !e.fixIsGood(fixAt(-20, 100, t, 150, 11)));
+    // Home mode alone takes a fix from 8 satellites, only kHomeMarginM or more clear of every band
+    // (10 m of bands here), with a usable PDOP.
+    CHECK(kHomeMinSats == 8 && kHomeMarginM == 10.0f);
+    CHECK(e.clearForHome(fixAt(30, 100, t, 150, 8)) && !e.clearForHome(fixAt(30, 100, t, 150, 7)));
+    CHECK(!e.clearForHome(fixAt(30, 100, t, 900, 10)) && !e.clearForHome(fixAt(18, 100, t, 150, 10)));
+    CHECK(!e.clearForHome(fixAt(-20, 100, t, 150, 10)) && !e.clearForHome(Fix{0, 0, 150, 10, t}));
+    CHECK(!FenceEngine().clearForHome(fixAt(30, 100, t, 150, 10))); // no fences
 
     // Past the line: corrections stop straight away.
     d = e.onFix(fixAt(-5, 100, t += 1000));
@@ -1633,6 +1640,8 @@ struct WalkingCollar {
                 lastLon = f.lonI;
                 beacon.onFix(engine.state() != CollarState::NoFence && d.clearanceM < 0, now);
                 home.onFix(engine.state() == CollarState::Inside, now);
+            } else if (!engine.fixIsGood(f) && engine.state() == CollarState::Inside && engine.clearForHome(f)) {
+                home.onFix(true, now);
             }
             if (d.correction != Correction::None)
                 corrections++;
@@ -1789,6 +1798,43 @@ static void testZoneWalk()
         c.sats = 12;
         c.stay(20);
         CHECK(c.engine.state() == CollarState::Lost && c.lastLon != lon);
+    }
+
+    // Near the house a collar may see 8 to 11 satellites for hours. Such a fix is no position for
+    // the fences, but it is proof enough for home mode that the dog is well clear of the bands.
+    {
+        WalkingCollar c = fresh();
+        c.sats = 10;
+        c.stay(60);
+        CHECK(c.home.home() && c.gpsEvery() == kHomeGpsSecs && c.lastLat == 0);
+        // Out of the anchor's range and back: home again, from a 10-satellite fix.
+        c.walkTo(60, 85, 2);
+        c.stay(15 * 60); // longer than HomeWatch::kFreshMs: only a new fix can bring it home
+        CHECK(!c.home.home());
+        c.walkTo(100, 85, 2);
+        c.stay(60);
+        CHECK(c.home.home());
+        CHECK(c.path == "home, GPS off > GPS on > home, GPS off");
+    }
+    // Fewer than 8 satellites: still never home.
+    {
+        WalkingCollar c = fresh();
+        c.sats = 7;
+        c.stay(120);
+        CHECK(!c.home.home());
+    }
+    // An anchor close to the bands: a poorer fix within 10 m of them does not count, a good one does.
+    {
+        WalkingCollar c = fresh();
+        c.anchorNorth = 100;
+        c.anchorEast = 150; // 20 m from the east line: 7 m clear of its 13 m of bands
+        c.east = 150;
+        c.sats = 10;
+        c.stay(120);
+        CHECK(c.engine.state() == CollarState::Inside && !c.home.home());
+        c.sats = 12;
+        c.stay(60);
+        CHECK(c.home.home());
     }
 }
 

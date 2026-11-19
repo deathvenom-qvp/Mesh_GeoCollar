@@ -871,6 +871,8 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
             beacon_.onFix(engine_.state() != CollarState::NoFence && d.clearanceM < 0, fix.nowMs);
         if (used) // clear of every band, or not: home mode starts only from a clear fix
             home_.onFix(engine_.state() == CollarState::Inside, fix.nowMs);
+        else if (!good && engine_.state() == CollarState::Inside && engine_.clearForHome(fix))
+            home_.onFix(true, fix.nowMs); // too few satellites for the fences, but well clear of them
         // Past the line every correction stops at once, including one that is still playing.
         const CollarState st = engine_.state();
         if (autoCorrection_ && tx_.busy() && (st == CollarState::Outside || st == CollarState::Lost)) {

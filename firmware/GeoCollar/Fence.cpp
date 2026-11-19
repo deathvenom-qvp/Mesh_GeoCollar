@@ -218,6 +218,20 @@ bool FenceEngine::fixIsGood(const Fix &fix) const
     return true;
 }
 
+bool FenceEngine::clearForHome(const Fix &fix) const
+{
+    if (fences_.zoneCount == 0 || (fix.latI == 0 && fix.lonI == 0) || fix.sats < kHomeMinSats)
+        return false;
+    if (fix.pdopX100 != 0 && fix.pdopX100 > settings_.maxPdopX100)
+        return false;
+    for (size_t i = 0; i < fences_.zoneCount && i < kMaxZones; i++) {
+        const Zone &z = fences_.zones[i];
+        if (signedDistanceM(z, fix.latI, fix.lonI) - (float)bandWidthM(z) < kHomeMarginM)
+            return false;
+    }
+    return true;
+}
+
 bool FenceEngine::shockAllowed(uint32_t nowMs)
 {
     if (!settings_.shockEnabled || shocksThisBreach_ >= settings_.maxShocksPerBreach)

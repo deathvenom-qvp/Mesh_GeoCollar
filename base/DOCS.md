@@ -186,6 +186,9 @@ next to the house or with the collar upside down a fix often has 8 to 11 satelli
 fixes are ignored the collar cannot tell that the dog has left**, and a lost dog's position stops
 moving. The Sats column on the Log tab shows what each collar gets. Needs collar firmware 0.19.11
 or later; older collars use 5, and the base ignores the positions they send from fewer than 12.
+Home mode is the one exception: to turn the GPS off near the house, a collar also takes a fix
+from 8 to 11 satellites as proof that the dog is inside, if it puts the dog at least 10 m (33 ft)
+clear of every band (collar firmware 0.19.14 or later).
 
 ## When a collar has no GPS fix
 

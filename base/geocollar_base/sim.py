@@ -612,6 +612,14 @@ class SimCollar:
             # Too few satellites: the collar uses no fix at all. No fence decision, the position
             # stays the last good one, and the base hears "no GPS fix" once that one is old.
             self._run_beacon_tick(now)
+            # Home mode alone still takes it as proof the dog is well clear of the bands
+            # (firmware FenceEngine::clearForHome).
+            if (self.sats >= protocol.HOME_MIN_SATS and self.engine.zones
+                    and self.engine.state == protocol.CollarState.INSIDE):
+                n = self.noise_m
+                lat, lon = _move(self.lat, self.lon, self.rng.uniform(0, 360), abs(self.rng.gauss(0, n / 1.5)) if n else 0)
+                if room_from_anchor_m(self.engine.zones, lat, lon) >= protocol.HOME_MARGIN_M:
+                    self._last_clear_fix = now
             if self._good_fix is None:
                 self._good_fix = now  # where it was put down counts as a fix
             if not self._ignoring:
