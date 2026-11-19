@@ -21,6 +21,15 @@ constexpr uint32_t kVerifyMs = 1000;
 /// A first reading older than this is too old to be agreed with: the wait starts again.
 constexpr uint32_t kVerifyStaleMs = 30000;
 
+/// A GPS fix counts only if at least Settings::minSats satellites were used for it: fewer, and the
+/// fix is ignored entirely, as if there were none (no fence decision, no position sent, the base
+/// told "no fix" once the last good one is overdue). kMinFixSats until the base sets another
+/// number per collar (kMinSatsLow..kMinSatsHigh). Under trees or against a wall a fix may have
+/// fewer for minutes at a time, and in that time the collar corrects nothing and cannot notice the
+/// dog leaving: the higher the number, the more often that happens.
+constexpr uint8_t kMinFixSats = 12;
+constexpr uint8_t kMinSatsLow = 4, kMinSatsHigh = 24;
+
 enum class ZoneKind : uint8_t {
     KeepIn = 0,  // the dog should stay inside this polygon
     KeepOut = 1, // the dog should stay out of this polygon (pond, road)
@@ -102,7 +111,7 @@ struct Settings {
     uint8_t rearmFixes = 3;         // consecutive good fixes back inside before re-arming
     uint16_t rearmMarginM = 5;      // unused since bands: re-arming needs the dog clear of every band
     uint16_t maxPdopX100 = 500;     // ignore fixes worse than PDOP 5.0
-    uint8_t minSats = 5;
+    uint8_t minSats = kMinFixSats;  // ignore fixes from fewer satellites (or an unknown number)
     uint16_t correctionMs = 1000;   // how long each beep/vibrate/shock lasts
     // GPS pacing: fix often near the line, rarely deep inside, to save battery (gpsIntervalSecs).
     // The owner's GPS interval near the bands from the base (0.19.6 on, setGpsInsideSecs) is gpsFastSecs.
@@ -138,7 +147,7 @@ struct Fix {
     int32_t latI;
     int32_t lonI;
     uint16_t pdopX100; // 0 = unknown
-    uint8_t sats;      // 0 = unknown
+    uint8_t sats;      // satellites used; 0 = unknown, which is not enough (kMinFixSats)
     uint32_t nowMs;    // monotonic milliseconds
 };
 
@@ -172,6 +181,10 @@ class FenceEngine
     /// Manual override from the base: leave Lost and re-arm.
     void clearLost();
 
+    /// Whether a fix is good enough to use at all: a position, PDOP no worse than maxPdopX100,
+    /// and at least minSats satellites. The caller keeps a position only if it is.
+    bool fixIsGood(const Fix &fix) const;
+
     /// Feed one GPS fix; returns what the collar should do now.
     ///
     /// One reading alone never starts a correction. The first reading in a band (or in a more
@@ -185,7 +198,6 @@ class FenceEngine
 
   private:
     Decision evaluate(const Fix &fix);
-    bool fixIsGood(const Fix &fix) const;
     bool shockAllowed(uint32_t nowMs);
     /// Shock if allowed (enabled, under the per-breach and per-hour caps), otherwise vibrate.
     void correctHard(Decision &d, uint32_t nowMs);

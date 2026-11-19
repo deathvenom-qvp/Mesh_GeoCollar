@@ -73,6 +73,7 @@ def clearance_m(zones: list[protocol.Zone], lat: float, lon: float) -> float:
 HOME_ENTER_S = 20
 HOME_LEAVE_S = 7
 HOME_FRESH_S = 600  # the last fix must be this recent, and inside, clear of every band
+NO_FIX_AFTER_S = 45  # without a good fix this long the collar reports "no GPS fix" (firmware fixOverdueMs)
 # Roughly what each anchor reads at 1 m, dBm: a typical beacon, and a Meshtastic radio, which
 # transmits louder. Walls, the dog's body and the collar's angle move readings by 10 dB or more.
 ANCHOR_RSSI_AT_1M = {protocol.AnchorKind.BEACON: -59, protocol.AnchorKind.BASE_RADIO: -50}
@@ -382,7 +383,7 @@ def beacon_text(dog: str, owner: str, phone: str, lat: float | None = None, lon:
 
 class SimCollar:
     # Settings the page can change, with their limits.
-    LIMITS = {"speed_mps": (0.1, 15.0), "report_s": (1, 600), "noise_m": (0.0, 30.0)}
+    LIMITS = {"speed_mps": (0.1, 15.0), "report_s": (1, 600), "noise_m": (0.0, 30.0), "sats": (0, 40)}
 
     def __init__(self, node_id: str, settings: dict, rng: random.Random | None = None):
         self.node_id = node_id
@@ -393,6 +394,14 @@ class SimCollar:
         self.speed_mps = float(settings.get("speed_mps", 1.5))
         self.report_s = float(settings.get("report_s", 5))
         self.noise_m = float(settings.get("noise_m", 2))
+        # Satellites in each fix: under trees or indoors a real collar may see fewer than it needs
+        # (min_sats, which the base sets), and then it uses no fix at all.
+        self.sats = int(settings.get("sats", 16))
+        self.min_sats = protocol.MIN_FIX_SATS  # as the base sets it (config)
+        self._good_fix: float | None = None  # when the last fix good enough to use came (None: the start)
+        self._fix_sats = self.sats  # the satellites of that fix
+        self._reported_no_fix = False
+        self._ignoring = False  # fixes are being ignored for too few satellites
         self.target = settings.get("target")
         self.heading = self.rng.uniform(0, 360)
         self.battery = 100.0
@@ -426,7 +435,7 @@ class SimCollar:
             "lat": round(self.lat, 7), "lon": round(self.lon, 7), "mode": self.mode,
             "speed_mps": self.speed_mps, "report_s": self.report_s, "noise_m": self.noise_m,
             "target": self.target, "shock_enabled": self.engine.settings.shock_enabled,
-            "shock_level": self.engine.settings.shock_level,
+            "shock_level": self.engine.settings.shock_level, "sats": self.sats,
         }
 
     def update(self, changes: dict) -> None:
@@ -457,7 +466,7 @@ class SimCollar:
                 v = float(changes[key])
                 if not lo <= v <= hi:
                     raise ValueError(f"{key} must be {lo}..{hi}")
-                setattr(self, key, v)
+                setattr(self, key, int(v) if key == "sats" else v)
         if "shock_enabled" in changes:
             self.engine.settings.shock_enabled = bool(changes["shock_enabled"])
             self._report_now = True
@@ -471,6 +480,11 @@ class SimCollar:
         ])
         self.fence_version = version
         self.beacon.reset()
+        # Firmware HomeWatch::reset: new fences end home mode, and a fix must show the dog clear of
+        # them before it can start again.
+        self._last_clear_fix = -1e9
+        if self.home:
+            self._leave_home(time.time(), "new fences")
         self._event("fences", f"loaded fence version {version}")
         self._report_now = True
 
@@ -586,10 +600,29 @@ class SimCollar:
             if self._report_now or now - self._last_report >= self.report_s:
                 return self.report(now)
             return None
+        if self.sats < self.min_sats:
+            # Too few satellites: the collar uses no fix at all. No fence decision, the position
+            # stays the last good one, and the base hears "no GPS fix" once that one is old.
+            self._run_beacon_tick(now)
+            if self._good_fix is None:
+                self._good_fix = now  # where it was put down counts as a fix
+            if not self._ignoring:
+                self._ignoring = True
+                self._event("info", f"GPS fixes from {self.sats} satellites ignored ({self.min_sats} needed): "
+                                    "no fence decisions until a better one")
+            if now - self._good_fix > NO_FIX_AFTER_S and not self._reported_no_fix:
+                self._report_now = True
+            if self._report_now or now - self._last_report >= self.report_s:
+                return self.report(now, breach=self.engine.state == protocol.CollarState.LOST)
+            return None
         # A GPS fix with some noise, the way the real receiver jitters.
         n = self.noise_m
         lat, lon = _move(self.lat, self.lon, self.rng.uniform(0, 360), abs(self.rng.gauss(0, n / 1.5)) if n else 0)
         self._fix = (lat, lon)
+        if self._reported_no_fix:
+            self._report_now = True  # the fix is back
+        self._ignoring = False
+        self._good_fix, self._fix_sats = now, self.sats
         was_quiet = self.engine._quiet
         was_verifying = self.engine._verifying
         d = self.engine.on_fix(lat, lon, now)
@@ -610,6 +643,14 @@ class SimCollar:
         if d.send_status or d.send_breach or self._report_now or now - self._last_report >= self.report_s:
             return self.report(now, breach=d.send_breach or self.engine.state == protocol.CollarState.LOST)
         return None
+
+    def _run_beacon_tick(self, now: float) -> None:
+        """The beacon between fixes (firmware: LostBeacon::tick): it starts on time, fix or not."""
+        was = self.beacon.active
+        self.beacon.tick(now)
+        if self.beacon.active != was:
+            self._report_now = True
+            self._event("lost", "out for 90 s: lost beacon on")
 
     def _run_beacon(self, now: float) -> None:
         was = self.beacon.active
@@ -657,6 +698,8 @@ class SimCollar:
     def report(self, now: float, breach: bool = False) -> dict:
         self._last_report = now
         self._report_now = False
+        no_fix = not self.home and self._good_fix is not None and now - self._good_fix > NO_FIX_AFTER_S
+        self._reported_no_fix = no_fix
         c = self.clearance
         return {
             "msg_type": "BREACH" if breach else "STATUS",
@@ -666,13 +709,14 @@ class SimCollar:
             "lat": round(self._fix[0], 7),
             "lon": round(self._fix[1], 7),
             "pdop": 1.2,
-            "sats": 11,
+            "sats": self.sats if no_fix and self._ignoring else self._fix_sats,
             "clearance_m": 0 if c is None else int(max(-32768, min(32767, round(c)))),
             "corrections_enabled": self.engine.settings.corrections_enabled,
             "shock_enabled": self.engine.settings.shock_enabled,
             "beacon_active": self.beacon.active,
             "beacon_silenced": self.beacon.silenced,
             "home": self.home,
+            "no_fix": no_fix,
         }
 
     def public(self) -> dict:
@@ -725,6 +769,11 @@ class Simulator:
     def set_anchor(self, node_id: str, anchor: protocol.HomeAnchor | None, at: tuple[float, float] | None) -> None:
         with self.lock:
             self.collars[node_id].set_anchor(anchor, at)
+
+    def set_min_sats(self, node_id: str, n: int) -> None:
+        """The satellites a fix needs, as the base sends it to a real collar."""
+        with self.lock:
+            self.collars[node_id].min_sats = int(n)
 
     def report_now(self, node_id: str) -> None:
         """Send a status straight away, as the collar does after a command or new fences."""

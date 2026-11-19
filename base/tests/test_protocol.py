@@ -193,6 +193,18 @@ def test_config_gps_inside_matches_the_firmware():
     assert not p.decode_config_gps_everywhere(data)
 
 
+def test_config_min_sats_matches_the_firmware():
+    # Golden vector shared with firmware/test/test_main.cpp (testProtocol, the satellites a fix needs).
+    data = p.encode_config(0, 77, p.HomeAnchor(p.AnchorKind.BASE_RADIO, "", -75), 3, False, 12)
+    assert data.hex() == "020700004d000000" "02000000000000b5" "03" "0c"
+    assert p.decode_config_gps_inside(data) == 3 and p.MIN_FIX_SATS == 12
+    for bad in (p.MIN_SATS_LOW - 1, p.MIN_SATS_HIGH + 1):
+        with pytest.raises(ValueError):
+            p.encode_config(0, 77, p.HomeAnchor(), 3, False, bad)
+    with pytest.raises(ValueError):
+        p.encode_config(0, 77, p.HomeAnchor(), None, False, 12)  # it goes after the GPS interval
+
+
 def test_status_home_flag():
     s = p.Status(p.MsgType.STATUS, 3, p.CollarState.INSIDE, 80, 40.0, -75.0, 1.0, 9, 40, True, False, home=True)
     raw = p.encode_status(s)

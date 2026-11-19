@@ -73,8 +73,9 @@ class FakeLink:
 
     # The sequence numbers on Config and Owner messages are kept apart from `sent` (they come
     # from the clock), in config_seqs and owner_seqs.
-    def send_config(self, node_id, report_s, seq=0, anchor=None, gps_inside_s=None, gps_everywhere=False):
+    def send_config(self, node_id, report_s, seq=0, anchor=None, gps_inside_s=None, gps_everywhere=False, min_sats=None):
         self.gps_everywhere = getattr(self, "gps_everywhere", []) + [gps_everywhere]
+        self.min_sats = getattr(self, "min_sats", []) + [min_sats]
         self.sent.append((node_id, protocol.encode_config(report_s)))
         self.config_seqs = getattr(self, "config_seqs", []) + [seq]
         self.anchors = getattr(self, "anchors", []) + [anchor]
@@ -400,6 +401,13 @@ def test_rename_and_report_interval(tmp_path):
     r = client.patch("/api/collars/!a1b2c3d4", json={"gps_everywhere": False}).json()
     assert r["gps_everywhere"] is False and link.gps_everywhere[-1] is False
     assert client.patch("/api/collars/!a1b2c3d4", json={"name": " "}).status_code == 400
+    # The satellites a GPS fix needs: 12 until the owner picks another, 4 to 24.
+    assert client.get("/api/collars").json()["!a1b2c3d4"]["min_sats"] == 12 and link.min_sats[-1] == 12
+    for bad in (3, 25):
+        assert client.patch("/api/collars/!a1b2c3d4", json={"min_sats": bad}).status_code == 400
+    r = client.patch("/api/collars/!a1b2c3d4", json={"min_sats": 8}).json()
+    assert r["min_sats"] == 8 and r["config_sent"] and link.min_sats[-1] == 8
+    client.patch("/api/collars/!a1b2c3d4", json={"min_sats": 12})
 
     # Not sent while the radio is away: it goes with the collar's next report.
     link.connected = False
@@ -409,7 +417,7 @@ def test_rename_and_report_interval(tmp_path):
     link.sent.clear()
     client.app.state.on_status("!a1b2c3d4", {"state": "INSIDE", "pki": True, "sender_key": "a2V5"})
     assert ("!a1b2c3d4", protocol.encode_config(60)) in link.sent
-    assert client.get("/api/collars").json()["!a1b2c3d4"]["config_sent"] == [60, 0, "", -75, 0, False]
+    assert client.get("/api/collars").json()["!a1b2c3d4"]["config_sent"] == [60, 0, "", -75, 0, False, 12]
 
 
 def test_a_collar_that_does_not_trust_the_base_is_not_sent_anything(tmp_path):
@@ -636,7 +644,7 @@ def test_collar_log_and_clearing_the_path(tmp_path):
 
     def report(node_id, **over):
         status = {"state": "INSIDE", "fence_version": 0, "battery_pct": 88, "lat": 40.001, "lon": -75.001, "pdop": 1.2,
-                  "sats": 11, "clearance_m": 14, "no_fix": False, "pki": True, "sender_key": "a2V5" + node_id[1:3]}
+                  "sats": 14, "clearance_m": 14, "no_fix": False, "pki": True, "sender_key": "a2V5" + node_id[1:3]}
         app.state.on_status(node_id, {**status, **over})
 
     t0 = time.time()
@@ -648,7 +656,7 @@ def test_collar_log_and_clearing_the_path(tmp_path):
     log = client.get("/api/collars/!a1b2c3d4/log").json()
     assert log["total"] == 3 and [e.get("lat") for e in log["entries"]] == [40.001, 40.002, None]
     first, second, third = log["entries"]
-    assert first == {"t": first["t"], "state": "INSIDE", "bat": 88, "sats": 11, "lat": 40.001, "lon": -75.001}
+    assert first == {"t": first["t"], "state": "INSIDE", "bat": 88, "sats": 14, "lat": 40.001, "lon": -75.001}
     assert second["state"] == "WARNING" and second["bat"] == 87 and t0 - 1 <= first["t"] <= second["t"] <= time.time() + 1
     assert third == {"t": third["t"], "state": "NO_FENCE", "bat": 88, "sats": 0}
     assert client.get("/api/collars/!0000beef/log").json()["total"] == 1
@@ -1062,3 +1070,27 @@ def test_saving_home_mode_rereads_home_assistants_home(tmp_path, monkeypatch):
     client.put("/api/home-anchor", json={**body, "lat": 40.001, "lon": -74.999})
     assert client.get("/api/home-anchor").json()["position"] == [40.001, -74.999]
     assert sim_collar.anchor_at == (40.001, -74.999) and len(asked) == n
+
+
+def test_log_and_trail_only_where_the_dog_was(tmp_path):
+    """A report from a collar at home (GPS off) repeats its last fix, and one whose fix had fewer
+    satellites than it needs is no fix at all: neither goes on the trail or in the log as a position."""
+    client, _ = make(tmp_path)
+    app = client.app
+    client.post("/api/collars", json={"node_id": "!a1b2c3d4", "name": "Rex"})
+    base = {"state": "INSIDE", "fence_version": 0, "battery_pct": 88, "lat": 40.001, "lon": -75.001, "pdop": 1.2,
+            "sats": 14, "clearance_m": 40, "no_fix": False, "pki": True, "sender_key": "a2V5a1"}
+    app.state.on_status("!a1b2c3d4", base)
+    app.state.on_status("!a1b2c3d4", {**base, "home": True})
+    app.state.on_status("!a1b2c3d4", {**base, "lat": 40.003, "lon": -75.003, "sats": 9})
+    first, home, weak = client.get("/api/collars/!a1b2c3d4/log").json()["entries"]
+    assert first["lat"] == 40.001 and "home" not in first
+    assert home["home"] is True and "lat" not in home
+    assert "lat" not in weak and weak["sats"] == 9
+    c = client.get("/api/collars").json()["!a1b2c3d4"]
+    assert len(c["track"]) == 1
+    assert c["status"]["no_fix"] and c["status"]["few_sats"] and c["status"]["lat"] == 40.001
+    # The owner lowered the number for this collar: 9 counts now.
+    client.patch("/api/collars/!a1b2c3d4", json={"min_sats": 8})
+    app.state.on_status("!a1b2c3d4", {**base, "lat": 40.003, "lon": -75.003, "sats": 9})
+    assert client.get("/api/collars").json()["!a1b2c3d4"]["status"]["lat"] == 40.003

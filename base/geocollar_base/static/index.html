@@ -93,6 +93,7 @@
   input, select { width: 100%; padding: 5px 7px; border: 1px solid var(--line); border-radius: 7px; background: var(--bg); }
   input:focus, select:focus, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
   label.field { display: block; font-size: 12px; color: var(--muted); }
+  label.field[hidden], #anchorMore[hidden] { display: none; }
 
   .collar { border: 1px solid var(--line); border-radius: 9px; padding: 9px 11px; margin: 8px 0; cursor: pointer; background: var(--bg); }
   .collar:hover { border-color: var(--muted); }
@@ -345,6 +346,9 @@
             <div class="muted" style="font-size:12px">While the dog is inside the fence, within 35 m of the bands and away from the home mode anchor. Further in it slows down: from 35 to 100 m up to every 2 min, beyond 100 m every 3 min. Shorter catches a running dog sooner; up to 10 s keeps the GPS on all the time, which uses the most battery. Lost mode and home mode keep their own pace.</div>
             <label class="row" style="gap:6px;font-size:13px"><input type="checkbox" id="gpsEverywhere"> Use this everywhere inside the fence, however far from the bands</label>
             <div class="muted" style="font-size:12px">No slowing down deep inside a big yard: more battery. Never applies once the dog is past a line or lost.</div>
+            <label class="field">Satellites a GPS fix needs
+              <input type="number" id="minSats" min="4" max="24" step="1" style="width:5em"></label>
+            <div class="muted" style="font-size:12px">A fix from fewer is ignored: no position, and no beep, vibration, shock or lost alert from it. 12 is strict: under trees or by the house a fix often has 8 to 11, and while fixes are ignored the collar can't tell the dog has left. If the Sats column on the Log tab mostly shows fewer, lower this. Needs collar firmware 0.19.11 or later.</div>
           </form>
           <div class="muted" id="selId"></div>
         </div>
@@ -449,6 +453,7 @@
           <input type="range" id="simSpeed" min="0.5" max="12" step="0.5"></label>
         <label class="field">Report every (s) <input type="number" id="simReport" min="1" max="600" step="1"></label>
         <label class="field">GPS error (<span class="unit">m</span>) <input type="number" id="simNoise" min="0" max="30" step="0.5"></label>
+        <label class="field" title="Fewer than the collar needs (12 unless changed): its fixes are ignored, as under trees">Satellites <input type="number" id="simSats" min="0" max="40" step="1"></label>
       </div>
       <div class="muted" style="margin-top:6px">A real collar reports when its state changes, every 10 minutes, and every 30 s when lost. The simulator reports more often so you can watch it.</div>
       <h2 style="margin-top:12px">What the collar did</h2>
@@ -783,6 +788,7 @@ const collarSay = t => { $('collarMsg').textContent = t; };
 const REPORT_CHOICES = [30, 60, 120, 300, 600, 900, 1800, 3600];
 const reportLabel = s => s < 60 ? `${s} s` : s < 3600 ? `${s / 60} min` : `${s / 3600} h`;
 const GPS_INSIDE_DEFAULT = 3;
+const MIN_SATS_DEFAULT = 12; // satellites a GPS fix needs until the owner sets another (protocol.MIN_FIX_SATS)
 const gpsInsideLabel = s => s === 0 ? 'second (GPS always on)' : `${s} s`;
 const ago = secs => secs < 90 ? `${Math.round(secs)} s ago` : secs < 5400 ? `${Math.round(secs / 60)} min ago`
   : secs < 172800 ? `${Math.round(secs / 3600)} h ago` : `${Math.round(secs / 86400)} days ago`;
@@ -1316,6 +1322,7 @@ function renderCollars() {
       if (s.battery_pct != null && s.battery_pct !== 255) bits.push(`battery ${s.battery_pct}%`);
       if (s.clearance_m != null && c.fence_version && !s.no_fix && !s.home) bits.push(`${len(Math.abs(s.clearance_m))} ${s.clearance_m < 0 ? 'past' : 'from'} the line`);
       if (s.home) bits.push('home, GPS off');
+      else if (s.few_sats) bits.push(`only ${s.sats} satellites: fix ignored`);
       else if (s.no_fix) bits.push('no GPS fix');
       if (s.beacon_active) bits.unshift('asking for help');
     }
@@ -1340,7 +1347,7 @@ function renderDogs() {
       html: `<div class="dog st-${s.state}${stale ? ' stale' : ''}" style="--c:${css({ INSIDE: '--ok', WARNING: '--warn', OUTSIDE: '--bad', LOST: '--bad' }[s.state] || '--idle')}"><div class="pin"></div><div class="label"></div></div>` });
     const m = L.marker([s.lat, s.lon], { icon, pmIgnore: true, snapIgnore: true, zIndexOffset: id === selected ? 1000 : 500, title: c.name, keyboard: false });
     m.on('add', () => { const lab = m.getElement() && m.getElement().querySelector('.label'); if (lab) lab.textContent = c.name; });
-    m.bindTooltip(`${stateLabel(s.state)} · ${ago(now - s.received)}${s.home ? ' · home, GPS off' : s.no_fix ? ' · no GPS fix, last known position' : s.sats ? ` · ${s.sats} sats` : ''}`, { direction: 'bottom', offset: [0, 12] });
+    m.bindTooltip(`${stateLabel(s.state)} · ${ago(now - s.received)}${s.home ? ' · home, GPS off' : s.few_sats ? ` · fix from ${s.sats} satellites ignored, last good position` : s.no_fix ? ' · no GPS fix, last known position' : s.sats ? ` · ${s.sats} sats` : ''}`, { direction: 'bottom', offset: [0, 12] });
     m.on('click', e => { L.DomEvent.stopPropagation(e); select(id); });
     m.addTo(dogLayer);
     if (id === selected && c.sim && c.sim.mode === 'goto' && c.sim.target) {
@@ -1371,6 +1378,7 @@ function renderSelected() {
     if (s.battery_pct != null && s.battery_pct !== 255) rows.push(['Battery', `${s.battery_pct}%`]);
     // Collar firmware 0.16 on says when it has no current fix; its position is then the last one it knew.
     if (s.home) rows.push(['GPS', 'Off: home, near the anchor. The map shows the last fix']);
+    else if (s.few_sats) rows.push(['GPS', `Fix from only ${s.sats} satellites, ${c.min_sats ?? MIN_SATS_DEFAULT} needed: ignored. The map shows the last good one`]);
     else if (s.no_fix) rows.push(['GPS', s.lat || s.lon ? 'No fix now: the map shows where it last had one' : 'No fix yet']);
     else if (s.sats) rows.push(['GPS', `${s.sats} sats, PDOP ${s.pdop}`]);
     rows.push(['Corrections', s.corrections_enabled ? 'On' : 'Off']);
@@ -1389,6 +1397,8 @@ function renderSelected() {
   if (!c.sim) rows.push(['GPS inside the fence', (gpsIn === 0 ? 'Always on' : `Every ${gpsIn} s`)
     + (gpsAll ? ', everywhere' : ' within 35 m of the bands')
     + (sent[4] === gpsIn && !!sent[5] === gpsAll ? '' : ' (not sent yet)')]);
+  const minSats = c.min_sats ?? MIN_SATS_DEFAULT;
+  if (!c.sim || minSats !== MIN_SATS_DEFAULT) rows.push(['GPS fix needs', `${minSats} satellites` + (c.sim || sent[6] === minSats ? '' : ' (not sent yet)')]);
   if (!c.sim) rows.push(['Locked to this base', c.locked ? 'Yes' : 'Not set up from this base']);
   if (c.ble_pin) rows.push(['Bluetooth PIN', String(c.ble_pin)]);
   // update_mode: left by a Wi-Fi update that an older version of this app started and never finished
@@ -2036,6 +2046,7 @@ $('renameBtn').onclick = () => {
   $('gpsInside').value = c.gps_inside_s ?? GPS_INSIDE_DEFAULT;
   showGpsInside();
   $('gpsEverywhere').checked = !!c.gps_everywhere;
+  $('minSats').value = c.min_sats ?? MIN_SATS_DEFAULT;
   $('selNameRow').hidden = true; $('renameForm').hidden = false;
   $('renameInput').focus();
 };
@@ -2048,11 +2059,13 @@ $('renameForm').onsubmit = async e => {
   const report_s = REPORT_CHOICES[+$('reportRate').value];
   const gps_inside_s = +$('gpsInside').value;
   const gps_everywhere = $('gpsEverywhere').checked;
+  const min_sats = Math.round(+$('minSats').value);
+  if (!(min_sats >= 4 && min_sats <= 24)) { say('A GPS fix needs 4 to 24 satellites.'); return; }
   try {
-    const r = await api(`collars/${encodeURIComponent(selected)}`, { method: 'PATCH', body: JSON.stringify({ name, report_s, gps_inside_s, gps_everywhere }) });
+    const r = await api(`collars/${encodeURIComponent(selected)}`, { method: 'PATCH', body: JSON.stringify({ name, report_s, gps_inside_s, gps_everywhere, min_sats }) });
     const pending = !r.owner_sent || r.config_sent === false;
     say(`Saved ${r.name}, reporting every ${reportLabel(report_s)}, GPS inside the fence every ${gpsInsideLabel(gps_inside_s)}`
-      + (gps_everywhere ? ' everywhere inside.' : ' near the bands.')
+      + (gps_everywhere ? ' everywhere inside' : ' near the bands') + `, fixes from ${min_sats} satellites or more.`
       + (pending ? ' The collar gets the changes when it next reports.' : ''));
     endRename();
   } catch (err) { say(err.message); }
@@ -2070,7 +2083,7 @@ function renderSim() {
   if (!sim) return;
   for (const b of $('simMode').children) b.setAttribute('aria-pressed', String(b.dataset.mode === sim.mode));
   const set = (id, v) => { if (document.activeElement !== $(id)) $(id).value = v; };
-  set('simSpeed', sim.speed_mps); set('simReport', sim.report_s); set('simNoise', Math.round(toUnit(sim.noise_m) * 2) / 2);
+  set('simSpeed', sim.speed_mps); set('simReport', sim.report_s); set('simSats', sim.sats ?? 16); set('simNoise', Math.round(toUnit(sim.noise_m) * 2) / 2);
   $('simNoise').max = Math.round(toUnit(30));
   $('simSpeedVal').textContent = `${speedText($('simSpeed').value)} (${speedName(+$('simSpeed').value)})`;
   const fmt = t => new Date(t * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' });
@@ -2130,6 +2143,7 @@ $('simTarget').onclick = () => startPick('target');
 $('simSpeed').oninput = () => { $('simSpeedVal').textContent = `${speedText($('simSpeed').value)} (${speedName(+$('simSpeed').value)})`; };
 $('simSpeed').onchange = () => simUpdate({ speed_mps: +$('simSpeed').value });
 $('simReport').onchange = () => simUpdate({ report_s: +$('simReport').value });
+$('simSats').onchange = () => simUpdate({ sats: Math.max(0, Math.min(40, Math.round(+$('simSats').value))) });
 $('simNoise').onchange = () => simUpdate({ noise_m: Math.min(30, Math.round(fromUnit(+$('simNoise').value) * 10) / 10) });
 
 // ---------------------------------------------------------------------------------------------
@@ -3286,8 +3300,8 @@ function renderLog() {
     if (logDay(e.t) !== day) { day = logDay(e.t); rows.push(el('tr', { class: 'day' }, el('th', { colspan: 5, scope: 'colgroup' }, day))); }
     rows.push(el('tr', { class: (hasPos(e) ? 'pt' : 'nofix') + (e.k === logPicked ? ' picked' : ''), 'data-k': e.k },
       el('td', {}, logTime(e.t)),
-      el('td', {}, hasPos(e) ? logPos(e) : 'No GPS fix'),
-      el('td', {}, el('span', { class: `dot st-${e.state || 'NONE'}` }), stateLabel(e.state)),
+      el('td', {}, hasPos(e) ? logPos(e) : e.home ? 'Home, GPS off' : e.sats ? `Fix ignored (${e.sats} satellites)` : 'No GPS fix'),
+      el('td', {}, el('span', { class: `dot st-${e.state || 'NONE'}` }), stateLabel(e.state) + (e.home ? ', home' : '')),
       el('td', {}, logBat(e)),
       el('td', {}, e.sats != null ? String(e.sats) : '')));
   }

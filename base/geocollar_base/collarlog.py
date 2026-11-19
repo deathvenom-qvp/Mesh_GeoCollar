@@ -7,7 +7,9 @@ instead. A file keeps the newest KEEP reports; once it has grown a quarter past 
 are dropped.
 
 An entry: {"t": seconds since 1970, "lat": ..., "lon": ..., "state": "INSIDE", "bat": percent,
-"sats": satellites}. lat and lon are left out when the collar had no GPS fix at that moment.
+"sats": satellites, "home": true}. lat and lon are left out when the collar had no GPS fix at that
+moment (none at all, one from fewer than 12 satellites, or home with its GPS off); "home" is there
+only while the collar was home.
 """
 
 from __future__ import annotations

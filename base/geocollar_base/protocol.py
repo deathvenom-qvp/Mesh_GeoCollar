@@ -37,6 +37,8 @@ APP_TAG_LEN = 8
 APP_NO_FIX_AGE = 0xFFFF
 MAX_GPS_INSIDE_S = 30  # the GPS interval inside the fences, 0..this (firmware kMaxGpsInsideS); 0 = always on
 DEFAULT_GPS_INSIDE_S = 3
+MIN_FIX_SATS = 12  # a GPS fix from fewer satellites is not a position, unless the owner sets another (firmware kMinFixSats)
+MIN_SATS_LOW, MIN_SATS_HIGH = 4, 24  # the satellites a fix needs, as the owner may set it (kMinSatsLow..kMinSatsHigh)
 MIN_ANCHOR_RSSI = -100  # home anchor signal threshold limits, dBm (kMinAnchorRssi..kMaxAnchorRssi)
 MAX_ANCHOR_RSSI = -30
 
@@ -244,7 +246,7 @@ GPS_SAME_EVERYWHERE = 0x80  # on the GPS interval byte: that interval everywhere
 
 
 def encode_config(report_s: int, seq: int = 0, anchor: HomeAnchor | None = None,
-                  gps_inside_s: int | None = None, gps_everywhere: bool = False) -> bytes:
+                  gps_inside_s: int | None = None, gps_everywhere: bool = False, min_sats: int | None = None) -> bytes:
     """How often the collar reports, in seconds (MIN_REPORT_S..MAX_REPORT_S, or 0 for the
     firmware's default). While lost it reports at least every 30 s whatever this says. Collar
     firmware before 0.15 ignores it.
@@ -259,7 +261,15 @@ def encode_config(report_s: int, seq: int = 0, anchor: HomeAnchor | None = None,
     35 m of the bands and not home (0..MAX_GPS_INSIDE_S, 0: the GPS always on), firmware 0.19.6
     on; older firmware ignores it and paces its GPS itself. gps_everywhere: that interval wherever
     the dog is inside, whatever the distance to the bands (never once it is past a line or lost). It goes after the anchor, so it needs one (kind NONE will
-    do, which leaves home mode off)."""
+    do, which leaves home mode off).
+
+    min_sats is how many satellites a GPS fix needs before the collar uses it (MIN_SATS_LOW..
+    MIN_SATS_HIGH), firmware 0.19.11 on; older firmware ignores it. It goes after the GPS interval."""
+    if min_sats is not None:
+        if not MIN_SATS_LOW <= min_sats <= MIN_SATS_HIGH:
+            raise ValueError(f"the satellites a fix needs must be {MIN_SATS_LOW}..{MIN_SATS_HIGH}")
+        if gps_inside_s is None:
+            raise ValueError("the satellites a fix needs go after the GPS interval inside the fences")
     if gps_inside_s is not None:
         if not 0 <= gps_inside_s <= MAX_GPS_INSIDE_S:
             raise ValueError(f"the GPS interval inside the fences must be 0..{MAX_GPS_INSIDE_S} s")
@@ -280,6 +290,8 @@ def encode_config(report_s: int, seq: int = 0, anchor: HomeAnchor | None = None,
         out += bytes([AnchorKind(anchor.kind)]) + addr + struct.pack("<b", anchor.rssi)
         if gps_inside_s is not None:
             out += bytes([gps_inside_s | (GPS_SAME_EVERYWHERE if gps_everywhere else 0)])
+            if min_sats is not None:
+                out += bytes([min_sats])
     return out
 
 

@@ -73,9 +73,10 @@ constexpr uint8_t kHomeFormat = 1;
 // HomeWatch::kLeaveMs), every 5 s while away. In 0.625 ms units.
 constexpr uint16_t kScanWindow = 160, kScanHomeItvl = 3200, kScanAwayItvl = 8000;
 constexpr uint32_t kStateMagic = 0x47434F4C; // "GCOL"
-constexpr uint16_t kStateFormat = 10; // 2: GPS pacing; 3: per-zone bands; 4: pulse intervals; 5: owner; 6: command seq;
+constexpr uint16_t kStateFormat = 11; // 2: GPS pacing; 3: per-zone bands; 4: pulse intervals; 5: owner; 6: command seq;
                                       // 7: report interval; 8: owner and config sequence numbers, owner's GPS interval;
-                                      // 9: companion app keys; 10: GPS interval everywhere inside
+                                      // 9: companion app keys; 10: GPS interval everywhere inside;
+                                      // 11: Settings::minSats is the base's (before: 5, now kMinFixSats)
 constexpr uint32_t kBeaconRefreshMs = 10 * 1000; // re-apply the beacon advertisement this often
 // With a companion app linked, the beacon's quiet half still advertises the collar's ordinary
 // name this often (2 s, in 0.625 ms units), so the owner's phone can connect at any moment.
@@ -658,6 +659,11 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
                              c.gpsInsideS ? "" : " (always on)",
                              gpsSameEverywhere_ ? "everywhere inside" : "within 35 m of the bands");
                 }
+                if (c.hasMinSats && c.minSats != engine_.settings().minSats) {
+                    engine_.settings().minSats = c.minSats;
+                    save = true;
+                    LOG_INFO("GeoCollar: a GPS fix needs %u satellites", (unsigned)c.minSats);
+                }
                 LOG_INFO("GeoCollar: report every %u s", (unsigned)(reportS_ ? reportS_ : GEOCOLLAR_STATUS_INTERVAL_MS / 1000));
             }
         } else if (type == proto::MsgType::AppKeys) {
@@ -834,8 +840,23 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
             return;
         fixPending_ = false;
         const Fix fix = pendingFix_;
-        lastFix_ = fix;
-        fixWatch_.onFix(fix.nowMs); // before any report below, so that it says the position is current
+        // Only a fix good enough to use (kMinFixSats satellites or more, a usable PDOP) is a position:
+        // a poorer one is not sent, not shown and does not count as a fix, so the base hears "no GPS
+        // fix" once the last good one is overdue.
+        const bool good = engine_.fixIsGood(fix);
+        if (good) {
+            lastFix_ = fix;
+            fixWatch_.onFix(fix.nowMs); // before any report below, so that it says the position is current
+            ignoredSats_ = 0;
+        } else {
+            // For the reports: why there is no fix (0: some other reason, or the GPS did not say).
+            ignoredSats_ = fix.sats < engine_.settings().minSats ? fix.sats : 0;
+        }
+        if (!good && fix.sats < engine_.settings().minSats && !loggedFewSats_) {
+            LOG_INFO("GeoCollar: GPS fix from %u satellites ignored, %u needed", (unsigned)fix.sats,
+                     (unsigned)engine_.settings().minSats);
+        }
+        loggedFewSats_ = !good; // logged once per run of poor fixes
 
         const bool savedEnable = engine_.settings().correctionsEnabled;
         if (hardwareDisabled())
@@ -847,10 +868,11 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
         verifying_ = d.verify;
         verifyAtMs_ = d.verifyAtMs;
 
+        const bool used = good && !d.fixRejected;
         lastClearance_ = d.clearanceM; // 0 for a fix too poor to use, which also makes the GPS fix often
-        if (!d.fixRejected)
+        if (used)
             beacon_.onFix(engine_.state() != CollarState::NoFence && d.clearanceM < 0, fix.nowMs);
-        if (!d.fixRejected) // clear of every band, or not: home mode starts only from a clear fix
+        if (used) // clear of every band, or not: home mode starts only from a clear fix
             home_.onFix(engine_.state() == CollarState::Inside, fix.nowMs);
         // Past the line every correction stops at once, including one that is still playing.
         const CollarState st = engine_.state();
@@ -864,13 +886,13 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
             sendStatus(proto::MsgType::Breach);
         else if (d.sendStatus)
             sendStatus(proto::MsgType::Status);
-        else if (fixForBase_ && !d.fixRejected) {
+        else if (fixForBase_ && used) {
             // The base answered a lost collar again (see runLink): the first good fix since goes to
             // it now, so the map shows where the dog is without waiting for the next report.
             LOG_INFO("GeoCollar: fresh position for the base");
             sendStatus(statusType());
         }
-        if (!d.fixRejected)
+        if (used)
             fixForBase_ = false;
     }
 
@@ -1490,7 +1512,9 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
         s.latI = lastFix_.latI;
         s.lonI = lastFix_.lonI;
         s.pdopX100 = lastFix_.pdopX100;
-        s.sats = lastFix_.sats;
+        // With no current fix because the GPS's fixes have too few satellites, the report says how
+        // many the last one had, so the base can tell the owner why.
+        s.sats = fixWatch_.noFix() && ignoredSats_ ? ignoredSats_ : lastFix_.sats;
         const float c = lastClearance_;
         s.clearanceM = c > 32767 ? 32767 : (c < -32768 ? -32768 : (int16_t)c);
         s.flags = (engine_.settings().correctionsEnabled ? proto::kFlagCorrections : 0) |
@@ -1595,6 +1619,8 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
         f.close();
         if (ok && proto::decodeFenceSet(blob_, len16, version, scratch_)) {
             engine_.setFences(scratch_);
+            if (format < 11)
+                settings.minSats = kMinFixSats; // 5 until 0.19.11, never set by the base
             sanitizeSettings(settings);
             engine_.settings() = settings;
             baseNode_ = base;
@@ -1662,6 +1688,8 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
     bool powerRestart_ = false; // and Bluetooth needs a restart to come back
     bool autoCorrection_ = false; // the correction playing came from the fence, not from the owner
     bool fixForBase_ = false;     // lost, and the base answered again: send it the next good fix at once
+    bool loggedFewSats_ = false;  // the last fix was too poor to use, and that has been logged
+    uint8_t ignoredSats_ = 0;     // the satellites of the newest fix ignored for too few (0: the newest was used)
     uint32_t ownerGpsSecs_ = 0;   // the owner's own GPS interval, put back when the fences do not pace it
     bool ownerGpsKnown_ = false;  // read from the state file, or recorded on the first pass
     uint32_t lastPacedSecs_ = UINT32_MAX; // nothing set yet: the first pass records the owner's value

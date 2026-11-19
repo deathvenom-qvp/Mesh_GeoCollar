@@ -36,7 +36,7 @@ from . import radio
 from .mesh import MeshLink
 from . import sim as simmod
 from .sim import Simulator
-from .store import Store
+from .store import Store, fresh_position
 
 log = logging.getLogger(__name__)
 STATIC = Path(__file__).parent / "static"
@@ -71,6 +71,7 @@ class CollarPatch(BaseModel):
     report_s: int | None = None  # how often the collar reports, seconds
     gps_inside_s: int | None = None  # GPS fix interval inside the fences, seconds (0: always on)
     gps_everywhere: bool | None = None  # that interval wherever the dog is inside, not only near the bands
+    min_sats: int | None = None  # satellites a GPS fix needs before the collar uses it
 
 
 class ContactIn(BaseModel):
@@ -417,13 +418,17 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
         v = c.get("gps_inside_s")
         return protocol.DEFAULT_GPS_INSIDE_S if v is None else int(v)
 
+    def min_sats_for(c: dict) -> int:
+        """How many satellites a GPS fix needs before the collar uses it: the owner's choice, else 12."""
+        return store.min_sats(c)
+
     def config_for(node_id: str):
         """What the collar should have been sent: its report interval, the home anchor (kind NONE
         until the owner turns home mode on) and its GPS interval inside the fences."""
         c = store.collar(node_id) or {}
         anchor = home_anchor() or protocol.HomeAnchor()
         return [c.get("report_s") or 0, int(anchor.kind), anchor.address, anchor.rssi, gps_inside_for(c),
-                bool(c.get("gps_everywhere"))]
+                bool(c.get("gps_everywhere")), min_sats_for(c)]
 
     def push_config(node_id: str) -> bool:
         """The collar's report interval, if the owner set one, the home anchor and its GPS interval
@@ -437,10 +442,12 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
             if report_s:
                 sim.update(node_id, {"report_s": min(report_s, 600)})
             sim.set_anchor(node_id, anchor, anchor_position())
+            sim.set_min_sats(node_id, min_sats_for(c))
         elif link.connected:
             seq = store.next_command_seq()  # always numbered: firmware 0.15 skips the number
             try:
-                link.send_config(node_id, report_s, seq, anchor, gps_inside_for(c), bool(c.get("gps_everywhere")))
+                link.send_config(node_id, report_s, seq, anchor, gps_inside_for(c), bool(c.get("gps_everywhere")),
+                                 min_sats_for(c))
             except Exception as e:  # noqa: BLE001 - retried on the collar's next report
                 log.warning("could not send the collar settings to %s: %s", node_id, e)
                 return False
@@ -498,6 +505,7 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
         c = dict(c)
         c["gps_inside_s"] = gps_inside_for(c)
         c["gps_everywhere"] = bool(c.get("gps_everywhere"))
+        c["min_sats"] = min_sats_for(c)
         if node_id:
             c["apps_synced"] = apps_synced(node_id, c)
             c["app_keys"] = len(app_keys_for(node_id, c))
@@ -554,6 +562,17 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
             store.set_collar_info(node_id, "apps_acked", ack["seq"])
             store.set_collar_info(node_id, "apps_sent", None)
 
+    def log_entry(recorded: dict) -> dict:
+        """A report for the log: the position only when it was where the dog was at that moment
+        (a current fix from enough satellites, not home with the GPS off)."""
+        entry = {"t": round(recorded["received"], 3), "state": recorded.get("state"),
+                 "bat": recorded.get("battery_pct"), "sats": recorded.get("sats")}
+        if recorded.get("home"):
+            entry["home"] = True
+        if fresh_position(recorded):
+            entry["lat"], entry["lon"] = recorded["lat"], recorded["lon"]
+        return entry
+
     def on_status(node_id: str, status: dict) -> None:
         status = dict(status)
         pki, key = status.pop("pki", False), status.pop("sender_key", "")
@@ -568,10 +587,7 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
         recorded = store.record_status(node_id, status)
         if recorded:
             # The log: every report, with the position only when it was a fix from that moment.
-            entry = {"t": round(recorded["received"], 3), "state": recorded.get("state"),
-                     "bat": recorded.get("battery_pct"), "sats": recorded.get("sats")}
-            if not recorded.get("no_fix") and (recorded.get("lat") or recorded.get("lon")):
-                entry["lat"], entry["lon"] = recorded["lat"], recorded["lon"]
+            entry = log_entry(recorded)
             try:
                 clog.add(node_id, entry)
             except (OSError, ValueError) as e:  # a full disk must not stop the reports
@@ -720,6 +736,7 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
             sim.add(node_id, c["sim"])
             sim.set_owner(node_id, *owner_for(node_id))
             sim.set_anchor(node_id, home_anchor(), anchor_position())
+            sim.set_min_sats(node_id, min_sats_for(c))
             if c.get("fences"):
                 try:
                     sim.set_fences(node_id, protocol.zones_from_geojson(c["fences"]), c.get("fence_version", 0),
@@ -879,6 +896,9 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
                                          f"{protocol.MAX_REPORT_S} seconds")
         if body.gps_inside_s is not None and not 0 <= body.gps_inside_s <= protocol.MAX_GPS_INSIDE_S:
             raise HTTPException(400, f"the GPS interval inside the fences is 0 to {protocol.MAX_GPS_INSIDE_S} seconds")
+        if body.min_sats is not None and not protocol.MIN_SATS_LOW <= body.min_sats <= protocol.MIN_SATS_HIGH:
+            raise HTTPException(400, f"the satellites a GPS fix needs are {protocol.MIN_SATS_LOW} to "
+                                     f"{protocol.MIN_SATS_HIGH}")
         if body.name is not None:
             try:
                 name = clean_name(body.name)
@@ -892,9 +912,12 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
             store.set_collar_info(node_id, "report_s", body.report_s)
         if body.gps_inside_s is not None:
             store.set_collar_info(node_id, "gps_inside_s", body.gps_inside_s)
+        if body.min_sats is not None:
+            store.set_collar_info(node_id, "min_sats", body.min_sats)
         if body.gps_everywhere is not None:
             store.set_collar_info(node_id, "gps_everywhere", body.gps_everywhere or None)
-        if body.report_s is not None or body.gps_inside_s is not None or body.gps_everywhere is not None:
+        if body.report_s is not None or body.gps_inside_s is not None or body.gps_everywhere is not None \
+                or body.min_sats is not None:
             if (store.collar(node_id) or {}).get("config_sent") != config_for(node_id):
                 out["config_sent"] = push_config(node_id)
         return {**(public_collar(store.collar(node_id), node_id) or {}), **out}
@@ -1546,10 +1569,7 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
             status["phone_pos"] = req.phone_position.model_dump()
         recorded = store.record_status(req.node_id, status, direct=False)
         if recorded:
-            entry = {"t": round(recorded["received"], 3), "state": recorded.get("state"),
-                     "bat": recorded.get("battery_pct"), "sats": recorded.get("sats"), "via": "phone"}
-            if not recorded.get("no_fix") and (recorded.get("lat") or recorded.get("lon")):
-                entry["lat"], entry["lon"] = recorded["lat"], recorded["lon"]
+            entry = {**log_entry(recorded), "via": "phone"}
             try:
                 clog.add(req.node_id, entry)
             except (OSError, ValueError) as e:
