@@ -122,16 +122,25 @@ What GeoCollar changes on the collar, and why (each can be turned off with a bui
   app still find the collar within a second or two. While a phone is connected, and while the
   lost beacon runs, Bluetooth is left as it was.
 - **Meshtastic power saving forced off.** On an ESP32 it sleeps for minutes at a time (5 by
-  default) with Bluetooth off. The GPS is not read and the fence is not checked in that time, so
-  a dog could walk out without a single correction. Not configurable.
+  default) with Bluetooth off, or, with the Tracker or Sensor role, deep sleeps after every
+  position or telemetry broadcast. The GPS is not read and the fence is not checked in that time,
+  so a dog could walk out without a single correction, and a lost collar would stop its Bluetooth
+  name, its help message and its checks for the base. For the same reason **Shutdown on battery
+  after** is set back to off (a collar is always on battery), and the **Router** and **Router
+  Late** roles, which Meshtastic treats as power saving, become **Client Base**, which still
+  relays. Put right at boot (Meshtastic restarts after a change to any of them); power saving and
+  the shutdown are also put right within a second of being changed. Not configurable.
 - **GPS off for a lost dog out of reach.** While the dog is lost (or the lost beacon is on),
   the base has not answered the collar's reports for 2 minutes and at least 3 reports in a row,
   and no phone with the companion app has asked for anything in the last minute, the collar
-  powers the GPS down (Meshtastic still looks about once an hour). Otherwise a lost dog gets a
-  fix every 60 s. The lost beacon's mesh message then carries the last position, which may be
+  powers the GPS down (Meshtastic still looks about once an hour) and reports only every 5
+  minutes, together with the help message on the public channel: each of those reports asks the
+  base for an acknowledgement, so it is the check for the base. Otherwise a lost dog gets a
+  fix every 60 s and reports every 30 s. The lost beacon's mesh message then carries the last position, which may be
   old. Anything from the base (the acknowledgement of a report, a message, one of its
   broadcasts), directly or relayed by the mesh, counts as an answer, and wakes the GPS for a fix
-  at once, as does the phone app connecting. While off, the collar also stops restarting a GPS
+  at once, which goes to the base as soon as the collar has it; the phone app connecting wakes it
+  too. While off, the collar also stops restarting a GPS
   search that finds nothing every minute. Inside the fences nothing changes: the collar enforces them without the base, so a
   base that is switched off or restarting never slows the GPS there.
 - **GPS interval inside the fences** (base app, per collar: 0 to 30 s, 3 s by default), within
@@ -214,8 +223,11 @@ Left as they are, and why:
    for home mode.
 4. Out of reach: force a collar lost from the base, then unplug the base radio. After about 2
    minutes the serial log says `GeoCollar: base out of reach` and `lost and nothing can pass the
-   position on: GPS off`, and the GPS current should drop to nothing. Plug the radio
-   back in: the next acknowledged report brings `base in reach again` and a fix straight away.
+   position on: GPS off`, and the GPS current should drop to nothing. From then on the collar
+   reports only every 5 minutes, with the help message (`lost, checking whether the base can be
+   reached`). Plug the radio back in: the next check (or anything the base sends) brings `base in
+   reach again`, `the base answered: taking a GPS fix for it`, and once the fix is in, `fresh
+   position for the base` and the dog's new position on the base map.
 5. Home mode: with an anchor set, watch for `GeoCollar: home, near the anchor: GPS off` in the
    serial log, the current dropping, and `away from the anchor: GPS on` a few seconds after
    carrying the collar out of range. If the scan cannot start, the log says

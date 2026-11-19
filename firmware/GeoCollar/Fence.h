@@ -424,6 +424,17 @@ class BaseLink
     uint32_t firstUnansweredMs_ = 0; // when the first of them went
 };
 
+/// While the dog is lost and the base is out of reach, the collar reports this often instead,
+/// every 5 minutes, at the same moment as the plea on the public channel. Each report asks for an
+/// acknowledgement, so it is also the check for the base: an answer brings it back in reach, which
+/// wakes the GPS, and the first good fix goes to the base at once.
+constexpr uint32_t kLostProbeMs = LostBeacon::kMeshEveryMs;
+
+/// How often to report to the base, in ms. normalMs: the owner's report interval. While lost, at
+/// least every lostMs (the base's map follows the dog), or every kLostProbeMs while the base is
+/// out of reach (a report it cannot hear costs a transmission and its retries, for nothing).
+uint32_t reportIntervalMs(uint32_t normalMs, uint32_t lostMs, bool lost, bool baseReachable);
+
 /// The GPS fix interval for a lost dog while its position can be passed on (the owner's choice).
 constexpr uint32_t kLostGpsSecs = 60;
 /// While nothing can pass it on: the GPS powered down, as in home mode. Meshtastic still looks

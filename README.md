@@ -48,8 +48,8 @@ least a second apart; if the two fixes are in different bands, the milder one co
 | Inside, clear of every band | Nothing; reports status every 10 minutes. |
 | Warning (inside, in any band) | The band's correction, above, once a second fix has agreed. |
 | Outside (not yet confirmed) | **Stops all corrections** at once. They stay off, even through the bands on the way back, until the dog is inside and clear of every band. |
-| Lost (3 good fixes outside) | **Stops all corrections**, sends a breach alert, reports position every 30 s. GPS fix every 60 s while the base (directly or through the mesh) or the phone app can get it, otherwise GPS off. |
-| Outside for 90 s | **Lost beacon**: Bluetooth name "Rex is lost 5551234567" 90 s on / 90 s off, a plain-text "Please help get Rex home. Call …" on the public mesh channel every 5 minutes, GPS as in lost mode. Until back inside or silenced from the base. |
+| Lost (3 good fixes outside) | **Stops all corrections**, sends a breach alert, reports position every 30 s. GPS fix every 60 s while the base (directly or through the mesh) or the phone app can get it, otherwise GPS off and a check for the base every 5 minutes; when the base answers, a fix that goes straight to it. |
+| Outside for 90 s | **Lost beacon**: Bluetooth name "Rex is lost 5551234567" 90 s on / 90 s off, a plain-text "Please help get Rex home. Call …" on the public mesh channel every 5 minutes (with the check for the base, while it is out of reach), GPS as in lost mode. Until back inside or silenced from the base. |
 | Back inside, clear of every band, for 3 fixes | Re-arms. |
 
 Fixes with poor PDOP or few satellites are ignored entirely.
@@ -60,7 +60,10 @@ step with the distance, up to every 2 minutes, and every 3 minutes beyond 100 m.
 least every 5 s. A collar the base has not sent this setting to fixes every 5 s near the line.
 A lost dog's collar takes a fix every 60 s while it can get the position somewhere: the base
 answers it, directly or through the mesh, or the phone app is connected. Otherwise its GPS is off
-(Meshtastic still looks about once an hour). It takes a fix as soon as the phone app connects.
+(Meshtastic still looks about once an hour) and every 5 minutes, with the help message, it checks
+whether the base can be reached; when the base answers, it takes a fix and sends it to the base at
+once. It takes a fix as soon as the phone app connects. Meshtastic's power saving, the Router
+roles and "shutdown on battery" would put the collar to sleep, so the collar turns them off.
 Inside the fences the base makes no difference: the collar enforces them on its own.
 
 ## Repository layout
