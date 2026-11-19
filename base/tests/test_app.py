@@ -636,7 +636,7 @@ def test_collar_log_and_clearing_the_path(tmp_path):
 
     def report(node_id, **over):
         status = {"state": "INSIDE", "fence_version": 0, "battery_pct": 88, "lat": 40.001, "lon": -75.001, "pdop": 1.2,
-                  "sats": 11, "clearance_m": 14, "no_fix": False, "pki": True, "sender_key": "a2V5" + node_id[1:3]}
+                  "sats": 14, "clearance_m": 14, "no_fix": False, "pki": True, "sender_key": "a2V5" + node_id[1:3]}
         app.state.on_status(node_id, {**status, **over})
 
     t0 = time.time()
@@ -648,7 +648,7 @@ def test_collar_log_and_clearing_the_path(tmp_path):
     log = client.get("/api/collars/!a1b2c3d4/log").json()
     assert log["total"] == 3 and [e.get("lat") for e in log["entries"]] == [40.001, 40.002, None]
     first, second, third = log["entries"]
-    assert first == {"t": first["t"], "state": "INSIDE", "bat": 88, "sats": 11, "lat": 40.001, "lon": -75.001}
+    assert first == {"t": first["t"], "state": "INSIDE", "bat": 88, "sats": 14, "lat": 40.001, "lon": -75.001}
     assert second["state"] == "WARNING" and second["bat"] == 87 and t0 - 1 <= first["t"] <= second["t"] <= time.time() + 1
     assert third == {"t": third["t"], "state": "NO_FENCE", "bat": 88, "sats": 0}
     assert client.get("/api/collars/!0000beef/log").json()["total"] == 1
@@ -1062,3 +1062,26 @@ def test_saving_home_mode_rereads_home_assistants_home(tmp_path, monkeypatch):
     client.put("/api/home-anchor", json={**body, "lat": 40.001, "lon": -74.999})
     assert client.get("/api/home-anchor").json()["position"] == [40.001, -74.999]
     assert sim_collar.anchor_at == (40.001, -74.999) and len(asked) == n
+
+
+def test_log_and_trail_only_where_the_dog_was(tmp_path):
+    """A report from a collar at home (GPS off) repeats its last fix, and one whose fix had fewer
+    satellites than it needs is no fix at all: neither goes on the trail or in the log as a position."""
+    client, _ = make(tmp_path)
+    app = client.app
+    client.post("/api/collars", json={"node_id": "!a1b2c3d4", "name": "Rex"})
+    base = {"state": "INSIDE", "fence_version": 0, "battery_pct": 88, "lat": 40.001, "lon": -75.001, "pdop": 1.2,
+            "sats": 14, "clearance_m": 40, "no_fix": False, "pki": True, "sender_key": "a2V5a1"}
+    app.state.on_status("!a1b2c3d4", base)
+    app.state.on_status("!a1b2c3d4", {**base, "home": True})
+    app.state.on_status("!a1b2c3d4", {**base, "lat": 40.003, "lon": -75.003, "sats": 9})
+    first, home, weak = client.get("/api/collars/!a1b2c3d4/log").json()["entries"]
+    assert first["lat"] == 40.001 and "home" not in first
+    assert home["home"] is True and "lat" not in home
+    assert "lat" not in weak and weak["sats"] == 9
+    c = client.get("/api/collars").json()["!a1b2c3d4"]
+    assert len(c["track"]) == 1
+    assert c["status"]["no_fix"] and c["status"]["few_sats"] and c["status"]["lat"] == 40.001
+    # 12 is enough.
+    app.state.on_status("!a1b2c3d4", {**base, "lat": 40.003, "lon": -75.003, "sats": 12})
+    assert client.get("/api/collars").json()["!a1b2c3d4"]["status"]["lat"] == 40.003

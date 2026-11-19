@@ -1,12 +1,16 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
+import math
 import random
+
+import pytest
 
 from fastapi.testclient import TestClient
 
 from geocollar_base import protocol
 from geocollar_base.app import create_app
-from geocollar_base.sim import VERIFY_STALE_S, FenceEngine, LostBeacon, SimCollar, _move, beacon_name, beacon_text
+from geocollar_base.sim import (VERIFY_STALE_S, FenceEngine, LostBeacon, SimCollar, _bearing_and_distance, _move,
+                                beacon_name, beacon_text)
 
 # A 200 m square keep-in zone around (40.0, -75.0).
 YARD = protocol.Zone(protocol.ZoneKind.KEEP_IN, 0, 5, 5, [(39.9991, -75.00117), (39.9991, -74.99883), (40.0009, -74.99883), (40.0009, -75.00117)])
@@ -296,3 +300,131 @@ def test_home_room_check():
     # The 200 m yard's bands are 10 m wide: about 90 m from its middle to the nearest band.
     assert 85 < simmod.room_from_anchor_m([YARD], 40.0, -75.0) < 95
     assert simmod.room_from_anchor_m([YARD], 40.0, -76.0) < 0
+
+
+def _walk_states(client, node_id, start: float):
+    """Step the simulator a second at a time; returns a function that walks to a point and records
+    every change of (state, home, beacon) the base shows for the collar."""
+    sim = client.app.state.sim
+    seen: list[tuple] = []
+    t = [start]
+
+    def run(secs: float) -> None:
+        for _ in range(int(secs)):
+            t[0] += 1
+            sim.tick(1.0, now=t[0])
+            s = client.get("/api/collars").json()[node_id]["status"]
+            key = (s["state"], s["home"], s["beacon_active"])
+            if not seen or seen[-1] != key:
+                seen.append(key)
+
+    def walk(bearing: float, metres: float, speed: float, then: float = 5) -> None:
+        sim.update(node_id, {"target": list(_move(40.0, -75.0, bearing, metres)), "mode": "goto", "speed_mps": speed})
+        run(metres_from(node_id) / speed + then)
+
+    def metres_from(nid):
+        c = sim.collars[nid]
+        return max(1.0, _bearing_and_distance(c.lat, c.lon, *c.target)[1])
+
+    return run, walk, seen
+
+
+def _yard_with_pond(client, node_id):
+    pond_c = _move(40.0, -75.0, 0, 50)  # a 20 m keep-out square 50 m north of the middle
+    dl, do = 10 / 111_195, 10 / (111_195 * math.cos(math.radians(40)))
+    pond = [(pond_c[0] - dl, pond_c[1] - do), (pond_c[0] - dl, pond_c[1] + do), (pond_c[0] + dl, pond_c[1] + do),
+            (pond_c[0] + dl, pond_c[1] - do)]
+
+    def feat(kind, verts, d, w, a):
+        return {"type": "Feature", "properties": {"kind": kind, "danger_m": d, "warning_m": w, "attention_m": a},
+                "geometry": {"type": "Polygon", "coordinates": [[[lon, lat] for lat, lon in verts + verts[:1]]]}}
+
+    fence = {"type": "FeatureCollection", "features": [feat("keep_in", YARD.vertices, 3, 5, 5), feat("keep_out", pond, 0, 4, 4)]}
+    assert client.put(f"/api/collars/{node_id}/fences", json=fence).status_code == 200
+
+
+def test_zone_states_as_the_base_shows_them(tmp_path):
+    """A simulated collar walked through every zone, with home mode on: what the base records."""
+    client = TestClient(create_app({"data_dir": str(tmp_path), "home": "40.0, -75.0"}))
+    node_id = client.post("/api/sim", json={"lat": 40.0, "lon": -75.0}).json()["node_id"]
+    _yard_with_pond(client, node_id)
+    r = client.put("/api/home-anchor", json={"kind": "beacon", "address": "AA:BB:CC:01:02:03", "rssi": -85})
+    assert r.status_code == 200 and node_id in r.json()["sent_to"]
+    client.patch(f"/api/sim/{node_id}", json={"noise_m": 0})
+    run, walk, seen = _walk_states(client, node_id, 10_000)
+    S_ = "INSIDE", "WARNING", "OUTSIDE", "LOST"
+    IN, BAND, OUT, LOST = S_
+
+    run(30)  # at the anchor: home after 20 s
+    walk(90, 85, 2)  # east, to 15 m from the line: away from home, still clear of the bands
+    walk(90, 98, 1)  # into the bands
+    walk(90, 140, 2, then=100)  # past the line and lost; the beacon after 90 s outside
+    walk(90, 0, 2, then=40)  # back to the middle: re-armed, then home again
+    assert seen == [(IN, False, False), (IN, True, False), (IN, False, False), (BAND, False, False),
+                    (OUT, False, False), (LOST, False, False), (LOST, False, True), (LOST, False, False),
+                    (IN, False, False), (IN, True, False)]
+
+    seen.clear()
+    walk(0, 50, 2, then=10)  # into the pond: a keep-out zone
+    walk(0, 0, 2, then=40)  # and back home
+    # The pond's bands start 32 m from the anchor, nearer than a running dog gets before its GPS has
+    # a fix again (the home mode card warns about it): the first fix after home is already in them.
+    assert seen == [(IN, True, False), (BAND, False, False), (OUT, False, False),
+                    (LOST, False, False), (IN, False, False), (IN, True, False)]
+    assert any(not c["ok"] for c in client.get("/api/home-anchor").json()["collars"])
+    # While home the GPS was off: the trail did not grow.
+    c = client.get("/api/collars").json()[node_id]
+    assert c["status"]["home"]
+    n = len(c["track"])
+    run(30)
+    assert len(client.get("/api/collars").json()[node_id]["track"]) == n
+
+
+def test_new_fences_end_home_mode_in_the_simulator():
+    from geocollar_base import sim as simmod
+
+    sim = walker()
+    sim.set_anchor(protocol.HomeAnchor(protocol.AnchorKind.BEACON, "AA:BB:CC:01:02:03", -85), (40.0, -75.0))
+    for t in range(1000, 1000 + simmod.HOME_ENTER_S + 3):
+        sim.step(1.0, now=t)
+    assert sim.home
+    sim.set_fences([YARD], 8)  # as the firmware does: away, and a clear fix needed first
+    assert not sim.home and sim.events[1]["text"] == "new fences: GPS on"
+    sim.step(1.0, now=t + 1)
+    assert not sim.home  # the anchor's 20 s start again from the new fences' first clear fix
+
+
+def test_too_few_satellites_in_the_simulator(tmp_path):
+    """Fixes from fewer than 12 satellites are not used: no fence decision, the position stays the
+    last good one, and the base hears "no GPS fix" once that is old. A dog that walks out under
+    trees is not noticed until a fix from 12 or more."""
+    sim = walker()
+    for t in range(1000, 1005):
+        sim.step(1.0, now=t)
+    good = sim.report(1005)
+    assert good["sats"] >= protocol.MIN_FIX_SATS and not good["no_fix"]
+    sim.update({"sats": 10, "target": list(_move(40.0, -75.0, 90, 150)), "mode": "goto", "speed_mps": 3})
+    for t in range(1006, 1080):
+        sim.step(1.0, now=t)
+    assert sim.engine.state == S.INSIDE  # out past the line, and the collar does not know
+    rep = sim.report(1080)
+    assert rep["no_fix"] and (rep["lat"], rep["lon"]) == (good["lat"], good["lon"])
+    assert any("satellites ignored" in e["text"] for e in sim.events)
+    sim.update({"sats": 12})
+    for t in range(1081, 1090):
+        sim.step(1.0, now=t)
+    assert sim.engine.state == S.LOST and not sim.report(1090)["no_fix"]
+    with pytest.raises(ValueError):
+        sim.update({"sats": 41})
+
+
+def test_the_base_ignores_positions_from_too_few_satellites(tmp_path):
+    client = TestClient(create_app({"data_dir": str(tmp_path)}))
+    node_id = client.post("/api/sim", json={"lat": 40.0, "lon": -75.0}).json()["node_id"]
+    store = client.app.state.store
+    good = {"state": "INSIDE", "lat": 40.001, "lon": -75.001, "sats": 12, "no_fix": False}
+    assert store.record_status(node_id, good)["lat"] == 40.001
+    weak = store.record_status(node_id, {**good, "lat": 40.009, "lon": -75.009, "sats": 11})
+    assert weak["no_fix"] and weak["few_sats"] and (weak["lat"], weak["lon"]) == (40.001, -75.001)
+    track = client.get("/api/collars").json()[node_id]["track"]
+    assert [p[1] for p in track][-1] == 40.001 and 40.009 not in [p[1] for p in track]

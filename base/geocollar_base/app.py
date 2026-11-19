@@ -36,7 +36,7 @@ from . import radio
 from .mesh import MeshLink
 from . import sim as simmod
 from .sim import Simulator
-from .store import Store
+from .store import Store, fresh_position
 
 log = logging.getLogger(__name__)
 STATIC = Path(__file__).parent / "static"
@@ -554,6 +554,17 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
             store.set_collar_info(node_id, "apps_acked", ack["seq"])
             store.set_collar_info(node_id, "apps_sent", None)
 
+    def log_entry(recorded: dict) -> dict:
+        """A report for the log: the position only when it was where the dog was at that moment
+        (a current fix from enough satellites, not home with the GPS off)."""
+        entry = {"t": round(recorded["received"], 3), "state": recorded.get("state"),
+                 "bat": recorded.get("battery_pct"), "sats": recorded.get("sats")}
+        if recorded.get("home"):
+            entry["home"] = True
+        if fresh_position(recorded):
+            entry["lat"], entry["lon"] = recorded["lat"], recorded["lon"]
+        return entry
+
     def on_status(node_id: str, status: dict) -> None:
         status = dict(status)
         pki, key = status.pop("pki", False), status.pop("sender_key", "")
@@ -568,10 +579,7 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
         recorded = store.record_status(node_id, status)
         if recorded:
             # The log: every report, with the position only when it was a fix from that moment.
-            entry = {"t": round(recorded["received"], 3), "state": recorded.get("state"),
-                     "bat": recorded.get("battery_pct"), "sats": recorded.get("sats")}
-            if not recorded.get("no_fix") and (recorded.get("lat") or recorded.get("lon")):
-                entry["lat"], entry["lon"] = recorded["lat"], recorded["lon"]
+            entry = log_entry(recorded)
             try:
                 clog.add(node_id, entry)
             except (OSError, ValueError) as e:  # a full disk must not stop the reports
@@ -1546,10 +1554,7 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
             status["phone_pos"] = req.phone_position.model_dump()
         recorded = store.record_status(req.node_id, status, direct=False)
         if recorded:
-            entry = {"t": round(recorded["received"], 3), "state": recorded.get("state"),
-                     "bat": recorded.get("battery_pct"), "sats": recorded.get("sats"), "via": "phone"}
-            if not recorded.get("no_fix") and (recorded.get("lat") or recorded.get("lon")):
-                entry["lat"], entry["lon"] = recorded["lat"], recorded["lon"]
+            entry = {**log_entry(recorded), "via": "phone"}
             try:
                 clog.add(req.node_id, entry)
             except (OSError, ValueError) as e:

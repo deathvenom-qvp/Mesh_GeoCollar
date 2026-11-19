@@ -37,6 +37,7 @@ APP_TAG_LEN = 8
 APP_NO_FIX_AGE = 0xFFFF
 MAX_GPS_INSIDE_S = 30  # the GPS interval inside the fences, 0..this (firmware kMaxGpsInsideS); 0 = always on
 DEFAULT_GPS_INSIDE_S = 3
+MIN_FIX_SATS = 12  # a GPS fix from fewer satellites is not a position (firmware kMinFixSats)
 MIN_ANCHOR_RSSI = -100  # home anchor signal threshold limits, dBm (kMinAnchorRssi..kMaxAnchorRssi)
 MAX_ANCHOR_RSSI = -30
 

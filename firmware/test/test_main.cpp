@@ -137,7 +137,7 @@ static void testGeometry()
 // State machine
 // --------------------------------------------------------------------------------------------
 
-static Fix fixAt(double northM, double eastM, uint32_t t, uint16_t pdop = 150, uint8_t sats = 9)
+static Fix fixAt(double northM, double eastM, uint32_t t, uint16_t pdop = 150, uint8_t sats = 14)
 {
     return Fix{latAt(northM), lonAt(eastM), pdop, sats, t};
 }
@@ -187,6 +187,14 @@ static void testStateMachine()
     CHECK(d.fixRejected && d.correction == Correction::None && e.state() == CollarState::Warning);
     d = e.onFix(fixAt(-20, 100, t += 1000, 150, 3));
     CHECK(d.fixRejected);
+    // 12 satellites or more, or the fix does not count: 11 is ignored, as is a count the GPS did not
+    // give. 12 is enough.
+    CHECK(kMinFixSats == 12 && e.settings().minSats == 12);
+    d = e.onFix(fixAt(-20, 100, t += 1000, 150, 11));
+    CHECK(d.fixRejected && e.state() == CollarState::Warning);
+    d = e.onFix(fixAt(-20, 100, t += 1000, 150, 0));
+    CHECK(d.fixRejected && !e.fixIsGood(fixAt(-20, 100, t, 150, 0)));
+    CHECK(e.fixIsGood(fixAt(-20, 100, t, 150, 12)) && !e.fixIsGood(fixAt(-20, 100, t, 150, 11)));
 
     // Past the line: corrections stop straight away.
     d = e.onFix(fixAt(-5, 100, t += 1000));
@@ -764,7 +772,9 @@ static void testProtocol()
         bad.gpsSlowSecs = 0;
         bad.gpsLostSecs = 0;
         bad.dogSpeedMps = 0;
+        bad.minSats = 5; // what every state file before 0.19.11 holds
         sanitizeSettings(bad);
+        CHECK(bad.minSats == kMinFixSats);
         CHECK(bad.maxShockLevel == 99 && bad.shockLevel == 99 && bad.vibrateLevel == 99 && bad.maxShocksPerHour == 16);
         CHECK(bad.lostConfirmFixes == 3 && bad.rearmFixes == 3 && bad.correctionMs == 1000 && bad.gpsFastSecs == 5 &&
               bad.gpsSlowSecs == 5 && bad.gpsLostSecs == 15 && bad.dogSpeedMps == 6);
@@ -1467,6 +1477,258 @@ static void testAppLink()
     CHECK(link.handle(hello, sizeof(hello), keys, collarNonce, reply, 4, rn, req) == AppLink::Outcome::Ignore && rn == 0);
 }
 
+// --------------------------------------------------------------------------------------------
+// A collar walked through every zone
+// --------------------------------------------------------------------------------------------
+
+/// A rectangle from (south, west) to (north, east), in metres from the test origin.
+static Zone box(ZoneKind kind, double south, double west, double north, double east, uint8_t danger, uint8_t warning,
+                uint8_t attention)
+{
+    Zone z;
+    z.kind = kind;
+    z.dangerM = danger;
+    z.warningM = warning;
+    z.attentionM = attention;
+    z.vertexCount = 4;
+    z.latI[0] = latAt(south);
+    z.lonI[0] = lonAt(west);
+    z.latI[1] = latAt(south);
+    z.lonI[1] = lonAt(east);
+    z.latI[2] = latAt(north);
+    z.lonI[2] = lonAt(east);
+    z.latI[3] = latAt(north);
+    z.lonI[3] = lonAt(west);
+    return z;
+}
+
+/// The collar's pieces wired together the way GeoCollarModule wires them, one second at a time:
+/// a GPS fix at the paced interval (none while home, and one a second after a reading that
+/// started a second look), each fed to the fence engine and, if good enough to use, to the lost
+/// beacon and home mode; the anchor heard every 2 s while the dog is within its range.
+struct WalkingCollar {
+    FenceEngine engine;
+    HomeWatch home;
+    LostBeacon beacon;
+    double north = 0, east = 0;           // where the dog really is
+    double anchorNorth = 0, anchorEast = 0;
+    double anchorRangeM = 15;
+    uint8_t sats = 16;                    // satellites in each fix
+    bool relayed = true;                  // the base answers
+    uint32_t now = 1000;
+    float clearance = 0;                  // the newest fix's (0: none yet, which fixes often)
+    uint32_t nextFixMs = 0;               // 0: at once
+    uint32_t lastGoodMs = 0;
+    int32_t lastLat = 0, lastLon = 0;     // the position the collar reports: good fixes only
+    int corrections = 0;                  // beeps, vibrations and shocks
+    std::string path;                     // every state and home change, in order
+
+    void note(const char *what)
+    {
+        if (!path.empty())
+            path += " > ";
+        path += what;
+    }
+    static const char *name(CollarState s)
+    {
+        switch (s) {
+        case CollarState::NoFence:
+            return "no fence";
+        case CollarState::Inside:
+            return "inside";
+        case CollarState::Warning:
+            return "band";
+        case CollarState::Outside:
+            return "outside";
+        case CollarState::Lost:
+            return "lost";
+        }
+        return "?";
+    }
+    /// The GPS interval applyGpsPacing() sets, in seconds of fix-to-fix.
+    uint32_t gpsEvery() const
+    {
+        if (home.home())
+            return kHomeGpsSecs;
+        const uint32_t s = gpsIntervalSecs(engine.settings(), engine.state(), clearance, alertWidthM(engine.fences()),
+                                           beacon.active(), relayed);
+        return s ? s : 1;
+    }
+    void second()
+    {
+        now += 1000;
+        const CollarState before = engine.state();
+        const bool wasHome = home.home(), wasBeacon = beacon.active();
+        if ((int32_t)(now - nextFixMs) >= 0) {
+            const Fix f{latAt(north), lonAt(east), 150, sats, now};
+            const Decision d = engine.onFix(f);
+            const bool used = engine.fixIsGood(f) && !d.fixRejected;
+            clearance = d.clearanceM;
+            if (used) {
+                lastGoodMs = now;
+                lastLat = f.latI;
+                lastLon = f.lonI;
+                beacon.onFix(engine.state() != CollarState::NoFence && d.clearanceM < 0, now);
+                home.onFix(engine.state() == CollarState::Inside, now);
+            }
+            if (d.correction != Correction::None)
+                corrections++;
+            nextFixMs = d.verify ? d.verifyAtMs : now + gpsEvery() * 1000;
+        }
+        beacon.tick(now);
+        if (now % 2000 == 0 && std::hypot(north - anchorNorth, east - anchorEast) <= anchorRangeM)
+            home.onSighting(-60, now);
+        home.tick(now, engine.state() == CollarState::Inside && !beacon.active());
+        if (home.home() != wasHome) {
+            // Leaving home wakes the GPS for a fix as soon as it has one (clearance 0: fix often).
+            if (!home.home()) {
+                clearance = 0;
+                nextFixMs = now;
+            } else {
+                nextFixMs = now + kHomeGpsSecs * 1000;
+            }
+        }
+        if (engine.state() != before)
+            note(name(engine.state()));
+        if (beacon.active() != wasBeacon)
+            note(beacon.active() ? "beacon on" : "beacon off");
+        if (home.home() != wasHome)
+            note(home.home() ? "home, GPS off" : "GPS on");
+    }
+    void stay(uint32_t secs)
+    {
+        for (uint32_t i = 0; i < secs; i++)
+            second();
+    }
+    /// Walk in a straight line at speed m/s, then stop there.
+    void walkTo(double n, double e, double speed)
+    {
+        const double dist = std::hypot(n - north, e - east);
+        const int steps = (int)std::ceil(dist / speed);
+        const double n0 = north, e0 = east;
+        for (int i = 1; i <= steps; i++) {
+            north = n0 + (n - n0) * i / steps;
+            east = e0 + (e - e0) * i / steps;
+            second();
+        }
+    }
+};
+
+static void testZoneWalk()
+{
+    // A yard 200 m by 170 m (danger 3, warning 5, attention 5: 13 m of bands), a pond kept out near
+    // its north side (bands 4 + 4), and the home anchor in the middle of the yard.
+    FenceSet f;
+    f.version = 1;
+    f.zoneCount = 2;
+    f.zones[0] = box(ZoneKind::KeepIn, 0, 0, 200, 170, 3, 5, 5);
+    f.zones[1] = box(ZoneKind::KeepOut, 150, 60, 170, 110, 0, 4, 4);
+    auto fresh = [&f]() {
+        WalkingCollar c;
+        c.engine.setFences(f);
+        c.engine.settings().gpsFastSecs = 3; // what the base sends by default
+        HomeAnchor a;
+        a.kind = AnchorKind::Beacon;
+        a.rssiDbm = -70;
+        c.home.setThreshold(a.rssiDbm);
+        c.anchorNorth = 100;
+        c.anchorEast = 85;
+        c.north = 100;
+        c.east = 85;
+        return c;
+    };
+
+    // Home, out east through every band, past the line, lost, the beacon, back in, and home again.
+    {
+        WalkingCollar c = fresh();
+        c.stay(60);
+        CHECK(c.home.home() && c.engine.state() == CollarState::Inside && c.gpsEvery() == kHomeGpsSecs);
+        // Deep in the yard and away from home: slower fixes (47 m from the bands: between 35 and 100).
+        c.walkTo(60, 85, 2); // 60 m from the south line, 72 m from the pond's bands
+        c.stay(20);
+        CHECK(!c.home.home() && c.gpsEvery() > 3 && c.gpsEvery() < kMidGpsSecs);
+        // Within 35 m of the bands: the owner's 3 s.
+        c.walkTo(100, 140, 2);
+        c.stay(kMidGpsSecs); // the fix after the slow one
+        CHECK(c.engine.state() == CollarState::Inside && c.gpsEvery() == 3);
+        // Through the bands at a walk (corrections, after a second look each), out past the line.
+        c.walkTo(100, 200, 1);
+        CHECK(c.corrections > 0);
+        c.stay(5);
+        CHECK(c.engine.state() == CollarState::Lost && c.gpsEvery() == kLostGpsSecs);
+        const int corrected = c.corrections;
+        c.stay(LostBeacon::kTriggerMs / 1000 + 10);
+        CHECK(c.beacon.active());
+        // Out of the base's reach: the GPS powered down until it answers again.
+        c.relayed = false;
+        CHECK(c.gpsEvery() == kLostOffGpsSecs);
+        c.relayed = true;
+        // Back in through the bands while lost: no corrections at all, and still lost until 3
+        // fixes clear of every band.
+        c.walkTo(100, 160, 1);
+        c.stay(kLostGpsSecs + 5);
+        CHECK(c.engine.state() == CollarState::Lost && !c.beacon.active() && c.corrections == corrected);
+        c.walkTo(100, 85, 2);
+        c.stay(4 * kLostGpsSecs);
+        CHECK(c.engine.state() == CollarState::Inside && c.corrections == corrected);
+        CHECK(c.home.home());
+        CHECK(c.path == "home, GPS off > GPS on > band > outside > lost > beacon on > beacon off > inside > home, GPS off");
+    }
+
+    // Into the pond (a keep-out zone) and out again, from home.
+    {
+        WalkingCollar c = fresh();
+        c.stay(60);
+        c.walkTo(160, 85, 1); // the middle of the pond
+        c.stay(10);
+        CHECK(c.engine.state() == CollarState::Lost);
+        c.walkTo(100, 85, 1);
+        c.stay(4 * kLostGpsSecs);
+        CHECK(c.engine.state() == CollarState::Inside && c.home.home());
+        CHECK(c.path == "home, GPS off > GPS on > band > outside > lost > inside > home, GPS off");
+    }
+
+    // Into a band and back, without crossing: corrections, then quiet and inside again.
+    {
+        WalkingCollar c = fresh();
+        c.walkTo(100, 160, 2); // 10 m from the east line: the attention and warning bands
+        c.stay(10);
+        CHECK(c.engine.state() == CollarState::Warning && c.corrections > 0 && !c.home.home());
+        c.walkTo(100, 85, 2);
+        c.stay(30);
+        CHECK(c.engine.state() == CollarState::Inside && c.home.home());
+        CHECK(c.path == "band > inside > home, GPS off");
+    }
+
+    // The anchor heard from inside a band (a beacon too close to the line): never home.
+    {
+        WalkingCollar c = fresh();
+        c.anchorNorth = 100;
+        c.anchorEast = 165;
+        c.walkTo(100, 165, 2);
+        c.stay(120);
+        CHECK(c.engine.state() == CollarState::Warning && !c.home.home());
+    }
+
+    // Too few satellites: no fix counts, so nothing is decided. A dog that walks out under trees
+    // (10 satellites) is not noticed until a fix from 12 or more puts it outside; the position
+    // reported stays the last good one.
+    {
+        WalkingCollar c = fresh();
+        c.walkTo(100, 140, 2);
+        c.stay(5);
+        const int32_t lat = c.lastLat, lon = c.lastLon;
+        c.sats = 10;
+        c.walkTo(100, 200, 1);
+        c.stay(30);
+        CHECK(c.engine.state() == CollarState::Inside && c.corrections == 0 && !c.beacon.active());
+        CHECK(c.lastLat == lat && c.lastLon == lon);
+        c.sats = 12;
+        c.stay(20);
+        CHECK(c.engine.state() == CollarState::Lost && c.lastLon != lon);
+    }
+}
+
 int main()
 {
     testCaiXianLin();
@@ -1478,6 +1740,7 @@ int main()
     testPulser();
     testBeacon();
     testHomeWatch();
+    testZoneWalk();
     testBaseLink();
     testGpsPacing();
     testFixWatch();

@@ -179,6 +179,14 @@ something only if it gets its fix back quickly after waking (see
 seconds near the line, up to a minute deep inside); with 0.19.6 a collar the base has not sent
 it yet uses 5 seconds within 35 m and the same slower steps further in.
 
+**A GPS fix needs 12 satellites or more.** A fix from fewer is ignored entirely, as if there were
+none: no position, no beep, vibration or shock, no change of state, and after a while the collar's
+card says the fix was ignored and the map shows the last good position. 12 is strict: under trees,
+next to the house or with the collar upside down a fix often has 8 to 11 satellites, and **while
+fixes are ignored the collar cannot tell that the dog has left**, and a lost dog's position stops
+moving. The Sats column on the Log tab shows what each collar gets. Needs collar firmware 0.19.11
+or later; older collars use 5, and the base ignores the positions they send from fewer than 12.
+
 ## When a collar has no GPS fix
 
 Indoors, under a metal roof or in a car a collar can lose its GPS fix. It then cannot tell where
@@ -207,7 +215,9 @@ The **Log** tab lists every report the base has heard from a collar: the time, t
 (latitude and longitude), whether the dog was inside, near the line or outside, the battery and
 the number of satellites. Pick the collar and how far back to look: the last hour, 24 hours,
 7 days, or everything. The newest report is at the top, and new ones are added as they come in.
-A report made without a GPS fix says **No GPS fix** and has no position. **See the log**, next to
+A report made without a GPS fix says **No GPS fix** and has no position, one whose fix had fewer
+than 12 satellites says **Fix ignored**, and one from a collar at home with its GPS
+off says **Home, GPS off** (its position would only repeat the last fix). **See the log**, next to
 Clear path, opens the Log tab on the selected collar.
 
 The map beside the table has a point for each position, joined in the order they came and

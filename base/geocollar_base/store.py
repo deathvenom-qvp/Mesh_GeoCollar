@@ -11,10 +11,18 @@ import threading
 import time
 from pathlib import Path
 
+from . import protocol
+
 log = logging.getLogger(__name__)
 
 TRACK_LIMIT = 500
 BACKUP_EVERY_S = 3600
+
+
+def fresh_position(status: dict) -> bool:
+    """Whether a report says where the dog is now: it has a position, from a current fix with
+    enough satellites, and the collar is not home with its GPS off (that repeats the last fix)."""
+    return bool((status.get("lat") or status.get("lon")) and not status.get("no_fix") and not status.get("home"))
 
 
 class Store:
@@ -148,9 +156,19 @@ class Store:
             if c is None:
                 return None
             status = dict(status, received=time.time())
+            last = c.get("status") or {}
+            # A position from fewer than MIN_FIX_SATS satellites is no position: collar firmware
+            # before 0.19.11 still sends one. The report counts as one without a fix.
+            sats = status.get("sats")
+            if (status.get("lat") or status.get("lon")) and sats is not None and sats < protocol.MIN_FIX_SATS \
+                    and not status.get("no_fix"):
+                status["no_fix"] = True
+                status["few_sats"] = True
+                status["lat"], status["lon"] = last.get("lat") or 0, last.get("lon") or 0
+            elif status.get("no_fix") and sats and sats < protocol.MIN_FIX_SATS:
+                status["few_sats"] = True  # 0.19.11 on: no fix because the GPS's had too few satellites
             # A collar that restarted and has had no fix since reports no position at all: keep
             # the last one this base knew, which the page shows as the last known position.
-            last = c.get("status") or {}
             if status.get("no_fix") and not (status.get("lat") or status.get("lon")) \
                     and (last.get("lat") or last.get("lon")):
                 status["lat"], status["lon"] = last["lat"], last["lon"]
@@ -160,9 +178,9 @@ class Store:
                 c.pop("radio_changed", None)  # heard on the base's current settings
                 c.pop("hello", None)  # it reports to this base now
                 c.pop("send_error", None)  # and the base's messages reach it
-            # The trail is where the dog was at that moment: a report without a current fix
-            # repeats an old position and adds nothing to it.
-            if (status.get("lat") or status.get("lon")) and not status.get("no_fix"):
+            # The trail is where the dog was at that moment: a report without a current fix, or
+            # from a collar at home with its GPS off, repeats an old position and adds nothing.
+            if fresh_position(status):
                 track = c.setdefault("track", [])
                 track.append([status["received"], status["lat"], status["lon"]])
                 del track[:-TRACK_LIMIT]

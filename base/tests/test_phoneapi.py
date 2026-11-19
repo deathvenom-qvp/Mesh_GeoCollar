@@ -89,7 +89,7 @@ def test_requests_are_sealed_and_checked(tmp_path, monkeypatch):
     client, _ = make(tmp_path)
     _, phone = new_phone(client)
     phone.enroll()
-    client.app.state.on_status("!a1b2c3d4", {**GOOD, "state": "LOST", "battery_pct": 81, "sats": 9})
+    client.app.state.on_status("!a1b2c3d4", {**GOOD, "state": "LOST", "battery_pct": 81, "sats": 13})
     code, reply = phone.call("collars")
     assert code == 200 and reply["home"] and reply["urls"]
     rex = reply["collars"][0]
@@ -159,7 +159,7 @@ def test_a_phone_gets_collars_added_later_by_itself(tmp_path):
 
 def relay_body(**status):
     return {"node_id": "!a1b2c3d4", "fix_age_s": 4, "age_ms": 500,
-            "status": {"state": "LOST", "lat": 40.01, "lon": -75.02, "battery_pct": 64, "sats": 8, "pdop": 1.5,
+            "status": {"state": "LOST", "lat": 40.01, "lon": -75.02, "battery_pct": 64, "sats": 14, "pdop": 1.5,
                        "clearance_m": -120, "beacon_active": True, **status},
             "phone_position": {"lat": 40.0101, "lon": -75.0201, "accuracy_m": 6}}
 

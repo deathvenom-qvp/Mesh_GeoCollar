@@ -161,6 +161,7 @@ void sanitizeSettings(Settings &s)
         s.gpsLostSecs = d.gpsLostSecs;
     if (s.dogSpeedMps == 0)
         s.dogSpeedMps = d.dogSpeedMps;
+    s.minSats = kMinFixSats; // fixed; state files from before 0.19.11 hold 5
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -200,8 +201,9 @@ bool FenceEngine::fixIsGood(const Fix &fix) const
         return false;
     if (fix.pdopX100 != 0 && fix.pdopX100 > settings_.maxPdopX100)
         return false;
-    if (fix.sats != 0 && fix.sats < settings_.minSats)
-        return false;
+    if (fix.sats < settings_.minSats)
+        return false; // too few satellites, or a count the GPS did not give
+
     return true;
 }
 

@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.19.11
+
+Home mode checked, zone states checked, and GPS fixes need 12 satellites. Base and collar firmware.
+Tested with the firmware's PC tests and the base's tests, including a collar walked through every
+zone in both, **not on a real collar**.
+
+- **Home mode is all still there** (Settings > Home mode: GPS off near the house), on the collar,
+  the base and the simulator: nothing of it was lost in the GPS timing changes of 0.19.5 to 0.19.8.
+  What was wrong around it is fixed:
+  - With home mode **Off** (or the base radio picked), the card still showed the beacon's address
+    box. It shows only for a beacon now.
+  - The **Log** and the map's trail took a collar's reports from home, which repeat the last fix
+    while the GPS is off, as new positions. They are marked "Home, GPS off" in the Log now, with no
+    position, and add nothing to the trail.
+  - A **simulated collar** stayed home when its fences changed; like a real one, it now turns its
+    GPS back on and needs a clear fix before home mode can start again.
+- **Zone states checked end to end.** A collar walked from home out through the attention, warning
+  and danger bands, past the line, lost, the lost beacon, back in and home again, and into and out
+  of a keep-out zone, both on the collar's own code (PC tests) and through the base with a
+  simulated collar. Every state change came out as it should, with the GPS paced as set for each
+  (home: off; deep inside: up to every 3 min; near the bands: the owner's 3 s; past a line: 5 s;
+  lost: 60 s, or off while nothing can pass the position on).
+- **A GPS fix needs 12 satellites or more** (new collar firmware). A fix from fewer is ignored
+  entirely: no correction, no change of state, no position sent, and the base shows "no GPS fix"
+  once the last good one is old, with the satellite count, so the collar's card can say why. The
+  base also ignores positions from fewer satellites in reports from older collar firmware, which
+  still sends them. Fixed at 12, not a setting. **12 is strict:** in Rex's log most fixes have 8 to
+  11. While fixes are ignored the collar corrects nothing and cannot notice the dog leaving, and a
+  lost dog's position stops moving on the map. Simulated collars have a **Satellites** box to try
+  it.
+
 ## 0.19.10
 
 The phone app sees the dogs **away from home**, over the internet. Base and phone app; no new
