@@ -1,0 +1,1102 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "GeoCollar phone API",
+    "description": "How the GeoCollar phone app reaches its base station over the network, at home or over the\ninternet. A phone is linked with the one-time code in the QR code under **Connect app** on the\nbase page, and removed there too.\n\n**Every request and answer is encrypted** (AES-256-GCM) with a key of that phone's own, so plain\nHTTP is safe here and a proxy in between can't read or change anything.\n\n1. **Enrol** (`POST /api/phone/v1/enroll`): the phone posts a fresh P-256 public key with the\n   code's token and an HMAC proving it read the code. The answer carries the base's fresh public\n   key. API key = HKDF-SHA256(ECDH secret, salt = code secret, info = \"GeoCollar phone API v1\" ||\n   token || phone key || base key), 32 bytes. The answer's `ct` opens with it to a `Welcome`.\n2. **Every other operation** is `POST /api/phone/v1/<op>` with a `PhoneRequest`: `ct` opens with\n   associated data `GCP1 <op> <phone id>` to `{\"ts\": <ms>, \"body\": <request>}`. The answer is an\n   `Envelope` whose `ct` opens with associated data `GCR1 <op> <phone id> ` followed by the\n   request's 12-byte IV. Each operation's `x-plaintext` names the schemas of `body` and of the\n   opened answer. A request more than 10 minutes off the base's clock, or seen before, is refused.\n\nErrors are plain JSON (`ApiError`), never encrypted, and say nothing about the base's collars.\n",
+    "version": "1.0.0"
+  },
+  "paths": {
+    "/api/phone/v1/enroll": {
+      "post": {
+        "tags": [
+          "phone"
+        ],
+        "summary": "Link this phone with a Connect app code",
+        "description": "Link a phone with the one-time code from the QR code (see the description above).",
+        "operationId": "enroll",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EnrollRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EnrollReply"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Damaged request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unknown phone, or clock too far off",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Does not match the code",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Seen before",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Code ran out or was used",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Too large",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "x-plaintext": {
+          "reply": {
+            "$ref": "#/components/schemas/Welcome"
+          }
+        }
+      }
+    },
+    "/api/phone/v1/collars": {
+      "post": {
+        "tags": [
+          "phone"
+        ],
+        "summary": "Every collar with its last report",
+        "description": "Every collar on the base with its last report: what the app shows when it is not near\nthe dog. Also the addresses to use from now on.",
+        "operationId": "collars",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PhoneRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Damaged request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unknown phone, or clock too far off",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Does not match the code",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Seen before",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Code ran out or was used",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Too large",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "x-plaintext": {
+          "request": {
+            "$ref": "#/components/schemas/CollarsRequest"
+          },
+          "reply": {
+            "$ref": "#/components/schemas/CollarsReply"
+          }
+        }
+      }
+    },
+    "/api/phone/v1/relay": {
+      "post": {
+        "tags": [
+          "phone"
+        ],
+        "summary": "Pass on a collar's report heard over Bluetooth",
+        "description": "A collar's report that the phone got over Bluetooth. The base keeps it when it has not\nheard the collar over the mesh lately; otherwise the collar is getting through itself.",
+        "operationId": "relay",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PhoneRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Successful Response",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Envelope"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Damaged request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Unknown phone, or clock too far off",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Does not match the code",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Seen before",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "410": {
+            "description": "Code ran out or was used",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "413": {
+            "description": "Too large",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        },
+        "x-plaintext": {
+          "request": {
+            "$ref": "#/components/schemas/RelayRequest"
+          },
+          "reply": {
+            "$ref": "#/components/schemas/RelayReply"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "ApiError": {
+        "properties": {
+          "detail": {
+            "type": "string",
+            "title": "Detail"
+          },
+          "code": {
+            "type": "string",
+            "enum": [
+              "bad_request",
+              "unknown_phone",
+              "clock",
+              "replay",
+              "expired",
+              "used",
+              "not_found",
+              "too_large"
+            ],
+            "title": "Code",
+            "description": "What to do about it, for the app."
+          },
+          "server_time": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Server Time",
+            "description": "The base's clock in milliseconds, with code \"clock\"."
+          }
+        },
+        "type": "object",
+        "required": [
+          "detail",
+          "code"
+        ],
+        "title": "ApiError",
+        "description": "Errors are not encrypted: they say only what went wrong with the envelope."
+      },
+      "EnrollReply": {
+        "properties": {
+          "iv": {
+            "type": "string",
+            "title": "Iv",
+            "description": "base64url, 12 bytes"
+          },
+          "ct": {
+            "type": "string",
+            "title": "Ct",
+            "description": "base64url: ciphertext followed by the 16-byte tag"
+          },
+          "base_key": {
+            "type": "string",
+            "title": "Base Key",
+            "description": "The base's fresh P-256 public key, uncompressed, base64url."
+          }
+        },
+        "type": "object",
+        "required": [
+          "iv",
+          "ct",
+          "base_key"
+        ],
+        "title": "EnrollReply",
+        "description": "ct opens with the new API key and associated data \"GCW1\" || token, to a Welcome."
+      },
+      "EnrollRequest": {
+        "properties": {
+          "token": {
+            "type": "string",
+            "title": "Token",
+            "description": "The code's one-time token, base64url (8 bytes)."
+          },
+          "phone_key": {
+            "type": "string",
+            "title": "Phone Key",
+            "description": "The phone's fresh P-256 public key, uncompressed (65 bytes), base64url."
+          },
+          "proof": {
+            "type": "string",
+            "title": "Proof",
+            "description": "HMAC-SHA256(code secret, \"GCE1\" || token || phone_key), base64url."
+          }
+        },
+        "type": "object",
+        "required": [
+          "token",
+          "phone_key",
+          "proof"
+        ],
+        "title": "EnrollRequest"
+      },
+      "Envelope": {
+        "properties": {
+          "iv": {
+            "type": "string",
+            "title": "Iv",
+            "description": "base64url, 12 bytes"
+          },
+          "ct": {
+            "type": "string",
+            "title": "Ct",
+            "description": "base64url: ciphertext followed by the 16-byte tag"
+          }
+        },
+        "type": "object",
+        "required": [
+          "iv",
+          "ct"
+        ],
+        "title": "Envelope",
+        "description": "AES-256-GCM with a random 12-byte IV. The plaintext is JSON."
+      },
+      "HTTPValidationError": {
+        "properties": {
+          "detail": {
+            "items": {
+              "$ref": "#/components/schemas/ValidationError"
+            },
+            "type": "array",
+            "title": "Detail"
+          }
+        },
+        "type": "object",
+        "title": "HTTPValidationError"
+      },
+      "PhoneRequest": {
+        "properties": {
+          "iv": {
+            "type": "string",
+            "title": "Iv",
+            "description": "base64url, 12 bytes"
+          },
+          "ct": {
+            "type": "string",
+            "title": "Ct",
+            "description": "base64url: ciphertext followed by the 16-byte tag"
+          },
+          "phone": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{8}$",
+            "title": "Phone",
+            "description": "The phone's id, 8 hex digits, as the Welcome gave it."
+          }
+        },
+        "type": "object",
+        "required": [
+          "iv",
+          "ct",
+          "phone"
+        ],
+        "title": "PhoneRequest",
+        "description": "ct opens with the phone's API key and associated data \"GCP1 <op> <phone>\" to a\n{\"ts\": <phone's clock, ms>, \"body\": <the operation's request>}. The answer is an Envelope\nwhose ct opens with associated data \"GCR1 <op> <phone> \" || this request's IV."
+      },
+      "ValidationError": {
+        "properties": {
+          "loc": {
+            "items": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "type": "array",
+            "title": "Location"
+          },
+          "msg": {
+            "type": "string",
+            "title": "Message"
+          },
+          "type": {
+            "type": "string",
+            "title": "Error Type"
+          }
+        },
+        "type": "object",
+        "required": [
+          "loc",
+          "msg",
+          "type"
+        ],
+        "title": "ValidationError"
+      },
+      "CollarCode": {
+        "properties": {
+          "node_id": {
+            "description": "Meshtastic node ID, like !a1b2c3d4",
+            "title": "Node Id",
+            "type": "string"
+          },
+          "dog": {
+            "default": "",
+            "title": "Dog",
+            "type": "string"
+          },
+          "pin": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "The collar's Bluetooth PIN, when the base knows it",
+            "title": "Pin"
+          },
+          "ble_name": {
+            "default": "",
+            "description": "The start of the collar's Bluetooth name",
+            "title": "Ble Name",
+            "type": "string"
+          },
+          "sim": {
+            "default": false,
+            "description": "A simulated collar: nothing to connect to",
+            "title": "Sim",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "node_id"
+        ],
+        "title": "CollarCode",
+        "type": "object"
+      },
+      "Welcome": {
+        "description": "What the phone gets once linked (the plaintext of EnrollReply.ct).",
+        "properties": {
+          "phone_id": {
+            "title": "Phone Id",
+            "type": "string"
+          },
+          "home": {
+            "description": "The base's id, 8 hex digits",
+            "title": "Home",
+            "type": "string"
+          },
+          "ble_key_id": {
+            "description": "The phone's key id on the collars",
+            "title": "Ble Key Id",
+            "type": "integer"
+          },
+          "ble_key": {
+            "description": "The phone's key for the collars, base64url (16 bytes); each collar's own key is made from it",
+            "title": "Ble Key",
+            "type": "string"
+          },
+          "urls": {
+            "description": "Where the phone API can be reached, best first",
+            "items": {
+              "type": "string"
+            },
+            "title": "Urls",
+            "type": "array"
+          },
+          "collars": {
+            "items": {
+              "$ref": "#/components/schemas/CollarCode"
+            },
+            "title": "Collars",
+            "type": "array"
+          },
+          "server_time": {
+            "title": "Server Time",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "phone_id",
+          "home",
+          "ble_key_id",
+          "ble_key",
+          "urls",
+          "collars",
+          "server_time"
+        ],
+        "title": "Welcome",
+        "type": "object"
+      },
+      "CollarsRequest": {
+        "description": "Nothing to say yet: an empty object.",
+        "properties": {},
+        "title": "CollarsRequest",
+        "type": "object"
+      },
+      "CollarState": {
+        "properties": {
+          "state": {
+            "enum": [
+              "NO_FENCE",
+              "INSIDE",
+              "WARNING",
+              "OUTSIDE",
+              "LOST"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "lat": {
+            "maximum": 90,
+            "minimum": -90,
+            "title": "Lat",
+            "type": "number"
+          },
+          "lon": {
+            "maximum": 180,
+            "minimum": -180,
+            "title": "Lon",
+            "type": "number"
+          },
+          "battery_pct": {
+            "anyOf": [
+              {
+                "maximum": 255,
+                "minimum": 0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "255 or null: unknown",
+            "title": "Battery Pct"
+          },
+          "sats": {
+            "default": 0,
+            "maximum": 255,
+            "minimum": 0,
+            "title": "Sats",
+            "type": "integer"
+          },
+          "pdop": {
+            "default": 0,
+            "maximum": 655.35,
+            "minimum": 0,
+            "title": "Pdop",
+            "type": "number"
+          },
+          "clearance_m": {
+            "default": 0,
+            "description": "Distance inside (+) or outside (-) the line",
+            "maximum": 32767,
+            "minimum": -32768,
+            "title": "Clearance M",
+            "type": "integer"
+          },
+          "fence_version": {
+            "default": 0,
+            "maximum": 65535,
+            "minimum": 0,
+            "title": "Fence Version",
+            "type": "integer"
+          },
+          "corrections_enabled": {
+            "default": true,
+            "title": "Corrections Enabled",
+            "type": "boolean"
+          },
+          "shock_enabled": {
+            "default": false,
+            "title": "Shock Enabled",
+            "type": "boolean"
+          },
+          "beacon_active": {
+            "default": false,
+            "title": "Beacon Active",
+            "type": "boolean"
+          },
+          "beacon_silenced": {
+            "default": false,
+            "title": "Beacon Silenced",
+            "type": "boolean"
+          },
+          "no_fix": {
+            "default": false,
+            "title": "No Fix",
+            "type": "boolean"
+          },
+          "home": {
+            "default": false,
+            "title": "Home",
+            "type": "boolean"
+          },
+          "received": {
+            "description": "When the base got it, seconds since 1970 (base's clock)",
+            "title": "Received",
+            "type": "number"
+          },
+          "via": {
+            "default": "mesh",
+            "enum": [
+              "mesh",
+              "phone",
+              "sim"
+            ],
+            "title": "Via",
+            "type": "string"
+          },
+          "via_phone": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Which phone passed it on, with via \"phone\"",
+            "title": "Via Phone"
+          },
+          "fix_age_s": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "How old the GPS fix was when the report was made, when known",
+            "title": "Fix Age S"
+          }
+        },
+        "required": [
+          "state",
+          "lat",
+          "lon",
+          "received"
+        ],
+        "title": "CollarState",
+        "type": "object"
+      },
+      "CollarView": {
+        "properties": {
+          "node_id": {
+            "description": "Meshtastic node ID, like !a1b2c3d4",
+            "title": "Node Id",
+            "type": "string"
+          },
+          "dog": {
+            "default": "",
+            "title": "Dog",
+            "type": "string"
+          },
+          "pin": {
+            "anyOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "The collar's Bluetooth PIN, when the base knows it",
+            "title": "Pin"
+          },
+          "ble_name": {
+            "default": "",
+            "description": "The start of the collar's Bluetooth name",
+            "title": "Ble Name",
+            "type": "string"
+          },
+          "sim": {
+            "default": false,
+            "description": "A simulated collar: nothing to connect to",
+            "title": "Sim",
+            "type": "boolean"
+          },
+          "status": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/CollarState"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null
+          }
+        },
+        "required": [
+          "node_id"
+        ],
+        "title": "CollarView",
+        "type": "object"
+      },
+      "CollarsReply": {
+        "properties": {
+          "home": {
+            "title": "Home",
+            "type": "string"
+          },
+          "urls": {
+            "description": "Where the phone API can be reached now, best first: keep them",
+            "items": {
+              "type": "string"
+            },
+            "title": "Urls",
+            "type": "array"
+          },
+          "collars": {
+            "items": {
+              "$ref": "#/components/schemas/CollarView"
+            },
+            "title": "Collars",
+            "type": "array"
+          },
+          "server_time": {
+            "title": "Server Time",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "home",
+          "urls",
+          "collars",
+          "server_time"
+        ],
+        "title": "CollarsReply",
+        "type": "object"
+      },
+      "CollarStatus": {
+        "properties": {
+          "state": {
+            "enum": [
+              "NO_FENCE",
+              "INSIDE",
+              "WARNING",
+              "OUTSIDE",
+              "LOST"
+            ],
+            "title": "State",
+            "type": "string"
+          },
+          "lat": {
+            "maximum": 90,
+            "minimum": -90,
+            "title": "Lat",
+            "type": "number"
+          },
+          "lon": {
+            "maximum": 180,
+            "minimum": -180,
+            "title": "Lon",
+            "type": "number"
+          },
+          "battery_pct": {
+            "anyOf": [
+              {
+                "maximum": 255,
+                "minimum": 0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "255 or null: unknown",
+            "title": "Battery Pct"
+          },
+          "sats": {
+            "default": 0,
+            "maximum": 255,
+            "minimum": 0,
+            "title": "Sats",
+            "type": "integer"
+          },
+          "pdop": {
+            "default": 0,
+            "maximum": 655.35,
+            "minimum": 0,
+            "title": "Pdop",
+            "type": "number"
+          },
+          "clearance_m": {
+            "default": 0,
+            "description": "Distance inside (+) or outside (-) the line",
+            "maximum": 32767,
+            "minimum": -32768,
+            "title": "Clearance M",
+            "type": "integer"
+          },
+          "fence_version": {
+            "default": 0,
+            "maximum": 65535,
+            "minimum": 0,
+            "title": "Fence Version",
+            "type": "integer"
+          },
+          "corrections_enabled": {
+            "default": true,
+            "title": "Corrections Enabled",
+            "type": "boolean"
+          },
+          "shock_enabled": {
+            "default": false,
+            "title": "Shock Enabled",
+            "type": "boolean"
+          },
+          "beacon_active": {
+            "default": false,
+            "title": "Beacon Active",
+            "type": "boolean"
+          },
+          "beacon_silenced": {
+            "default": false,
+            "title": "Beacon Silenced",
+            "type": "boolean"
+          },
+          "no_fix": {
+            "default": false,
+            "title": "No Fix",
+            "type": "boolean"
+          },
+          "home": {
+            "default": false,
+            "title": "Home",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "state",
+          "lat",
+          "lon"
+        ],
+        "title": "CollarStatus",
+        "type": "object"
+      },
+      "PhonePosition": {
+        "properties": {
+          "lat": {
+            "maximum": 90,
+            "minimum": -90,
+            "title": "Lat",
+            "type": "number"
+          },
+          "lon": {
+            "maximum": 180,
+            "minimum": -180,
+            "title": "Lon",
+            "type": "number"
+          },
+          "accuracy_m": {
+            "anyOf": [
+              {
+                "minimum": 0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "title": "Accuracy M"
+          }
+        },
+        "required": [
+          "lat",
+          "lon"
+        ],
+        "title": "PhonePosition",
+        "type": "object"
+      },
+      "RelayRequest": {
+        "description": "A collar's report the phone got over Bluetooth, for a collar the base has not heard from\nover the mesh lately.",
+        "properties": {
+          "node_id": {
+            "pattern": "^![0-9a-f]{8}$",
+            "title": "Node Id",
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/components/schemas/CollarStatus"
+          },
+          "fix_age_s": {
+            "anyOf": [
+              {
+                "maximum": 65535,
+                "minimum": 0,
+                "type": "integer"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Age of the collar's GPS fix when it answered, if it has had one",
+            "title": "Fix Age S"
+          },
+          "age_ms": {
+            "default": 0,
+            "description": "How long ago the phone got it",
+            "minimum": 0,
+            "title": "Age Ms",
+            "type": "integer"
+          },
+          "phone_position": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PhonePosition"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "default": null,
+            "description": "Where the phone was: within Bluetooth range of the dog"
+          }
+        },
+        "required": [
+          "node_id",
+          "status"
+        ],
+        "title": "RelayRequest",
+        "type": "object"
+      },
+      "RelayReply": {
+        "properties": {
+          "recorded": {
+            "title": "Recorded",
+            "type": "boolean"
+          },
+          "reason": {
+            "enum": [
+              "recorded",
+              "heard_over_mesh",
+              "too_soon",
+              "too_old",
+              "unknown_collar"
+            ],
+            "title": "Reason",
+            "type": "string"
+          },
+          "next_s": {
+            "description": "Offer the next report after this many seconds",
+            "title": "Next S",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "recorded",
+          "reason",
+          "next_s"
+        ],
+        "title": "RelayReply",
+        "type": "object"
+      }
+    }
+  }
+}

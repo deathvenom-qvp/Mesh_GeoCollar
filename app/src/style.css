@@ -53,6 +53,10 @@ button.back { border: 0; background: none; font-size: 30px; line-height: 1; padd
 .dot.s-warning { background: var(--warn); }
 .dot.s-inside { background: var(--ok); }
 
+.bases { padding: 0 16px 8px; }
+.bases p { margin: 4px 0; color: var(--muted); font-size: 14px; }
+.bases p.bad { color: var(--bad); }
+
 .empty { padding: 24px 20px; }
 .empty ol { padding-left: 22px; margin: 0 0 16px; }
 .empty li { margin: 6px 0; }

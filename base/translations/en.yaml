@@ -21,3 +21,6 @@ configuration:
       home location (Settings > System > General).
 network:
   8099/tcp: Web page without Home Assistant login. Leave empty unless you need it.
+  8100/tcp: >-
+    Phone app. Only the phone app's encrypted API is on this port, so it is safe to forward from
+    the internet for the app to see your dogs away from home. Empty: the app works over Bluetooth only.

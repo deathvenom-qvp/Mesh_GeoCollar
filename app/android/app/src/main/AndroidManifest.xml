@@ -8,6 +8,7 @@
         android:label="@string/app_name"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
+        android:usesCleartextTraffic="true"
         android:theme="@style/AppTheme">
 
         <activity
@@ -47,7 +48,8 @@
 
     <!-- Permissions -->
 
-    <!-- Map tiles. -->
+    <!-- Map tiles, and the base station's phone API (at home and over the internet). Plain http to
+         the base is allowed above: what the app and the base say is encrypted end to end anyway. -->
     <uses-permission android:name="android.permission.INTERNET" />
     <!-- Finding and talking to the collar. The scan is never used to work out where the phone is. -->
     <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />

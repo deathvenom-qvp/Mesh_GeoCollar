@@ -1,0 +1,25 @@
+{
+  "config": {
+    "step": {
+      "hassio_confirm": {
+        "title": "GeoCollar",
+        "description": "Let the GeoCollar phone app reach the GeoCollar base app through Home Assistant's own address? Only the phone app's encrypted API is passed on, never the base's page."
+      },
+      "user": {
+        "title": "GeoCollar base app",
+        "description": "Where Home Assistant reaches the GeoCollar base app. Only the phone app's encrypted API is passed on, never the base's page.",
+        "data": {
+          "phone_url": "The base's phone port, like http://192.168.1.5:8100",
+          "page_url": "The base's page, like http://192.168.1.5:8099 (empty: the same machine, port 8099)"
+        }
+      }
+    },
+    "error": {
+      "bad_url": "Give an address like http://192.168.1.5:8100."
+    },
+    "abort": {
+      "already_configured": "GeoCollar is set up already.",
+      "no_address": "The base app did not say its address."
+    }
+  }
+}

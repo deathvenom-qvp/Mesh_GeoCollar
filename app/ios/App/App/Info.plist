@@ -35,6 +35,17 @@
 			</array>
 		</dict>
 	</array>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<!-- The base station's phone API is often plain http on the home network or a port
+		     forward. What the app and the base say is encrypted end to end anyway. -->
+		<key>NSAllowsArbitraryLoads</key>
+		<true/>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>GeoCollar reaches your base station on your home network to show where your dogs are.</string>
 	<key>NSBluetoothAlwaysUsageDescription</key>
 	<string>GeoCollar uses Bluetooth to reach your dog's collar: to show where it is, mute its lost alert, and make it beep or vibrate.</string>
 	<key>NSCameraUsageDescription</key>

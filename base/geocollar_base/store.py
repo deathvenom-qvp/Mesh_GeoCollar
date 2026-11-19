@@ -139,9 +139,10 @@ class Store:
                 c["sim"] = settings
             self._save()
 
-    def record_status(self, node_id: str, status: dict) -> dict | None:
+    def record_status(self, node_id: str, status: dict, direct: bool = True) -> dict | None:
         """Record a report from a collar on this base and return it as stored (None for an unknown
-        node: a collar is only ever added on purpose, so its reports are dropped)."""
+        node: a collar is only ever added on purpose, so its reports are dropped). direct=False
+        for one a phone passed on: it says nothing about whether the base and collar hear each other."""
         with self._lock:
             c = self._data["collars"].get(node_id)
             if c is None:
@@ -154,9 +155,11 @@ class Store:
                     and (last.get("lat") or last.get("lon")):
                 status["lat"], status["lon"] = last["lat"], last["lon"]
             c["status"] = status
-            c.pop("radio_changed", None)  # heard on the base's current settings
-            c.pop("hello", None)  # it reports to this base now
-            c.pop("send_error", None)  # and the base's messages reach it
+            if direct:
+                c["heard_direct"] = status["received"]
+                c.pop("radio_changed", None)  # heard on the base's current settings
+                c.pop("hello", None)  # it reports to this base now
+                c.pop("send_error", None)  # and the base's messages reach it
             # The trail is where the dog was at that moment: a report without a current fix
             # repeats an old position and adds nothing to it.
             if (status.get("lat") or status.get("lon")) and not status.get("no_fix"):

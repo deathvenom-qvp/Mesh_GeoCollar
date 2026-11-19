@@ -2,7 +2,7 @@
 # Settings > Add-ons (called Apps in newer releases) > store > ⋮ > Repositories, then install
 # "GeoCollar base". Home Assistant builds the image from the Dockerfile on first install.
 name: GeoCollar base
-version: "0.19.9"
+version: "0.19.10"
 slug: geocollar_base
 description: Draw geofences and track Meshtastic dog collars. Built on Meshtastic; collar protocol by OpenShock.
 url: https://github.com/deathvenom-qvp/Mesh_GeoCollar
@@ -16,13 +16,27 @@ ingress: true
 panel_icon: mdi:dog-side
 panel_title: GeoCollar
 # Optional direct port for use outside Home Assistant. Off by default: the page has no login.
+# 8100 is the phone API alone (encrypted, per-phone keys), for the phone app at home and, with a
+# port forward or a reverse proxy, over the internet. It serves nothing else.
 ports:
   8099/tcp: null
+  8100/tcp: 8100
 # Access to USB serial devices, for a Meshtastic node plugged into the Home Assistant machine,
 # and for flashing a collar plugged in by USB.
 uart: true
 # Home Assistant's home location (Settings > System > General), to start the map there.
 homeassistant_api: true
+# The phone app through Home Assistant's own address: this app puts the GeoCollar integration in
+# Home Assistant's custom_components (its own folder only) and announces itself, so Home
+# Assistant offers to set it up. The integration passes /api/geocollar/phone/... to port 8100.
+map:
+  - type: homeassistant_config
+    read_only: false
+discovery:
+  - geocollar
+# The port Home Assistant publishes the phone API on, and this machine's address on the network:
+# the Base URL the phone app is given when the owner has not set one.
+hassio_api: true
 schema:
   mesh_serial: device(subsystem=tty)?
   mesh_host: str?

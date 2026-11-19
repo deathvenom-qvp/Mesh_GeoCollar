@@ -286,18 +286,20 @@ read it. Your phone number goes out in the clear to anyone nearby, which is the 
 
 ## The phone app
 
-The base reaches a collar over the mesh. The GeoCollar phone app (Android and iOS) reaches it
-over Bluetooth instead, from a few dozen metres, with no mesh and no internet. It is for the
-walk to fetch a dog that got out: it shows the collar on a map next to you, with the distance and
-direction, and it can mute the lost alert once you have the dog. Installing it is described in
-the repository's [app/README.md](https://github.com/deathvenom-qvp/Mesh_GeoCollar/tree/main/app#install).
+The GeoCollar phone app (Android and iOS) shows where each dog is in two ways: from this base,
+over your home network or the internet (see [Seeing the dogs away from home](#seeing-the-dogs-away-from-home)),
+and straight from a collar over Bluetooth, from a few dozen metres, with no mesh and no internet.
+It is for the walk to fetch a dog that got out: it shows the collar on a map next to you, with the
+distance and direction, and it can mute the lost alert once you have the dog. Installing it is
+described in the repository's [app/README.md](https://github.com/deathvenom-qvp/Mesh_GeoCollar/tree/main/app#install).
 
 To link a phone:
 
 1. Select any collar and press **Connect app** in its **Phone app** panel. Say whose phone it is.
-2. A QR code appears. In the app, tap **Add a collar** and point the phone at it. If the camera
-   cannot be used, **Copy the code as text** and paste it into the app. The phone is now linked
-   to every collar on the base, and the app lists them all.
+2. A QR code appears. Have the phone on your home Wi-Fi (or able to reach the Base URL), and in
+   the app tap **Add a collar** and point the phone at the code. If the camera cannot be used,
+   **Copy the code as text** and paste it into the app. The phone fetches its keys from the base
+   with the code, and the app lists every collar on the base.
 3. The base sends each collar its key for the phone with the collar's next report. A collar's
    panel says "Waiting for Rex to confirm" until that collar has it, then "Rex has this list".
    The app says so too if it reaches the collar first.
@@ -305,19 +307,23 @@ To link a phone:
    collar you locked to the base that is the PIN in the collar's panel, and the app shows it.
    Otherwise it is the code on the collar's screen, or 123456 on a collar without one.
 
-A collar you add to the base later trusts every linked phone at once. The phone list then says
-which phones do not list it yet: press **Add Bella** next to a phone and scan that code with
-**Add a collar** in the app. That code holds no key (only the list of collars), so it can be
-shown again at any time; the app also drops collars the base no longer has.
+A collar you add to the base later trusts every linked phone at once, and the app lists it the
+next time it reaches the base. (A phone linked by base 0.19.7 to 0.19.9 is listed as "Bluetooth
+only": press **Add Bella** next to it to show it a code with the collar list, or **Link for the
+internet** to give it a one-time code that brings it onto the network, keeping its Bluetooth key.)
 
 Phones that an older version of the base linked to one collar are still listed under that collar
 as "Rex only" and keep working there. To reach every collar, remove such a phone and connect it
 again. Each collar holds at most four phones, those included.
 
-The code is that phone's key to every collar on the base and is shown once. Press **Done** when
-the phone has it. Anyone who photographs the code can link their own phone, so treat it like a
-house key; if in doubt, remove the phone from the list and make a new code. Removing a phone
-takes it off every collar. A base takes up to 4 phones.
+The code works once, within 10 minutes, and has no readable text in it: no address, no name, no
+key. The phone gets its keys from the base with it, encrypted, and the code is then spent, so a
+photo of it taken afterwards is worthless. Someone who scanned it before your phone could link
+theirs instead: your app would then say the code was used already. If that happens and it was not
+you, remove the phone from the list. Each phone shows when it was last in touch with the base.
+**New code** next to a phone links it again (after reinstalling the app, or on a new phone): the
+old one is shut out once the new code is used, and the collars need nothing new. Removing a phone
+shuts it out of the base at once and takes it off every collar. A base takes up to 4 phones.
 
 What a linked phone can do: see the collar's position, state, battery and GPS fix, mute the lost
 alert, make the collar beep or vibrate, and pause and resume its corrections. It cannot shock,
@@ -333,8 +339,73 @@ While a collar is lost and has a linked phone, it no longer goes silent on Bluet
 the app can find it at any moment. That costs a little battery. A collar with no linked phone
 behaves as before.
 
-The app needs collar firmware 0.20 or later. A simulated collar has no Bluetooth, so the app
-shows its built-in demo collar for one.
+The app needs collar firmware 0.20 or later for Bluetooth. A simulated collar has no Bluetooth,
+so the app shows its built-in demo collar for one.
+
+### Seeing the dogs away from home
+
+While the app is open it asks the base every 30 seconds for each collar's last report, so it
+shows where the dogs are wherever the phone can reach the base. And when the app is connected to
+a collar over Bluetooth while the base has not heard that collar over the mesh for two of its
+reports and a minute (the collar is out of the mesh's reach), the app passes the collar's report
+on to the base every 30 seconds, with the phone's own position. The page then says "via Ken's
+phone" next to that report, on the map, in the collar's panel and in the Log.
+
+**In Home Assistant, there is nothing to forward or proxy.** Phones reach the base through Home
+Assistant's own address, the one you already reach Home Assistant at from outside (your reverse
+proxy's HTTPS URL, or Home Assistant Cloud), at the path `/api/geocollar/phone`. A small
+integration in Home Assistant passes that path, and nothing else, on to this app's phone API. This
+app puts it in place by itself (in `custom_components/geocollar` in Home Assistant's config folder,
+which is why it asks to write there) and tells Home Assistant about itself, so:
+
+1. After installing or updating this app, restart Home Assistant once.
+2. Under **Settings > Devices & services**, GeoCollar shows as **Discovered**: press **Add**.
+
+That's all: the integration tells the base Home Assistant's addresses every hour, and phones are
+given them (shown under **Settings > Phone app away from home**). The path needs no Home Assistant
+login, because the phone app has none; it doesn't need one either, as every request on it is
+encrypted and signed with a phone's own key, which only the base can check, and the integration
+passes on the phone API only, never the page. It can't read what passes through. If this app
+can't write to the config folder, copy `base/geocollar_base/ha_integration/geocollar` from the
+repository into `custom_components/` yourself. A base in Docker can use the integration too: add
+GeoCollar by hand under Devices & services and give it the base's phone port, like
+`http://192.168.1.5:8100`.
+
+Without the integration (or in Docker), phones talk to the base on **port 8100**, which serves nothing but the phone API. Every request and
+answer on it is encrypted and signed with that phone's own key, and old or repeated requests are
+refused, so plain http is safe there and so is a reverse proxy in between. The API is documented
+in OpenAPI 3.1, at `/api/phone/v1/openapi.json` (and `/api/phone/v1/docs`) on that port.
+
+- **At home** it works as it is: phones are given this machine's address on your network.
+- **Away from home** the port has to be reachable from the internet: forward port 8100 on your
+  router to this machine, or put a reverse proxy in front of it. Then enter its address under
+  **Settings > Phone app away from home > Base URL** (for example `https://geocollar.example.com`
+  or `http://203.0.113.5:8100`). Linked phones pick up a new address the next time they reach the
+  base. Left empty, the base gives phones Home Assistant's own URL (its external, then internal
+  URL from Settings > System > Network) with the phone port, then this machine's address, and says
+  under the setting when none of them will work from outside. Home Assistant Cloud (Nabu Casa)
+  passes on Home Assistant itself only, not this port.
+- In Home Assistant the port is on by default, on the app's **Network** tab; if you change the
+  host port there, the base gives phones that one. In Docker, map it as in `docker-compose.yml`
+  (or set `GEOCOLLAR_PHONE_PORT`); `GEOCOLLAR_PHONE_URL` sets the Base URL.
+- Don't forward port 8099, the page: it has no login.
+
+**Behind a reverse proxy of its own** (only without the integration) such as Nginx Proxy Manager, with everything coming in over HTTPS on
+port 443, point the proxy at port 8100 and give phones the proxy's address. No port number is
+needed in the Base URL, and nothing has to be forwarded on the router but 443.
+
+1. In Nginx Proxy Manager, **Add Proxy Host**: a domain of its own, for example
+   `geocollar.example.com` (add the DNS name as you did for Home Assistant); scheme `http`;
+   forward host the Home Assistant machine's address (for example `192.168.1.5`), forward port
+   `8100`. Websockets support is not needed, nor any custom header.
+2. On its **SSL** tab, request a Let's Encrypt certificate and tick **Force SSL**.
+3. On the base, **Settings > Phone app away from home > Base URL**: `https://geocollar.example.com`.
+
+Rather than a domain of its own, a path on an existing one works too: in Home Assistant's proxy
+host, add a **Custom location** `/geocollar` forwarding to `http`, the same address, port `8100`,
+and set the Base URL to `https://ha.example.com/geocollar`. The base finds its API behind the
+path whether the proxy strips it or not. Either way the proxy sees only encrypted requests; the
+phone and the base check each other with the phone's key, not with the certificate.
 
 ## Finding your place on the map
 
@@ -479,8 +550,15 @@ that an older version left in update mode says so in its panel; flash it over US
   Bluetooth PIN gets a phone as far as Meshtastic's own Bluetooth service; the key is what the
   collar's GeoCollar part asks for, on every request, and it only opens the short list of things
   a phone may do (no shock, no fences, no settings). Keys are random, differ per phone, are sent
-  to the collar encrypted, and can be taken back one phone at a time. The page shows a key once,
-  in the QR code, and the base never sends it anywhere else.
+  to the collar encrypted, and can be taken back one phone at a time. The base sends a phone its
+  key once, encrypted, when the phone uses its one-time code; the code itself holds no key.
+- A linked phone reaches the base only through the phone API on its own port, with a key of its
+  own that is never sent anywhere: the phone and the base each work it out (ECDH on P-256, with a
+  fresh key pair on both sides, mixed with the code's secret), so even someone who recorded the
+  traffic and later found the code could not. Every request is AES-256-GCM encrypted and signed,
+  bound to the operation and to the phone, dated, and refused if seen before. A phone can read the
+  collars' names and last reports and pass on a report from a collar it is connected to; it cannot
+  change anything on the base. Removing the phone deletes its key.
 - The collar's hardware switch (if you fitted one) turns off every correction, including a beep,
   vibration or shock you send from the page.
 - The page has no login of its own. So that another website open in your browser cannot send
@@ -502,5 +580,7 @@ included in Home Assistant backups. The app keeps an hourly copy beside it, `geo
 Each collar's log is a file of its own in `/data/log`, also in the backups.
 If a power cut damages the data file, the app starts from that copy, keeps the damaged file under
 a `.damaged-` name, and says so in its log. Through the sidebar the page is behind your Home Assistant login. The
-optional port on the **Network** tab opens the page without any login, so leave it empty unless
-you need it and trust your network.
+optional port 8099 on the **Network** tab opens the page without any login, so leave it empty unless
+you need it and trust your network. Port 8100 serves only the phone app's encrypted API (see
+[Seeing the dogs away from home](#seeing-the-dogs-away-from-home)); clear it on the Network tab
+if you use the app over Bluetooth only.

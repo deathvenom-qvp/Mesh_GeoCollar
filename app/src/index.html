@@ -16,6 +16,7 @@
   <header class="bar"><h1>GeoCollar</h1></header>
   <div class="scroll">
     <ul id="collars" class="collars"></ul>
+    <div id="bases" class="bases"></div>
     <div id="empty" class="empty" hidden>
       <h2>Link this phone to your collars</h2>
       <ol>
@@ -23,8 +24,9 @@
         <li>Pick any collar and press <b>Connect app</b>.</li>
         <li>Scan the code it shows with the button below. Every collar on the base appears here.</li>
       </ol>
-      <p class="muted">A linked phone talks to each collar directly over Bluetooth, away from home too. It can show
-        where a collar is, mute its lost alert, and make it beep or vibrate. It can never shock.</p>
+      <p class="muted">A linked phone gets where each dog is from the base station, over the internet when the base
+        is set up for it, and talks to each collar directly over Bluetooth when it is near. It can mute a collar's lost
+        alert and make it beep or vibrate. It can never shock.</p>
     </div>
   </div>
   <footer class="foot">
@@ -43,8 +45,8 @@
   </header>
   <div class="scroll pad">
     <p>On the base station, pick any collar, press <b>Connect app</b>, and point this phone at the code.
-      It links this phone to every collar on the base. For a collar added since, press <b>Add</b> next to this
-      phone in the base's list and scan that code.</p>
+      It links this phone to every collar on the base. Have the phone on your home Wi-Fi: it fetches its keys from
+      the base with the code. Collars added on the base later show up here by themselves.</p>
     <div id="camera" class="camera">
       <video id="video" muted playsinline></video>
       <div class="frame" aria-hidden="true"></div>
@@ -53,8 +55,8 @@
     <p id="addMsg" class="error" role="alert" hidden></p>
     <details id="pasteBox">
       <summary>Type or paste the code instead</summary>
-      <p class="muted">Under the QR code the base station has a <b>Copy the code as text</b> button. Send the text to this phone and paste it here. It is the key to your collars, so send it somewhere private and delete the message afterwards.</p>
-      <textarea id="code" rows="3" autocapitalize="off" autocomplete="off" spellcheck="false" placeholder="geocollar://pair?..."></textarea>
+      <p class="muted">Under the QR code the base station has a <b>Copy the code as text</b> button. Send the text to this phone and paste it here. It works once, within 10 minutes; still, send it somewhere private and delete the message afterwards.</p>
+      <textarea id="code" rows="3" autocapitalize="off" autocomplete="off" spellcheck="false" placeholder="AwB3..."></textarea>
       <button id="useCode" class="primary">Link this phone</button>
     </details>
   </div>

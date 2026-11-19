@@ -26,6 +26,17 @@ jobs:
         env:
           PYTHONPATH: base
 
+  ha-integration-tests:
+    name: Home Assistant integration tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - run: pip install -r base/requirements-ha-test.txt
+      - run: python -m pytest -q base/tests_ha
+
   firmware-build:
     name: Firmware build (Heltec Wireless Tracker)
     runs-on: ubuntu-latest
