@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.19.7
+
+One **Connect app** for the whole household. Base and phone app; no new collar firmware. Tested
+with the base's and the app's own tests and in a desktop browser with simulated collars, **not on
+a real collar or phone**.
+
+- **A phone linked once reaches every collar on the base.** Press **Connect app** on any collar,
+  scan the code, and the app lists all of the base's collars, each ready to connect to. Each
+  collar gets its own key for the phone, made from the phone's key, so a key read out of one
+  collar opens no other.
+- **Collars added later** trust the linked phones as soon as they are added (or, for one found
+  over USB or on the mesh, with their first report). The phone list says which phones do not
+  list a collar yet; **Add Bella** next to a phone shows a code with the base's collar list and
+  no key, which brings the app up to date and drops collars the base no longer has.
+- **Remove** takes a phone off every collar. A base takes up to 4 phones.
+- Phones linked by an older base stay on their one collar, marked "Rex only", until removed.
+  Linking them again makes them reach every collar.
+- The app needs this version to read the new code; an older app says the code is from a newer
+  GeoCollar.
+
 ## 0.19.6
 
 How often the collar takes a GPS fix inside the fence is now yours to set. New collar firmware

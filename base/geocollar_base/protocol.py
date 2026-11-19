@@ -7,11 +7,12 @@ import base64
 import hashlib
 import hmac
 import math
+import re
 import struct
 from dataclasses import dataclass
 from enum import IntEnum
 from typing import Iterable
-from urllib.parse import parse_qs, quote, urlsplit
+from urllib.parse import parse_qs, parse_qsl, quote, urlsplit
 
 PORT_NUM = 300
 VERSION = 2  # 2: zones carry danger / warning / attention band widths
@@ -575,6 +576,68 @@ def parse_pairing_code(code: str) -> dict:
         raise ValueError("bad app key")
     return {"node_id": "!" + q["n"], "key_id": int(q["i"], 16), "key": key, "pin": q.get("p"),
             "ble_name": q.get("b", ""), "dog": q.get("d", ""), "sim": q.get("s") == "1"}
+
+
+# A phone linked to the whole base (pairing code v2). It gets one key from the base, and each
+# collar gets its own key made from it: HMAC-SHA256(phone key, "GCK1" + node number), first 16
+# bytes. The phone works the same key out for a collar it hears of later, and a key read out of
+# one collar's flash opens no other collar. The collar itself sees an ordinary app key.
+def collar_app_key(phone_key: bytes, node_id: str | int) -> bytes:
+    if len(phone_key) != APP_KEY_LEN:
+        raise ValueError("bad app key")
+    node = node_id if isinstance(node_id, int) else int(node_id.lstrip("!"), 16)
+    return hmac.new(phone_key, b"GCK1" + struct.pack("<I", node), hashlib.sha256).digest()[:APP_KEY_LEN]
+
+
+def home_pairing_code(home: str, collars: Iterable[dict], key_id: int | None = None,
+                      key: bytes | None = None) -> str:
+    """The code for every collar on the base. With a phone key it links a phone ("Connect app");
+    without one it only brings a phone that is already linked up to date with the base's collars.
+
+    geocollar://pair?v=2&h=<base, 8 hex>[&i=<key id, 8 hex>&k=<phone key, base64url>]
+    then for each collar n=<node, 8 hex>[&p=<PIN>][&b=<Bluetooth name>][&d=<dog's name>][&s=1]
+
+    A collar's fields follow its n= in order, as in a v1 code."""
+    if not re.fullmatch(r"[0-9a-f]{8}", home or ""):
+        raise ValueError("bad base id")
+    parts = ["v=2", f"h={home}"]
+    if key is not None:
+        if len(key) != APP_KEY_LEN or not key_id or not 0 < key_id <= 0xFFFFFFFF:
+            raise ValueError("bad app key")
+        parts += [f"i={key_id:08x}", "k=" + base64.urlsafe_b64encode(key).decode().rstrip("=")]
+    for c in collars:
+        parts.append(f"n={c['node_id'].lstrip('!')}")
+        if c.get("pin"):
+            parts.append(f"p={int(c['pin']):06d}")
+        if c.get("ble_name"):
+            parts.append("b=" + quote(c["ble_name"], safe=""))
+        if c.get("dog"):
+            parts.append("d=" + quote(c["dog"], safe=""))
+        if c.get("sim"):
+            parts.append("s=1")
+    return f"{PAIRING_SCHEME}://pair?" + "&".join(parts)
+
+
+def parse_home_pairing_code(code: str) -> dict:
+    """The reverse of home_pairing_code, as the app reads it. For tests."""
+    url = urlsplit(code.strip())
+    pairs = parse_qsl(url.query, keep_blank_values=True)
+    head = {k: v for k, v in pairs[:4] if k in ("v", "h", "i", "k")}
+    if url.scheme != PAIRING_SCHEME or url.netloc != "pair" or head.get("v") != "2":
+        raise ValueError("not a GeoCollar v2 pairing code")
+    out = {"home": head.get("h"), "key_id": None, "key": None, "collars": []}
+    if "k" in head:
+        out["key_id"] = int(head["i"], 16)
+        out["key"] = base64.urlsafe_b64decode(head["k"] + "=" * (-len(head["k"]) % 4))
+    names = {"p": "pin", "b": "ble_name", "d": "dog"}
+    for k, v in pairs:
+        if k == "n":
+            out["collars"].append({"node_id": "!" + v, "pin": None, "ble_name": "", "dog": "", "sim": False})
+        elif out["collars"] and k in names:
+            out["collars"][-1][names[k]] = v
+        elif out["collars"] and k == "s":
+            out["collars"][-1]["sim"] = v == "1"
+    return out
 
 
 # The app's half of a session, for tests: the app itself is JavaScript (app/src/applink.js) and

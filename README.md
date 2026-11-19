@@ -142,17 +142,19 @@ The base station needs the mesh to reach a collar. The phone app does not: it ta
 directly over Bluetooth, from a few dozen metres away, wherever you are. It is meant for the walk
 to fetch a lost dog.
 
-1. In the base app, pick the collar and press **Connect app**. Name the phone, and a QR code appears.
-2. In the phone app, tap **Add a collar** and scan the code. That is the phone's key to this one
-   collar. The base hands the same key to the collar over the mesh.
+1. In the base app, pick any collar and press **Connect app**. Name the phone, and a QR code appears.
+2. In the phone app, tap **Add a collar** and scan the code. That links the phone to every collar
+   on the base, so a home with several dogs scans once. The base hands each collar its key for
+   that phone over the mesh. A collar added to the base later trusts the linked phones straight
+   away; to list it in the app, press **Add** next to the phone on the base and scan that code.
 3. Near the collar, the app connects by itself and shows the collar on a map next to your own
    position, with the distance and direction, its state, battery and GPS fix.
 4. **Mute lost alert** stops the collar's lost beacon, the same as *Silence lost alert* on the
    base. The app can also make the collar beep or vibrate, and pause and resume its corrections.
    It can never shock.
 
-Remove a phone under **Connect app** on the base and the collar stops accepting it. Up to four
-phones can be linked to a collar. How to install the app, and what it does and does not protect
+Remove a phone under **Connect app** on the base and every collar stops accepting it. Up to four
+phones can be linked to a base. How to install the app, and what it does and does not protect
 against, is in [app/README.md](app/README.md). There is a demo collar in the app to try it without
 any hardware.
 

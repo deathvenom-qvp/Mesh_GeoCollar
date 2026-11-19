@@ -277,3 +277,34 @@ def test_pairing_code_round_trip():
     for bad in ("https://example.com/pair?v=1", "geocollar://pair?v=2&n=a1b2c3d4&i=1&k=AAECAwQFBgcICQoLDA0ODw"):
         with pytest.raises(ValueError):
             p.parse_pairing_code(bad)
+
+
+def test_a_phone_linked_to_the_whole_base_has_a_key_for_each_collar():
+    # Golden bytes, shared with app/test/protocol.test.mjs.
+    assert p.collar_app_key(APP_KEY, "!a1b2c3d4").hex() == "faabcb3c8ddf0f9da74afdae47c96531"
+    assert p.collar_app_key(APP_KEY, 0xA1B2C3D4) == p.collar_app_key(APP_KEY, "!a1b2c3d4")
+    assert p.collar_app_key(APP_KEY, "!a1b2c3d5") != p.collar_app_key(APP_KEY, "!a1b2c3d4")
+    with pytest.raises(ValueError):
+        p.collar_app_key(bytes(15), "!a1b2c3d4")
+
+
+def test_home_pairing_code_round_trip():
+    collars = [{"node_id": "!a1b2c3d4", "pin": 4711, "ble_name": "BE", "dog": "Bella & Co"},
+               {"node_id": "!5a000001", "dog": "Sim", "sim": True}]
+    code = p.home_pairing_code("0badc0de", collars, APP_KEY_ID, APP_KEY)
+    # Shared with app/test/protocol.test.mjs.
+    assert code == ("geocollar://pair?v=2&h=0badc0de&i=1a2b3c4d&k=AAECAwQFBgcICQoLDA0ODw"
+                    "&n=a1b2c3d4&p=004711&b=BE&d=Bella%20%26%20Co&n=5a000001&d=Sim&s=1")
+    back = p.parse_home_pairing_code(code)
+    assert back == {"home": "0badc0de", "key_id": APP_KEY_ID, "key": APP_KEY, "collars": [
+        {"node_id": "!a1b2c3d4", "pin": "004711", "ble_name": "BE", "dog": "Bella & Co", "sim": False},
+        {"node_id": "!5a000001", "pin": None, "ble_name": "", "dog": "Sim", "sim": True}]}
+    # Without a key: the collar list, for a phone already linked to this base.
+    bare = p.home_pairing_code("0badc0de", collars[1:])
+    assert bare == "geocollar://pair?v=2&h=0badc0de&n=5a000001&d=Sim&s=1"
+    assert p.parse_home_pairing_code(bare)["key"] is None
+    for bad in (("0BADC0DE", None, None), ("0badc0d", None, None), ("0badc0de", 0, APP_KEY), ("0badc0de", 1, bytes(3))):
+        with pytest.raises(ValueError):
+            p.home_pairing_code(bad[0], collars, bad[1], bad[2])
+    with pytest.raises(ValueError):
+        p.parse_home_pairing_code("geocollar://pair?v=1&n=a1b2c3d4&i=1a2b3c4d&k=AAECAwQFBgcICQoLDA0ODw")

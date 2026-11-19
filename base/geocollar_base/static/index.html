@@ -166,6 +166,7 @@
   .applist { list-style: none; margin: 8px 0 0; padding: 0; font-size: 13px; }
   .applist li { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; padding: 4px 0; border-bottom: 1px solid var(--line); }
   .applist .muted { font-size: 12px; }
+  .applist .acts { white-space: nowrap; }
   #appForm { margin-top: 8px; }
   #appForm input { width: 100%; margin: 2px 0 6px; }
   .appcode { margin-top: 8px; padding: 10px; border: 1px solid var(--line); border-radius: 8px; font-size: 13px; }
@@ -372,8 +373,9 @@
 
     <section id="appBox">
       <div class="row spread"><h2 style="margin:0">Phone app</h2><button id="appConnect">Connect app</button></div>
-      <div class="muted" style="margin-top:6px">The GeoCollar app on your phone talks to this collar over Bluetooth when you are near it.
-        It shows where the dog is and can silence the lost alert. Each phone gets a code of its own.</div>
+      <div class="muted" style="margin-top:6px">The GeoCollar app on your phone talks to your collars over Bluetooth when you are near them.
+        It shows where each dog is and can silence the lost alert. A phone linked here can connect to every collar on this base,
+        and to collars you add later. Each phone gets a code of its own.</div>
       <ul class="applist" id="appList"></ul>
       <div class="muted" id="appSync" style="margin-top:6px"></div>
       <form id="appForm" hidden>
@@ -1385,12 +1387,20 @@ function renderSelected() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Phone app. "Connect app" makes a key for one phone and shows it as a QR code; the base sends
-// the collar the list of keys over the mesh. The key is on this page only while the code shows.
+// Phone app. "Connect app" makes a key for one phone and shows it as a QR code, with every collar
+// on the base in it; the base sends each collar its key for that phone over the mesh. The key is
+// on this page only while the code shows. A collar added later trusts the linked phones at once,
+// and "Add <dog>" shows the phone a code with the collar list (no key) to bring the app up to date.
 // ---------------------------------------------------------------------------------------------
 const APP_URL = 'https://github.com/deathvenom-qvp/Mesh_GeoCollar/tree/main/app#install';
-let appCode = null; // { id: the collar it is for, code: the pairing code on screen }
+let appCode = null; // { code: the pairing code on screen }
+let phonesInfo = { phones: [], room: 4, max: 4, synced: {} };
 const appSay = t => { $('appMsg').textContent = t; };
+const dogList = ids => ids.map(id => collars[id] ? collars[id].name : id).join(', ').replace(/, ([^,]*)$/, ' and $1');
+
+async function loadPhones() {
+  try { phonesInfo = await api('phones'); } catch { /* keep the last */ }
+}
 
 function qrSvg(text) {
   const qr = qrcode(0, 'M'); // the smallest size that fits, with 15% error correction
@@ -1409,20 +1419,35 @@ function qrSvg(text) {
 }
 
 function renderApps(c) {
-  const apps = c.apps || [];
-  $('appList').replaceChildren(...apps.map(a => el('li', {},
-    el('span', {}, a.name, ' ', el('span', { class: 'muted' }, a.created ? `linked ${ago(Date.now() / 1000 - a.created)}` : '')),
-    el('button', { class: 'link', title: 'Take this phone\'s access to the collar away', onclick: () => unlinkApp(a) }, 'Remove'))));
+  const rows = phonesInfo.phones.map(p => {
+    const missing = (p.missing || []).filter(id => collars[id]);
+    return el('li', {},
+      el('span', {}, p.name, ' ', el('span', { class: 'muted' }, [p.created ? `linked ${ago(Date.now() / 1000 - p.created)}` : '',
+        missing.length ? `${p.created ? ', ' : ''}does not list ${dogList(missing)} yet` : ''].join(''))),
+      el('span', { class: 'acts' },
+        missing.length ? el('button', { class: 'link', title: `Show ${p.name} a code that adds ${dogList(missing)} to the app`, onclick: () => showCollarList(p) }, `Add ${dogList(missing)}`) : null,
+        missing.length ? ' · ' : null,
+        el('button', { class: 'link', title: 'Take this phone\'s access to every collar away', onclick: () => unlinkPhone(p) }, 'Remove')));
+  });
+  // Phones that an older version of this base linked to this collar alone.
+  for (const a of c.apps || []) {
+    rows.push(el('li', {},
+      el('span', {}, a.name, ' ', el('span', { class: 'muted' }, `${c.name} only${a.created ? `, linked ${ago(Date.now() / 1000 - a.created)}` : ''}`)),
+      el('button', { class: 'link', title: `Take this phone's access to ${c.name} away`, onclick: () => unlinkApp(a) }, 'Remove')));
+  }
+  $('appList').replaceChildren(...rows);
   // Whether the collar itself has the list yet: it gets it over the mesh and confirms it.
+  const any = rows.length > 0;
   let sync = '';
-  if (c.apps_synced === false) sync = apps.length
+  if (c.apps_synced === false) sync = c.app_keys
     ? `Waiting for ${c.name} to confirm: a phone can connect once the collar has the list. It is sent again with the collar's next report. The collar needs firmware 0.20 or later.`
     : `Waiting for ${c.name} to confirm that no phone may connect any more.`;
-  else if (apps.length) sync = c.sim ? 'A simulated collar has no Bluetooth: the app shows a demo for it.' : `${c.name} has this list.`;
+  else if (any) sync = c.sim ? 'A simulated collar has no Bluetooth: the app shows a demo for it.' : `${c.name} has this list.`;
+  if ((c.apps || []).length) sync += `${sync ? ' ' : ''}A phone marked "${c.name} only" was linked by an older version of the base: remove it and connect it again to reach every collar.`;
   $('appSync').textContent = sync;
-  $('appConnect').disabled = apps.length >= 4 && !appCode;
-  $('appConnect').title = apps.length >= 4 ? 'A collar takes 4 phones. Remove one first.' : '';
-  if (appCode && appCode.id !== selected) closeAppCode();
+  const full = phonesInfo.room <= 0;
+  $('appConnect').disabled = full && !appCode;
+  $('appConnect').title = full ? `A collar takes ${phonesInfo.max} phones. Remove one first.` : '';
 }
 
 function closeAppCode() {
@@ -1432,8 +1457,38 @@ function closeAppCode() {
   $('appForm').hidden = true;
 }
 
+function pinText(c) {
+  return c.pin ? String(c.pin).padStart(6, '0') : null;
+}
+
+/// Show a pairing code: `linking` for a new phone (it carries the key), else a collar list.
+function showAppCode(r, linking) {
+  appCode = { code: r.code };
+  $('appForm').hidden = true;
+  $('appQr').replaceChildren(qrSvg(r.code));
+  const real = r.collars.filter(x => !x.sim);
+  const pins = real.filter(x => x.pin);
+  const pinLine = !real.length ? el('li', {}, 'These collars are simulated, so the app shows a demo collar for them.')
+    : el('li', {}, 'Stand near a collar. When the phone asks for a Bluetooth pairing code, enter ',
+      pins.length === 1 && real.length === 1 ? el('span', { class: 'pin' }, pinText(pins[0]))
+        : pins.length ? ['its PIN (', pins.map((x, i) => [i ? ', ' : '', `${x.dog || x.node_id} `, el('span', { class: 'pin' }, pinText(x))]), ')']
+          : 'the code on the collar\'s screen (123456 on a collar without one)',
+      pins.length ? '. The app shows it too.' : '.');
+  const dogs = r.collars.map(x => x.dog || x.node_id).join(', ').replace(/, ([^,]*)$/, ' and $1');
+  $('appSteps').replaceChildren(
+    linking ? el('li', {}, 'Install the GeoCollar app on the phone (', el('a', { href: APP_URL, target: '_blank', rel: 'noopener' }, 'how to get it'), ').') : null,
+    el('li', {}, 'In the app, tap ', el('b', {}, 'Add a collar'), ' and point the phone at this code.'),
+    el('li', {}, `The app lists ${dogs}.`),
+    pinLine);
+  $('appCodeNote').textContent = linking
+    ? `This code is ${r.phone.name}'s key to every collar on this base, and it is shown only this once. `
+      + 'If the scan fails, remove the phone from the list above and make a new code.'
+    : `This code lists the collars on this base for ${r.phone.name}, which is linked already. It holds no key, so it can be shown again at any time.`;
+  $('appCode').hidden = false;
+  appSay('');
+}
+
 $('appConnect').onclick = () => {
-  if (!collars[selected]) return;
   closeAppCode();
   appSay('');
   $('appForm').hidden = false;
@@ -1449,28 +1504,28 @@ $('appCopy').onclick = async () => {
 };
 $('appForm').onsubmit = async e => {
   e.preventDefault();
-  const id = selected, c = collars[id];
-  if (!c) return;
   let r;
-  try { r = await api(`collars/${encodeURIComponent(id)}/apps`, { method: 'POST', body: JSON.stringify({ name: $('appName').value }) }); }
+  try { r = await api('phones', { method: 'POST', body: JSON.stringify({ name: $('appName').value }) }); }
   catch (err) { appSay(err.message); return; }
-  if (id !== selected) return; // another collar was picked meanwhile; this phone is in that collar's list to remove
-  appCode = { id, code: r.code };
-  $('appForm').hidden = true;
-  $('appQr').replaceChildren(qrSvg(r.code));
-  const pin = c.ble_pin ? el('span', { class: 'pin' }, String(c.ble_pin).padStart(6, '0')) : null;
-  $('appSteps').replaceChildren(
-    el('li', {}, 'Install the GeoCollar app on the phone (', el('a', { href: APP_URL, target: '_blank', rel: 'noopener' }, 'how to get it'), ').'),
-    el('li', {}, 'In the app, tap ', el('b', {}, 'Add a collar'), ' and point the phone at this code.'),
-    r.sim ? el('li', {}, 'This collar is simulated, so the app shows a demo collar for it.')
-      : el('li', {}, 'Stand near the collar. When the phone asks for a Bluetooth pairing code, enter ',
-        pin || 'the code on the collar\'s screen (123456 on a collar without one)', pin ? '. The app shows it too.' : '.'));
-  $('appCodeNote').textContent = `This code is ${r.app.name}'s key to ${c.name}, and it is shown only this once. `
-    + 'If the scan fails, remove the phone from the list above and make a new code.';
-  $('appCode').hidden = false;
-  appSay('');
+  phonesInfo = r;
+  showAppCode(r, true);
   refresh();
 };
+async function showCollarList(p) {
+  let r;
+  try { r = await api(`phones/${p.id}/collars`, { method: 'POST' }); }
+  catch (err) { appSay(err.message); return; }
+  phonesInfo = r;
+  showAppCode(r, false);
+  refresh();
+}
+async function unlinkPhone(p) {
+  if (!confirm(`Remove ${p.name}? It can no longer connect to any collar on this base once each collar has heard of it.`)) return;
+  closeAppCode();
+  try { phonesInfo = await api(`phones/${p.id}`, { method: 'DELETE' }); appSay(`Removed ${p.name}.`); }
+  catch (err) { appSay(err.message); }
+  refresh();
+}
 async function unlinkApp(a) {
   const c = collars[selected];
   if (!c || !confirm(`Remove ${a.name}? It can no longer connect to ${c.name} once the collar has heard of it.`)) return;
@@ -2014,6 +2069,7 @@ async function refresh() {
     $('health').className = 'pill ' + (h.mesh_connected ? 'ok' : 'bad');
   } catch { $('health').textContent = 'Base unreachable'; $('health').className = 'pill bad'; }
   try { collars = await api('collars'); } catch { return; }
+  await loadPhones();
   loadDiscovery();
   if (selected && !collars[selected]) { selected = null; loadZones(null); }
   const newer = Object.values(collars).some(c => c.update_available);
@@ -2043,9 +2099,7 @@ function select(id) {
   if (drawKind) endDraw();
   if (selected && isDirty()) drafts[selected] = zonesToGeoJSON();
   selected = id;
-  resetShockConfirm();
-  closeAppCode();
-  appSay('');
+  resetShockConfirm(); // a phone's code stays up: it is for every collar, not this one
   const c = collars[id];
   loadZones(drafts[id] || c.fences);
   delete drafts[id];
