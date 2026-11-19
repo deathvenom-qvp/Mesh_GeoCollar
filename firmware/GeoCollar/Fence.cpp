@@ -168,12 +168,23 @@ void sanitizeSettings(Settings &s)
 
 void FenceEngine::setFences(const FenceSet &fences)
 {
+    // A dog that is past a line, or lost, stays so under new fences: the owner may well be
+    // redrawing them because the dog is out. Starting afresh would correct it on its way back in
+    // (or forget that it is lost) as soon as one fix put it in a band of the new lines. It is
+    // let go only as usual: clear of every band (lost: for rearmFixes fixes in a row).
+    const CollarState was = state_;
+    const bool out = fences.zoneCount && (was == CollarState::Outside || was == CollarState::Lost);
     fences_ = fences;
-    outsideCount_ = 0;
     rearmCount_ = 0;
+    resetSecondLook();
+    if (out) {
+        quiet_ = true;
+        state_ = was; // outsideCount_ and the shocks of this breach carry on too
+        return;
+    }
+    outsideCount_ = 0;
     shocksThisBreach_ = 0;
     quiet_ = false;
-    resetSecondLook();
     state_ = fences_.zoneCount ? CollarState::Inside : CollarState::NoFence;
 }
 

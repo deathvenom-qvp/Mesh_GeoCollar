@@ -167,6 +167,8 @@ struct Decision {
 class FenceEngine
 {
   public:
+    /// Load new fences. A dog past a line or lost stays Outside or Lost, with no corrections
+    /// until it is clear of every band of the new fences; otherwise the engine starts afresh.
     void setFences(const FenceSet &fences);
     const FenceSet &fences() const { return fences_; }
     Settings &settings() { return settings_; }

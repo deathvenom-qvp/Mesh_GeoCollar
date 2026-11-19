@@ -229,6 +229,69 @@ static void testStateMachine()
     CHECK(d.correction == Correction::Beep);
 }
 
+/// New fences while the dog is out: it stays out (or lost), and is not corrected on its way back.
+static void testFenceReload()
+{
+    FenceSet f;
+    f.version = 1;
+    f.zoneCount = 1;
+    f.zones[0] = square(ZoneKind::KeepIn, 3, 5, 5);
+    FenceSet g = f;
+    g.version = 2;
+    g.zones[0].attentionM = 6; // the owner widens a band while the dog is out
+    uint32_t t = 1000;
+
+    // Past the line, not yet lost: new fences keep it Outside, and quiet through the bands.
+    FenceEngine e;
+    e.setFences(f);
+    e.onFix(fixAt(-5, 100, t += 1000));
+    CHECK(e.state() == CollarState::Outside);
+    e.setFences(g);
+    CHECK(e.state() == CollarState::Outside && e.fences().version == 2);
+    Decision d = twice(e, 2, 100, t); // danger band, coming back
+    CHECK(e.state() == CollarState::Warning && d.correction == Correction::None);
+    d = twice(e, 6, 100, t); // warning band
+    CHECK(d.correction == Correction::None);
+    d = e.onFix(fixAt(40, 100, t += 1000)); // clear: re-armed
+    CHECK(e.state() == CollarState::Inside);
+    d = twice(e, 6, 100, t);
+    CHECK(d.correction == Correction::Vibrate);
+
+    // Still outside: the fix after the reload counts on towards lost.
+    FenceEngine o;
+    o.setFences(f);
+    o.onFix(fixAt(-5, 100, t += 1000));
+    o.onFix(fixAt(-6, 100, t += 1000));
+    o.setFences(g);
+    d = o.onFix(fixAt(-7, 100, t += 1000));
+    CHECK(o.state() == CollarState::Lost && d.sendBreach);
+
+    // Lost: new fences leave it lost; only rearmFixes clear fixes bring it back.
+    FenceEngine l;
+    l.setFences(f);
+    for (int i = 0; i < 3; i++)
+        l.onFix(fixAt(-20, 100, t += 1000));
+    CHECK(l.state() == CollarState::Lost);
+    l.setFences(g);
+    CHECK(l.state() == CollarState::Lost);
+    d = twice(l, 2, 100, t);
+    CHECK(l.state() == CollarState::Lost && d.correction == Correction::None);
+    for (int i = 0; i < 3; i++)
+        d = l.onFix(fixAt(40, 100, t += 1000));
+    CHECK(l.state() == CollarState::Inside && d.sendStatus);
+
+    // Inside, or no fences at all: a fresh start, as before.
+    FenceEngine in;
+    in.setFences(f);
+    in.onFix(fixAt(40, 100, t += 1000));
+    in.setFences(g);
+    CHECK(in.state() == CollarState::Inside);
+    FenceSet none;
+    l.forceLost();
+    l.setFences(none);
+    CHECK(l.state() == CollarState::NoFence);
+}
+
 static void testGpsPacing()
 {
     Settings s;
@@ -1734,6 +1797,7 @@ int main()
     testCaiXianLin();
     testGeometry();
     testStateMachine();
+    testFenceReload();
     testShockCaps();
     testBands();
     testSecondLook();

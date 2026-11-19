@@ -583,14 +583,17 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
                         break;
                     case proto::FenceUpdate::Keep:
                         // Loading the same fences again would restart the engine, and with it the
-                        // shock limits and the lost beacon. Just say that they are in force.
+                        // shock limits. Just say that they are in force.
                         LOG_INFO("GeoCollar: fence v%u is already loaded", version);
                         sendStatus(statusType());
                         break;
                     case proto::FenceUpdate::Load:
                         engine_.setFences(scratch_);
                         pulser_.stop();
-                        beacon_.reset();
+                        // A dog that is out stays out under the new fences (FenceEngine::setFences),
+                        // and so does its lost beacon; it stops when a fix has the dog back inside.
+                        if (engine_.state() != CollarState::Outside && engine_.state() != CollarState::Lost)
+                            beacon_.reset();
                         verifying_ = false;
                         // Where the last fix stands against the new lines, for the report and for
                         // the GPS pacing; with no current fix, 0 makes the GPS fix often.
@@ -599,7 +602,7 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
                                              : 0;
                         save = true;
                         LOG_INFO("GeoCollar: fence v%u loaded, %u zones", scratch_.version, scratch_.zoneCount);
-                        sendStatus(proto::MsgType::Status);
+                        sendStatus(statusType());
                         break;
                     }
                 }

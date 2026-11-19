@@ -164,10 +164,18 @@ class FenceEngine:
     _verify_band: int = 0  # the least severe band of the readings since then
 
     def set_fences(self, zones: list[protocol.Zone]) -> None:
+        # As the firmware: a dog past a line or lost stays so under new fences, quiet until it is
+        # clear of every band (FenceEngine::setFences).
+        was = self.state
+        out = bool(zones) and was in (protocol.CollarState.OUTSIDE, protocol.CollarState.LOST)
         self.zones = list(zones)
-        self._outside = self._rearm = self._shocks_this_breach = 0
-        self._quiet = False
+        self._rearm = 0
         self._reset_second_look()
+        if out:
+            self._quiet = True
+            return
+        self._outside = self._shocks_this_breach = 0
+        self._quiet = False
         self.state = protocol.CollarState.INSIDE if self.zones else protocol.CollarState.NO_FENCE
 
     def force_lost(self) -> None:
@@ -478,7 +486,8 @@ class SimCollar:
             protocol.Zone(z.kind, z.danger_m, z.warning_m, z.attention_m, [(round(a, 7), round(o, 7)) for a, o in z.vertices]) for z in zones
         ])
         self.fence_version = version
-        self.beacon.reset()
+        if self.engine.state not in (protocol.CollarState.OUTSIDE, protocol.CollarState.LOST):
+            self.beacon.reset()  # a dog that is out keeps its beacon, as on the collar
         # Firmware HomeWatch::reset: new fences end home mode, and a fix must show the dog clear of
         # them before it can start again.
         self._last_clear_fix = -1e9

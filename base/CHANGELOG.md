@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.19.12
+
+Fixes from a review of the whole code. Base and collar firmware. Tested with the firmware's PC
+tests and the base's tests, **not on a real collar**.
+
+- **New fences no longer forget that the dog is out** (new collar firmware). Sending fences while
+  the dog was past a line, or lost, started the collar afresh: it forgot the dog was lost, stopped
+  its lost beacon, and corrected the dog on its way back in as soon as one fix put it in a band of
+  the new lines. Now a dog that is out stays Outside or Lost, with no corrections, until it is
+  clear of every band as usual, and its lost beacon carries on. The simulator does the same.
+- **Fences that did not arrive are sent again** (base). Fences go in a few packets; one lost on the
+  mesh, or fences saved while the base radio was not connected, left the collar on its old fences
+  until someone pressed Resend. Now, when a report shows the collar holds another version, the
+  base sends them again: 2 minutes after the last try, then 4, 8 and so on, up to once an hour. A
+  collar that holds a newer version than the base knows (a base restored from an older backup)
+  gets the same fences numbered past its own.
+- **The phone API refuses an oversized request as it arrives** (base). The size limit read only
+  the Content-Length header, so a request sent in chunks, which has none, could be any size and
+  fill the base's memory, from the internet when the phone port is forwarded.
+
 ## 0.19.11
 
 Home mode checked, zone states checked, and GPS fixes need 12 satellites. Base and collar firmware.
