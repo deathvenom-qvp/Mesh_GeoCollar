@@ -73,10 +73,9 @@ constexpr uint8_t kHomeFormat = 1;
 // HomeWatch::kLeaveMs), every 5 s while away. In 0.625 ms units.
 constexpr uint16_t kScanWindow = 160, kScanHomeItvl = 3200, kScanAwayItvl = 8000;
 constexpr uint32_t kStateMagic = 0x47434F4C; // "GCOL"
-constexpr uint16_t kStateFormat = 11; // 2: GPS pacing; 3: per-zone bands; 4: pulse intervals; 5: owner; 6: command seq;
+constexpr uint16_t kStateFormat = 10; // 2: GPS pacing; 3: per-zone bands; 4: pulse intervals; 5: owner; 6: command seq;
                                       // 7: report interval; 8: owner and config sequence numbers, owner's GPS interval;
-                                      // 9: companion app keys; 10: GPS interval everywhere inside;
-                                      // 11: Settings::minSats is the base's (before: 5, now kMinFixSats)
+                                      // 9: companion app keys; 10: GPS interval everywhere inside
 constexpr uint32_t kBeaconRefreshMs = 10 * 1000; // re-apply the beacon advertisement this often
 // With a companion app linked, the beacon's quiet half still advertises the collar's ordinary
 // name this often (2 s, in 0.625 ms units), so the owner's phone can connect at any moment.
@@ -658,11 +657,6 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
                     LOG_INFO("GeoCollar: GPS inside the fences every %u s%s, %s", (unsigned)c.gpsInsideS,
                              c.gpsInsideS ? "" : " (always on)",
                              gpsSameEverywhere_ ? "everywhere inside" : "within 35 m of the bands");
-                }
-                if (c.hasMinSats && c.minSats != engine_.settings().minSats) {
-                    engine_.settings().minSats = c.minSats;
-                    save = true;
-                    LOG_INFO("GeoCollar: a GPS fix needs %u satellites", (unsigned)c.minSats);
                 }
                 LOG_INFO("GeoCollar: report every %u s", (unsigned)(reportS_ ? reportS_ : GEOCOLLAR_STATUS_INTERVAL_MS / 1000));
             }
@@ -1619,8 +1613,6 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
         f.close();
         if (ok && proto::decodeFenceSet(blob_, len16, version, scratch_)) {
             engine_.setFences(scratch_);
-            if (format < 11)
-                settings.minSats = kMinFixSats; // 5 until 0.19.11, never set by the base
             sanitizeSettings(settings);
             engine_.settings() = settings;
             baseNode_ = base;

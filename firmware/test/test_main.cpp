@@ -682,9 +682,7 @@ static void testProtocol()
         CHECK(b.anchor.kind == AnchorKind::Beacon && memcmp(b.anchor.address, mac, 6) == 0 && b.anchor.rssiDbm == -72);
         CHECK(!b.hasGpsInside); // a base before 0.19.6: the collar keeps its own GPS pacing
         buf[n] = 3;
-        buf[n + 1] = 12;
-        CHECK(decodeConfig(buf, n + 3, b, seq) && b.hasAnchor && b.hasGpsInside && b.gpsInsideS == 3 &&
-              b.minSats == 12); // later fields after it
+        CHECK(decodeConfig(buf, n + 3, b, seq) && b.hasAnchor && b.hasGpsInside && b.gpsInsideS == 3); // later fields after it
         CHECK(encodeConfig(buf, sizeof(buf), a, 0) == 4);      // no number, no anchor
         n = encodeConfig(buf, sizeof(buf), a, 77);
         buf[8] = 3; // no such kind
@@ -725,19 +723,6 @@ static void testProtocol()
         buf[n - 1] = 0x80 | (kMaxGpsInsideS + 1);
         CHECK(!decodeConfig(buf, n, b, seq));
         g.gpsSameEverywhere = false;
-        // The satellites a fix needs, after the GPS interval (0.19.11 on). Golden bytes shared with
-        // the Python tests: as above, then 12.
-        g.hasMinSats = true;
-        g.minSats = 12;
-        n = encodeConfig(buf, sizeof(buf), g, 77);
-        CHECK(hex(buf, n) == "020700004d000000" "02000000000000b5" "03" "0c");
-        CHECK(decodeConfig(buf, n, b, seq) && b.hasMinSats && b.minSats == 12 && b.gpsInsideS == 3);
-        CHECK(decodeConfig(buf, n - 1, b, seq) && !b.hasMinSats); // an older base: the collar keeps its own
-        buf[n - 1] = kMinSatsLow - 1; // out of range: refused
-        CHECK(!decodeConfig(buf, n, b, seq));
-        buf[n - 1] = kMinSatsHigh + 1;
-        CHECK(!decodeConfig(buf, n, b, seq));
-        g.hasMinSats = false;
         g.hasAnchor = false; // the interval only travels after the anchor
         CHECK(encodeConfig(buf, sizeof(buf), g, 77) == 8);
     }
@@ -787,13 +772,9 @@ static void testProtocol()
         bad.gpsSlowSecs = 0;
         bad.gpsLostSecs = 0;
         bad.dogSpeedMps = 0;
-        bad.minSats = 0;
+        bad.minSats = 5; // what every state file before 0.19.11 holds
         sanitizeSettings(bad);
         CHECK(bad.minSats == kMinFixSats);
-        Settings eight;
-        eight.minSats = 8; // the owner's lower number stays
-        sanitizeSettings(eight);
-        CHECK(eight.minSats == 8);
         CHECK(bad.maxShockLevel == 99 && bad.shockLevel == 99 && bad.vibrateLevel == 99 && bad.maxShocksPerHour == 16);
         CHECK(bad.lostConfirmFixes == 3 && bad.rearmFixes == 3 && bad.correctionMs == 1000 && bad.gpsFastSecs == 5 &&
               bad.gpsSlowSecs == 5 && bad.gpsLostSecs == 15 && bad.dogSpeedMps == 6);

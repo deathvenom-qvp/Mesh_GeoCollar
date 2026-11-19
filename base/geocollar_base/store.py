@@ -157,16 +157,15 @@ class Store:
                 return None
             status = dict(status, received=time.time())
             last = c.get("status") or {}
-            # A position from fewer satellites than the collar's fixes need (min_sats) is no
-            # position: collar firmware before 0.19.11 still sends one. The report counts as one
-            # without a fix.
+            # A position from fewer than MIN_FIX_SATS satellites is no position: collar firmware
+            # before 0.19.11 still sends one. The report counts as one without a fix.
             sats = status.get("sats")
-            if (status.get("lat") or status.get("lon")) and sats is not None and sats < self.min_sats(c) \
+            if (status.get("lat") or status.get("lon")) and sats is not None and sats < protocol.MIN_FIX_SATS \
                     and not status.get("no_fix"):
                 status["no_fix"] = True
                 status["few_sats"] = True
                 status["lat"], status["lon"] = last.get("lat") or 0, last.get("lon") or 0
-            elif status.get("no_fix") and sats and sats < self.min_sats(c):
+            elif status.get("no_fix") and sats and sats < protocol.MIN_FIX_SATS:
                 status["few_sats"] = True  # 0.19.11 on: no fix because the GPS's had too few satellites
             # A collar that restarted and has had no fix since reports no position at all: keep
             # the last one this base knew, which the page shows as the last known position.
@@ -187,12 +186,6 @@ class Store:
                 del track[:-TRACK_LIMIT]
             self._save(sync=False)
             return dict(status)
-
-    @staticmethod
-    def min_sats(c: dict) -> int:
-        """How many satellites a collar's GPS fix needs: the owner's choice, else MIN_FIX_SATS."""
-        v = c.get("min_sats")
-        return protocol.MIN_FIX_SATS if v is None else int(v)
 
     def clear_track(self, node_id: str) -> bool:
         """Forget the path drawn behind a collar on the map. Its log is kept apart (collarlog)."""

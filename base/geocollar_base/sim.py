@@ -395,9 +395,8 @@ class SimCollar:
         self.report_s = float(settings.get("report_s", 5))
         self.noise_m = float(settings.get("noise_m", 2))
         # Satellites in each fix: under trees or indoors a real collar may see fewer than it needs
-        # (min_sats, which the base sets), and then it uses no fix at all.
+        # (protocol.MIN_FIX_SATS), and then it uses no fix at all.
         self.sats = int(settings.get("sats", 16))
-        self.min_sats = protocol.MIN_FIX_SATS  # as the base sets it (config)
         self._good_fix: float | None = None  # when the last fix good enough to use came (None: the start)
         self._fix_sats = self.sats  # the satellites of that fix
         self._reported_no_fix = False
@@ -600,7 +599,7 @@ class SimCollar:
             if self._report_now or now - self._last_report >= self.report_s:
                 return self.report(now)
             return None
-        if self.sats < self.min_sats:
+        if self.sats < protocol.MIN_FIX_SATS:
             # Too few satellites: the collar uses no fix at all. No fence decision, the position
             # stays the last good one, and the base hears "no GPS fix" once that one is old.
             self._run_beacon_tick(now)
@@ -608,7 +607,7 @@ class SimCollar:
                 self._good_fix = now  # where it was put down counts as a fix
             if not self._ignoring:
                 self._ignoring = True
-                self._event("info", f"GPS fixes from {self.sats} satellites ignored ({self.min_sats} needed): "
+                self._event("info", f"GPS fixes from {self.sats} satellites ignored ({protocol.MIN_FIX_SATS} needed): "
                                     "no fence decisions until a better one")
             if now - self._good_fix > NO_FIX_AFTER_S and not self._reported_no_fix:
                 self._report_now = True
@@ -769,11 +768,6 @@ class Simulator:
     def set_anchor(self, node_id: str, anchor: protocol.HomeAnchor | None, at: tuple[float, float] | None) -> None:
         with self.lock:
             self.collars[node_id].set_anchor(anchor, at)
-
-    def set_min_sats(self, node_id: str, n: int) -> None:
-        """The satellites a fix needs, as the base sends it to a real collar."""
-        with self.lock:
-            self.collars[node_id].min_sats = int(n)
 
     def report_now(self, node_id: str) -> None:
         """Send a status straight away, as the collar does after a command or new fences."""

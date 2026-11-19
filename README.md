@@ -53,9 +53,8 @@ least a second apart; if the two fixes are in different bands, the milder one co
 | Back inside, clear of every band, for 3 fixes | Re-arms. |
 
 Fixes with poor PDOP, or from fewer than 12 satellites, are ignored entirely: no position, no
-correction, no change of state. The number is per collar in the base app (4 to 24). 12 is strict:
-under trees or next to the house a fix often has 8 to 11, and while fixes are ignored the collar
-cannot tell that the dog has left.
+correction, no change of state. 12 is strict: under trees or next to the house a fix often has 8 to
+11, and while fixes are ignored the collar cannot tell that the dog has left.
 
 Within 35 m of the bands the collar takes a GPS fix every 3 s, or as often as the owner sets per
 collar in the base app (0 for always on, up to every 30 s). Further in it slows down for battery: from 35 to 100 m in

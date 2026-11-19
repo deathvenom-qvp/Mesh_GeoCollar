@@ -21,14 +21,12 @@ constexpr uint32_t kVerifyMs = 1000;
 /// A first reading older than this is too old to be agreed with: the wait starts again.
 constexpr uint32_t kVerifyStaleMs = 30000;
 
-/// A GPS fix counts only if at least Settings::minSats satellites were used for it: fewer, and the
-/// fix is ignored entirely, as if there were none (no fence decision, no position sent, the base
-/// told "no fix" once the last good one is overdue). kMinFixSats until the base sets another
-/// number per collar (kMinSatsLow..kMinSatsHigh). Under trees or against a wall a fix may have
-/// fewer for minutes at a time, and in that time the collar corrects nothing and cannot notice the
-/// dog leaving: the higher the number, the more often that happens.
+/// A GPS fix counts only if at least this many satellites were used for it: fewer, and the fix is
+/// ignored entirely, as if there were none (no fence decision, no position sent, the base told
+/// "no fix" once the last good one is overdue). The owner's choice, fixed. Under trees or against a
+/// wall a fix may have fewer for minutes at a time, and in that time the collar corrects nothing
+/// and cannot notice the dog leaving.
 constexpr uint8_t kMinFixSats = 12;
-constexpr uint8_t kMinSatsLow = 4, kMinSatsHigh = 24;
 
 enum class ZoneKind : uint8_t {
     KeepIn = 0,  // the dog should stay inside this polygon

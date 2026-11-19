@@ -24,13 +24,12 @@ zone in both, **not on a real collar**.
   lost: 60 s, or off while nothing can pass the position on).
 - **A GPS fix needs 12 satellites or more** (new collar firmware). A fix from fewer is ignored
   entirely: no correction, no change of state, no position sent, and the base shows "no GPS fix"
-  once the last good one is old. The base also ignores positions from fewer satellites in reports
-  from older collar firmware, which still sends them. The number is per collar, 4 to 24, under
-  **Rename** on the Collars tab ("Satellites a GPS fix needs"). **12 is strict:** in Rex's log most
-  fixes have 8 to 11. While fixes are ignored the collar corrects nothing and cannot notice the dog
-  leaving, and a lost dog's position stops moving on the map. Check the Sats column on the Log tab
-  after updating, and lower the number for a collar that shows "fix ignored" often.
-  Simulated collars have a **Satellites** box to try it.
+  once the last good one is old, with the satellite count, so the collar's card can say why. The
+  base also ignores positions from fewer satellites in reports from older collar firmware, which
+  still sends them. Fixed at 12, not a setting. **12 is strict:** in Rex's log most fixes have 8 to
+  11. While fixes are ignored the collar corrects nothing and cannot notice the dog leaving, and a
+  lost dog's position stops moving on the map. Simulated collars have a **Satellites** box to try
+  it.
 
 ## 0.19.10
 

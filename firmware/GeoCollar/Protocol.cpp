@@ -206,11 +206,8 @@ size_t encodeConfig(uint8_t *out, size_t cap, const CollarConfig &c, uint32_t se
             w.u8(static_cast<uint8_t>(c.anchor.kind));
             w.bytes(c.anchor.address, sizeof(c.anchor.address));
             w.u8(static_cast<uint8_t>(c.anchor.rssiDbm));
-            if (c.hasGpsInside) {
+            if (c.hasGpsInside)
                 w.u8(c.gpsInsideS | (c.gpsSameEverywhere ? kGpsSameEverywhereBit : 0));
-                if (c.hasMinSats)
-                    w.u8(c.minSats);
-            }
         }
     }
     return w.done();
@@ -247,12 +244,6 @@ bool decodeConfig(const uint8_t *buf, size_t len, CollarConfig &c, uint32_t &seq
                 if (!r.ok || tmp.gpsInsideS > kMaxGpsInsideS)
                     return false;
                 tmp.hasGpsInside = true;
-                if (r.pos < len) { // the satellites a fix needs (0.19.11 on)
-                    tmp.minSats = r.u8();
-                    if (!r.ok || tmp.minSats < kMinSatsLow || tmp.minSats > kMinSatsHigh)
-                        return false;
-                    tmp.hasMinSats = true;
-                }
             }
         }
     }

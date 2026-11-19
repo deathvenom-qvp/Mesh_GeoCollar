@@ -158,7 +158,6 @@ the message again, numbered, when such a collar last got it without one.
 | 9 | 6 | the beacon's Bluetooth address, most significant byte first (zeros for the other kinds) |
 | 15 | 1 | signal threshold, dBm, signed: -100..-30 |
 | 16 | 1 | GPS interval inside the fences, optional (only after the anchor): bits 0-6 seconds, 0..30, 0 = always on; bit 7 that interval everywhere inside (0.19.6 on) |
-| 17 | 1 | satellites a GPS fix needs, optional (only after the GPS interval): 4..24 (0.19.11 on) |
 
 How often the collar sends a Status. While lost it reports at least every 30 s whatever this
 says. The sequence number works as for Owner, with its own counter on the collar. More bytes may
@@ -188,14 +187,6 @@ unless the owner changed it, with an anchor of kind 0 in front when home mode wa
 Firmware before 0.19.6 ignores it. Golden bytes for the base radio at -75 dBm, interval 0, number
 77, every 3 s: `02 07 0000 4d000000 02 000000000000 b5 03`; every 3 s everywhere inside: the last
 byte `83`.
-
-The satellites a GPS fix needs (0.19.11 on): a fix from fewer is not used at all, as if there were
-none: no fence decision, no position in the reports, and "no fix" (status bit 4) once the last good
-one is overdue. A fix whose satellite count the GPS did not give counts as too few. The base always
-sends it, 12 unless the owner changed it; the collar keeps it with its other settings (state file
-format 11; a state file from before keeps 5 no longer, it starts at 12). A value out of range makes
-the whole message refused. Firmware before 0.19.11 ignores it and uses 5. Golden bytes as above,
-every 3 s, 12 satellites: `02 07 0000 4d000000 02 000000000000 b5 03 0c`.
 
 ## 6. Hello (collar, broadcast)
 

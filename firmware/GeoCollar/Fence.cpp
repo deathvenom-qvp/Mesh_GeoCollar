@@ -161,8 +161,7 @@ void sanitizeSettings(Settings &s)
         s.gpsLostSecs = d.gpsLostSecs;
     if (s.dogSpeedMps == 0)
         s.dogSpeedMps = d.dogSpeedMps;
-    if (s.minSats < kMinSatsLow || s.minSats > kMinSatsHigh)
-        s.minSats = d.minSats;
+    s.minSats = kMinFixSats; // fixed; state files from before 0.19.11 hold 5
 }
 
 // ---------------------------------------------------------------------------------------------
