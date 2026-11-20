@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.19.15
+
+- **New state: In Bluetooth Range** (base page and phone app). While a collar hears its home
+  anchor and has turned its GPS off (home mode), the State on its card, the collar list, the map
+  tooltip and the Log tab now say "In Bluetooth Range" instead of Inside or Near the line, so you
+  can see at a glance that the dog is at the house. A dog past a line or lost still shows Outside
+  or Lost: the collar never goes home in those states. The phone app shows it the same way. No new
+  collar firmware: collars on 0.19.2 or later already report it (status bit 7).
+
 ## 0.19.14
 
 - **Hearing the home anchor turns the GPS off, with no GPS fix needed** (new collar firmware, and

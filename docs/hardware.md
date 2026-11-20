@@ -183,7 +183,8 @@ longer.
 - **While home.** The GPS is put to sleep, with Meshtastic's GPS interval at an hour, so it still
   takes about one fix an hour. If that fix (12 satellites or more) puts the dog past a line,
   home mode ends at once; a fix in a band does not end it. The
-  scan runs every 2 s. Reports say "home, GPS off" (status bit 7) and carry the last fix.
+  scan runs every 2 s. Reports say "home, GPS off" (status bit 7) and carry the last fix; the base
+  page and the phone app show the collar's state as "In Bluetooth Range".
 - **When it ends.** Once the anchor has not been heard within 6 dB of the threshold for 7 s, the
   GPS is woken and fixes as often as it does near the line, until a fix says where the dog is.
   Turning Bluetooth off on the collar, a change of anchor, or the fences going away end it too.

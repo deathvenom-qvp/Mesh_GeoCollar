@@ -40,6 +40,10 @@ const STATE_TEXT = {
   [State.LOST]: 'Lost',
 };
 const STATE_CLASS = { [State.INSIDE]: 's-inside', [State.WARNING]: 's-warning', [State.OUTSIDE]: 's-outside', [State.LOST]: 's-lost' };
+/// What to call a report's state: "In Bluetooth Range" while the collar hears its home anchor (home
+/// mode, GPS off). A collar only goes home from inside or near the line, so a dog past a line or
+/// lost always shows that instead.
+const stateText = s => (s.home && (s.state === State.INSIDE || s.state === State.WARNING) ? 'In Bluetooth Range' : STATE_TEXT[s.state] || 'Unknown');
 const PILL = {
   [Link.SEARCHING]: ['Searching…', 'busy'], [Link.PAIRING]: ['Pairing…', 'busy'], [Link.CONNECTING]: ['Connecting…', 'busy'],
   [Link.ONLINE]: ['Connected', 'online'], [Link.WAITING]: ['Not connected', ''], [Link.UNKNOWN]: ['Not linked yet', ''],
@@ -117,7 +121,7 @@ function renderHome() {
     const grow = el('div', 'grow');
     grow.append(el('div', 'name', titleOf(c)));
     const kind = c.demo ? 'Demo collar' : c.sim ? 'Simulated collar' : '';
-    const heard = s ? `${STATE_TEXT[s.state] || 'Unknown'}, heard ${formatAge((Date.now() - s.at) / 1000)}` : 'Not heard from yet';
+    const heard = s ? `${stateText(s)}, heard ${formatAge((Date.now() - s.at) / 1000)}` : 'Not heard from yet';
     grow.append(el('div', 'sub', kind ? `${kind}. ${heard}` : heard));
     li.append(grow, el('span', 'chev', '›'));
     li.addEventListener('click', () => openCollar(c));
@@ -536,14 +540,14 @@ function render() {
   if (!s) {
     facts.push(...fact('Status', 'Nothing heard from this collar yet'));
   } else {
-    facts.push(...fact('Status', STATE_TEXT[s.state] || 'Unknown'));
+    facts.push(...fact('Status', stateText(s)));
     if (s.state !== State.NO_FENCE && hasPosition(s)) {
       const d = formatDistance(Math.abs(s.clearanceM), imperial);
       facts.push(...fact('Fence', s.clearanceM >= 0 ? `${d} inside the line` : `${d} outside the line`));
     }
     facts.push(...fact('Battery', s.batteryPct === null ? 'Unknown' : `${s.batteryPct}%`));
     let gps;
-    if (hasPosition(s) && s.home) gps = 'Off at home, near the anchor';
+    if (hasPosition(s) && s.home) gps = 'Off: hears the home anchor';
     else if (hasPosition(s) && s.noFix && s.fixAgeS === null) gps = 'No fix right now. The map shows the last position known';
     else if (!hasPosition(s) || s.fixAgeS === null) gps = 'No GPS fix yet';
     else if (s.noFix) gps = `No fix right now. Last one ${formatAge(s.fixAgeS + (Date.now() - s.at) / 1000)}`;
