@@ -665,17 +665,13 @@ void HomeWatch::reset()
         changed_ = true;
     home_ = false;
     strong_ = false;
-    clear_ = false; // a fix has to show the dog clear of the bands again
 }
 
-void HomeWatch::leave(uint32_t provenMs)
+void HomeWatch::leave()
 {
     home_ = false;
     changed_ = true;
     strong_ = false;
-    // The anchor proved the dog was near it until then, as good as a clear fix.
-    if (clear_ && (int32_t)(provenMs - clearMs_) > 0)
-        clearMs_ = provenMs;
 }
 
 void HomeWatch::onSighting(int rssiDbm, uint32_t nowMs)
@@ -693,24 +689,12 @@ void HomeWatch::onSighting(int rssiDbm, uint32_t nowMs)
     }
 }
 
-void HomeWatch::onFix(bool clear, uint32_t nowMs)
-{
-    clear_ = clear;
-    if (clear)
-        clearMs_ = nowMs;
-    else if (home_)
-        leave(clearMs_); // a fix in a band or outside: never mind the anchor
-}
-
 bool HomeWatch::tick(uint32_t nowMs, bool allowed)
 {
     if (home_) {
-        if (!allowed)
-            leave(clearMs_);
-        else if (nowMs - lastStayMs_ > kLeaveMs)
-            leave(lastStayMs_);
-    } else if (allowed && clear_ && nowMs - clearMs_ <= kFreshMs && strong_ && nowMs - lastStrongMs_ <= kLeaveMs &&
-               nowMs - strongSinceMs_ >= kEnterMs) {
+        if (!allowed || nowMs - lastStayMs_ > kLeaveMs)
+            leave();
+    } else if (allowed && strong_ && nowMs - lastStrongMs_ <= kLeaveMs && nowMs - strongSinceMs_ >= kEnterMs) {
         home_ = true;
         changed_ = true;
         lastStayMs_ = nowMs;

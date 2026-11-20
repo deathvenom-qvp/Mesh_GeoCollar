@@ -869,8 +869,6 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
         lastClearance_ = d.clearanceM; // 0 for a fix too poor to use, which also makes the GPS fix often
         if (used)
             beacon_.onFix(engine_.state() != CollarState::NoFence && d.clearanceM < 0, fix.nowMs);
-        if (used) // clear of every band, or not: home mode starts only from a clear fix
-            home_.onFix(engine_.state() == CollarState::Inside, fix.nowMs);
         // Past the line every correction stops at once, including one that is still playing.
         const CollarState st = engine_.state();
         if (autoCorrection_ && tx_.busy() && (st == CollarState::Outside || st == CollarState::Lost)) {
@@ -1022,12 +1020,16 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
     {
         if (engine_.fences().version != homeFenceVersion_) {
             homeFenceVersion_ = engine_.fences().version;
-            home_.reset(); // new fences: a fix must show the dog clear of them first
+            home_.reset(); // new fences: GPS on, and the anchor's 20 s start again
         }
         const int rssi = scanner_.poll(anchor_, baseNode_, home_.home());
         if (rssi != INT_MIN)
             home_.onSighting(rssi, now);
-        const bool allowed = anchor_.kind != AnchorKind::None && engine_.state() == CollarState::Inside && !beacon_.active();
+        // The anchor alone decides, whatever the GPS says (no fix needed), except for a dog past a
+        // line or lost: that takes fixes clear of the bands to end, so the GPS stays on for it.
+        const CollarState st = engine_.state();
+        const bool allowed = anchor_.kind != AnchorKind::None &&
+                             (st == CollarState::Inside || st == CollarState::Warning) && !beacon_.active();
         if (!home_.tick(now, allowed))
             return;
         if (home_.home()) {

@@ -91,8 +91,8 @@ class AnchorKind(IntEnum):
 
 @dataclass
 class HomeAnchor:
-    """Home mode: while the collar hears this anchor at rssi dBm or stronger (and its last fix was
-    inside, clear of every band), it turns its GPS off. address is the beacon's Bluetooth address,
+    """Home mode: while the collar hears this anchor at rssi dBm or stronger (and is not past a line
+    or lost), it turns its GPS off, with no GPS fix needed (0.19.14 on). address is the beacon's Bluetooth address,
     "AA:BB:CC:DD:EE:FF"; unused for the base radio, which the collar knows as the node that
     sends it fences."""
 

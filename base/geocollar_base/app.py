@@ -1145,8 +1145,8 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
 
     @app.put("/api/home-anchor")
     def put_home_anchor(body: HomeAnchorIn):
-        """Home mode: while a collar hears this anchor strongly enough, and its last fix was inside,
-        clear of every band, it turns its GPS off. Sent to every collar."""
+        """Home mode: while a collar hears this anchor strongly enough (and is not past a line or
+        lost), it turns its GPS off, with no GPS fix needed. Sent to every collar."""
         if body.kind not in ANCHOR_KINDS:
             raise HTTPException(400, f"kind is one of {', '.join(ANCHOR_KINDS)}")
         if not protocol.MIN_ANCHOR_RSSI <= body.rssi <= protocol.MAX_ANCHOR_RSSI:

@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.19.14
+
+- **Hearing the home anchor turns the GPS off, with no GPS fix needed** (new collar firmware, and
+  the simulator). Home mode used to start only after a GPS fix from 12 satellites or more showed
+  the dog inside and clear of every band, at most 10 minutes before. Near the house, where the
+  anchor is, a collar often sees 8 to 11 satellites for hours, so home mode never started and the
+  GPS stayed on, searching all the time. Now 20 s of the anchor is enough. The anchor does not
+  count while the dog is past a line or lost (that still takes fixes to end), or while the lost
+  beacon is on, and a fix that puts the dog past a line still ends home mode. A fix in a band no
+  longer does. The "use a closer setting, or move the anchor" note on the Home mode card is advice
+  only; it never stopped home mode. Tested with the firmware's PC tests and the base's tests,
+  **not on a real collar**.
+
 ## 0.19.13
 
 - **The sidebar works again when Home Assistant is opened by a domain name** (base). 0.19.12 let
