@@ -253,6 +253,7 @@ class CollarState(CollarStatus):
     via: Literal["mesh", "phone", "sim"] = "mesh"
     via_phone: str | None = Field(None, description="Which phone passed it on, with via \"phone\"")
     fix_age_s: int | None = Field(None, description="How old the GPS fix was when the report was made, when known")
+    in_range: bool = Field(False, description="The collar hears its home Bluetooth anchor (In Bluetooth Range)")
 
 
 class CollarView(CollarCode):

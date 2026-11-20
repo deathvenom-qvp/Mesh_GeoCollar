@@ -237,6 +237,18 @@ def test_app_keys_golden_and_limits():
         p.decode_app_keys_ack(ack + b"\x00")
 
 
+def test_anchor_report_matches_the_firmware():
+    # Golden bytes from firmware/test/test_main.cpp.
+    a = p.encode_anchor_report(True, -68, -75)
+    assert a.hex() == "020a01bcb5" and p.message_type(a) == p.MsgType.ANCHOR
+    assert p.decode_anchor_report(a) == {"in_range": True, "rssi": -68, "threshold": -75}
+    none = p.encode_anchor_report(False, None, -75)
+    assert none.hex() == "020a0080b5"
+    assert p.decode_anchor_report(none) == {"in_range": False, "rssi": None, "threshold": -75}
+    with pytest.raises(ValueError):
+        p.decode_anchor_report(a + b"\x00")
+
+
 def test_app_session_golden():
     assert p.encode_app_hello(APP_KEY_ID, APP_NONCE).hex() == "02104d3c2b1aa0a1a2a3a4a5a6a7"
     assert p.app_challenge_tag(APP_KEY, APP_KEY_ID, APP_NONCE, COLLAR_NONCE).hex() == "c66cfaa9f4fe36cb"

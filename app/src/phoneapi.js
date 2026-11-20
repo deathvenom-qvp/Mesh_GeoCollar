@@ -213,6 +213,7 @@ export function fromBase(s, serverTime, now = Date.now()) {
     sats: s.sats || 0, pdop: s.pdop || 0, clearanceM: s.clearance_m || 0, fenceVersion: s.fence_version || 0,
     corrections: s.corrections_enabled !== false, shock: !!s.shock_enabled,
     beacon: !!s.beacon_active, beaconSilenced: !!s.beacon_silenced, noFix: !!s.no_fix, home: !!s.home,
+    inRange: !!s.in_range,
     fixAgeS: s.fix_age_s != null ? s.fix_age_s : s.no_fix ? null : 0,
     at: now - age * 1000,
     src: 'base', via: s.via || 'mesh', viaPhone: s.via_phone || '',

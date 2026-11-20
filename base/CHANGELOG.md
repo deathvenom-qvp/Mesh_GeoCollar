@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.19.16
+
+- **In Bluetooth Range shows whenever the collar hears the home anchor** (new collar firmware,
+  base and phone app). In 0.19.15 it showed only once home mode had turned the GPS off, so a
+  collar that heard the anchor too weakly, or not for 20 s, showed plain Inside with no hint why.
+  The collar now tells the base as soon as it hears the anchor at the "How close counts as home"
+  strength, whatever the GPS, and again when it stops hearing it for 15 s. The collar's card has a
+  new **Home anchor** row: "In range: heard at -68 dBm", "Heard at -85 dBm, weaker than the -75
+  dBm set for home", "Not heard", or, for a collar on older firmware, that it does not say. A dog
+  past a line or lost still shows Outside or Lost. The collar sends this in a new small message
+  (at most one per 30 s on a change, and with a report every 5 minutes or so); older bases ignore
+  it. Tested with the firmware's PC tests, the base's tests and the simulator, **not on a real
+  collar**.
+
 ## 0.19.15
 
 - **New state: In Bluetooth Range** (base page and phone app). While a collar hears its home

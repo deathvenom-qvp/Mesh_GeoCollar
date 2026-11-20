@@ -219,6 +219,14 @@ def test_app_key_answers_are_handed_on_with_who_sent_them():
     link._on_receive(packet)
     assert len(acks) == 1
 
+    # Whether the collar hears its home anchor, checked like a report.
+    heard = []
+    link.on_anchor = lambda n, a: heard.append((n, a))
+    packet["decoded"]["payload"] = protocol.encode_anchor_report(True, -68, -75)
+    link._on_receive(packet)
+    assert heard == [("!a1b2c3d4", {"in_range": True, "rssi": -68, "threshold": -75, "pki": True, "sender_key": "a2V5"})]
+    assert not statuses and len(acks) == 1
+
     # The list goes to the collar as a PKI direct message, like everything else from the base.
     link.send_app_keys("!a1b2c3d4", [(5, bytes(16))], 9)
     data, kw = sent[0]

@@ -84,7 +84,7 @@ bool messageType(const uint8_t *buf, size_t len, MsgType &type)
     if (len < 2 || buf[0] != kVersion)
         return false;
     const uint8_t t = buf[1];
-    const bool known = (t >= 1 && t <= static_cast<uint8_t>(MsgType::AppKeysAck)) ||
+    const bool known = (t >= 1 && t <= static_cast<uint8_t>(MsgType::Anchor)) ||
                        (t >= static_cast<uint8_t>(MsgType::AppHello) && t <= static_cast<uint8_t>(MsgType::AppError));
     if (!known)
         return false;
@@ -101,6 +101,28 @@ size_t encodeHello(uint8_t *out, size_t cap, bool hasAdminKey, bool hasFences, u
     out[2] = (hasAdminKey ? 1 : 0) | (hasFences ? 2 : 0);
     out[3] = batteryPct;
     return kHelloSize;
+}
+
+size_t encodeAnchorReport(uint8_t *out, size_t cap, const AnchorReport &a)
+{
+    if (cap < kAnchorReportLength)
+        return 0;
+    out[0] = kVersion;
+    out[1] = static_cast<uint8_t>(MsgType::Anchor);
+    out[2] = a.inRange ? 1 : 0;
+    out[3] = static_cast<uint8_t>(a.rssiDbm);
+    out[4] = static_cast<uint8_t>(a.thresholdDbm);
+    return kAnchorReportLength;
+}
+
+bool decodeAnchorReport(const uint8_t *buf, size_t len, AnchorReport &a)
+{
+    if (len != kAnchorReportLength || buf[0] != kVersion || buf[1] != static_cast<uint8_t>(MsgType::Anchor))
+        return false;
+    a.inRange = buf[2] & 1;
+    a.rssiDbm = static_cast<int8_t>(buf[3]);
+    a.thresholdDbm = static_cast<int8_t>(buf[4]);
+    return true;
 }
 
 size_t encodeStatus(uint8_t *out, size_t cap, MsgType type, const StatusReport &s)

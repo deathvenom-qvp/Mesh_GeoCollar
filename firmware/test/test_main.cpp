@@ -912,6 +912,44 @@ static void testProtocol()
     CHECK(!messageType(junk, sizeof(junk), type)); // wrong protocol version
 }
 
+static void testAnchorRange()
+{
+    // In range from the first reading at the threshold, with nothing to wait for.
+    {
+        AnchorRange r;
+        r.setThreshold(-75);
+        CHECK(!r.tick(1000) && !r.inRange() && r.latest(1000) == -128);
+        r.onSighting(-85, 5000); // heard, but weaker than the threshold
+        CHECK(!r.tick(5000) && !r.inRange() && r.latest(5000) == -85);
+        r.onSighting(-68, 10000);
+        CHECK(r.tick(10000) && r.inRange() && r.latest(10000) == -68);
+        CHECK(!r.tick(10500)); // reported once
+        // Weaker but within the margin keeps it; missing a scan or two does too.
+        r.onSighting(-80, 15000);
+        CHECK(!r.tick(15000 + AnchorRange::kLeaveMs) && r.inRange());
+        // Then nothing within the margin for longer than kLeaveMs: out of range.
+        r.onSighting(-90, 20000);
+        CHECK(r.tick(15000 + AnchorRange::kLeaveMs + 1) && !r.inRange());
+        CHECK(r.latest(20000 + AnchorRange::kLeaveMs + 1) == -128); // that reading is old now
+        // Within the margin is not enough to come back: it takes the threshold.
+        r.onSighting(-78, 60000);
+        CHECK(!r.tick(60000) && !r.inRange());
+        r.onSighting(-75, 62000);
+        CHECK(r.tick(62000) && r.inRange());
+    }
+    // A new anchor (or none): out of range, reported as a change.
+    {
+        AnchorRange r;
+        r.setThreshold(-70);
+        r.onSighting(-60, 1000);
+        CHECK(r.tick(1000) && r.inRange());
+        r.reset();
+        CHECK(r.tick(1500) && !r.inRange() && r.latest(1500) == -128);
+        r.reset();
+        CHECK(!r.tick(2000)); // already out: nothing to report
+    }
+}
+
 static void testHomeWatch()
 {
     // Readings every 2 s at -60 dBm (threshold -70): home after 20 s, with no GPS fix at all.
@@ -1383,6 +1421,22 @@ static void testAppLink()
     CHECK(decodeAppKeysAck(buf, n, seq, count) && seq == 1763085600 && count == 1);
     CHECK(messageType(buf, n, t) && t == MsgType::AppKeysAck);
 
+    // Anchor: in range, heard at -68 dBm, threshold -75; then not heard at all.
+    proto::AnchorReport ar;
+    ar.inRange = true;
+    ar.rssiDbm = -68;
+    ar.thresholdDbm = -75;
+    n = encodeAnchorReport(buf, sizeof(buf), ar);
+    CHECK(hex(buf, n) == "020a01bcb5");
+    proto::AnchorReport arBack;
+    CHECK(decodeAnchorReport(buf, n, arBack) && arBack.inRange && arBack.rssiDbm == -68 && arBack.thresholdDbm == -75);
+    CHECK(messageType(buf, n, t) && t == MsgType::Anchor);
+    CHECK(!decodeAnchorReport(buf, n - 1, arBack));
+    ar.inRange = false;
+    ar.rssiDbm = kNoReading;
+    n = encodeAnchorReport(buf, sizeof(buf), ar);
+    CHECK(hex(buf, n) == "020a0080b5");
+
     // What a phone may ask for.
     CHECK(appActionAllowed(CommandAction::SilenceLost) && appActionAllowed(CommandAction::RequestStatus));
     CHECK(appActionAllowed(CommandAction::Beep) && appActionAllowed(CommandAction::Vibrate));
@@ -1803,6 +1857,7 @@ int main()
     testPulser();
     testBeacon();
     testHomeWatch();
+    testAnchorRange();
     testZoneWalk();
     testBaseLink();
     testGpsPacing();

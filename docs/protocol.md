@@ -244,6 +244,26 @@ gave it). Golden bytes for one key (id `0x1a2b3c4d`, key `00 01 .. 0f`), sequenc
 `02 08 208d1669 01 4d3c2b1a 000102030405060708090a0b0c0d0e0f`, and its acknowledgement
 `02 09 208d1669 01`.
 
+## 10. Anchor (collar to base, 0.19.16 on)
+
+Whether the collar hears its home anchor (see Config), for the owner to see as "In Bluetooth
+Range". It says so whatever the GPS, the fences or the dog's state, and does not wait the 20 s
+home mode does.
+
+| Offset | Size | Field |
+| --- | --- | --- |
+| 2 | 1 | flags: bit 0 in range |
+| 3 | 1 | the latest reading of the anchor, dBm, signed; -128 if none in the last 15 s |
+| 4 | 1 | the threshold the collar holds, dBm, signed |
+
+In range from the first reading at the threshold or stronger, until no reading in 15 s is within
+6 dB of it. The collar sends this when that changes (at most every 30 s; a change in between goes
+out at the end of the 30 s), when it gets a new anchor, and with a status report when the last one
+is more than 5 minutes old, while it has an anchor. A direct message with an acknowledgement,
+like a status. The base checks the sender as for a status, and shows it while home mode is on and
+the collar's reports keep coming with it. Bases before 0.19.16 ignore it. Golden bytes for in
+range at -68 dBm, threshold -75: `02 0a 01 bc b5`; not heard: `02 0a 00 80 b5`.
+
 ## The companion app
 
 A phone talks to the collar over the collar's own Meshtastic Bluetooth service, as any Meshtastic

@@ -441,8 +441,18 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
     link.key_for = lambda n: (store.collar(n) or {}).get("public_key")
     link.on_send_error = lambda n, r: on_send_error(n, r)
     link.on_app_ack = lambda n, a: on_app_ack(n, a)
+    link.on_anchor = lambda n, a: on_anchor(n, a)
 
-    sim = Simulator(store.record_status, store.set_sim)
+    def sim_status(node_id: str, status: dict) -> None:
+        """A simulated collar's report. What it says about the home anchor, which a real collar
+        sends in a message of its own, is kept as that would be."""
+        status = dict(status)
+        heard = status.pop("anchor_heard", None)
+        if heard is not None or (store.collar(node_id) or {}).get("anchor_heard"):
+            store.set_collar_info(node_id, "anchor_heard", heard and {**heard, "at": time.time()})
+        store.record_status(node_id, status)
+
+    sim = Simulator(lambda n, s: sim_status(n, s), store.set_sim)
 
     # -- Lost beacon: the dog's name (the collar's name) and the owner's contact go to each collar,
     # which uses them only when the dog has been out for 90 s.
@@ -485,6 +495,24 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
             return None
         return protocol.HomeAnchor(ANCHOR_KINDS.get(a.get("kind"), protocol.AnchorKind.NONE),
                                    a.get("address", ""), int(a.get("rssi", -75)))
+
+    def anchor_heard(c: dict) -> dict | None:
+        """What the collar last said about hearing the home anchor ({in_range, rssi, threshold,
+        at}), while it still holds: home mode is on, and it is no older than the collar's reports
+        allow. Collar firmware 0.19.16 on says so when it changes and again with a report at least
+        every 5 minutes; older firmware never does (None)."""
+        h = c.get("anchor_heard")
+        a = home_anchor()
+        if not h or a is None or a.kind == protocol.AnchorKind.NONE:
+            return None
+        received = (c.get("status") or {}).get("received")
+        window = max(2 * (c.get("report_s") or 600), 600) + 120
+        if received and h.get("at", 0) < received - window:
+            return None  # the collar's reports go on without it (older firmware put back?)
+        return h
+
+    def in_bt_range(c: dict) -> bool:
+        return bool((anchor_heard(c) or {}).get("in_range"))
 
     home_cache: dict = {}  # "at": the last home location Home Assistant gave
     home_lock = threading.Lock()
@@ -627,6 +655,10 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
             c["app_keys"] = len(app_keys_for(node_id, c))
         c["apps"] = public_apps(c)
         c.pop("apps_for", None)
+        # Whether it hears the home anchor (None: home mode off, or the collar has not said).
+        c["anchor_heard"] = anchor_heard(c)
+        a = home_anchor()
+        c["home_mode"] = a is not None and a.kind != protocol.AnchorKind.NONE
         return c
 
     def push_apps(node_id: str) -> bool:
@@ -717,6 +749,14 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
         app_state["threads"] = [x for x in app_state.get("threads", []) if x.is_alive()] + [t]
         t.start()
 
+    def on_anchor(node_id: str, heard: dict) -> None:
+        """A collar says whether it hears its home anchor (collar firmware 0.19.16 on)."""
+        c = store.collar(node_id)
+        if c is None or not trusted(node_id, c, heard.get("pki", False), heard.get("sender_key", ""), "an anchor report"):
+            return
+        store.set_collar_info(node_id, "anchor_heard", {"in_range": bool(heard.get("in_range")), "rssi": heard.get("rssi"),
+                                                        "threshold": heard.get("threshold"), "at": time.time()})
+
     def on_app_ack(node_id: str, ack: dict) -> None:
         c = store.collar(node_id)
         if c is None or not trusted(node_id, c, ack.get("pki", False), ack.get("sender_key", ""), "an app key answer"):
@@ -725,13 +765,16 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
             store.set_collar_info(node_id, "apps_acked", ack["seq"])
             store.set_collar_info(node_id, "apps_sent", None)
 
-    def log_entry(recorded: dict) -> dict:
+    def log_entry(recorded: dict, in_range: bool = False) -> dict:
         """A report for the log: the position only when it was where the dog was at that moment
-        (a current fix from enough satellites, not home with the GPS off)."""
+        (a current fix from enough satellites, not home with the GPS off). in_range: the collar
+        heard its home anchor then."""
         entry = {"t": round(recorded["received"], 3), "state": recorded.get("state"),
                  "bat": recorded.get("battery_pct"), "sats": recorded.get("sats")}
         if recorded.get("home"):
             entry["home"] = True
+        if in_range:
+            entry["in_range"] = True
         if fresh_position(recorded):
             entry["lat"], entry["lon"] = recorded["lat"], recorded["lon"]
         return entry
@@ -750,7 +793,7 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
         recorded = store.record_status(node_id, status)
         if recorded:
             # The log: every report, with the position only when it was a fix from that moment.
-            entry = log_entry(recorded)
+            entry = log_entry(recorded, in_bt_range(store.collar(node_id) or {}))
             try:
                 clog.add(node_id, entry)
             except (OSError, ValueError) as e:  # a full disk must not stop the reports
@@ -1115,7 +1158,7 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
         out["need_m"] = need
         for node_id, c in store.collars().items():
             row = {"node_id": node_id, "name": c.get("name") or node_id,
-                   "home": bool((c.get("status") or {}).get("home"))}
+                   "home": bool((c.get("status") or {}).get("home")), "in_range": in_bt_range(c)}
             if c.get("fences") and at:
                 try:
                     zones = protocol.zones_from_geojson(c["fences"])
@@ -1660,7 +1703,7 @@ def create_app(settings: dict | None = None, link: MeshLink | None = None) -> Fa
             return None
         out = {k: s[k] for k in STATUS_FIELDS if s.get(k) is not None}
         out.update(received=s.get("received") or 0, via="sim" if c.get("sim") else s.get("via") or "mesh",
-                   via_phone=s.get("via_phone"), fix_age_s=s.get("fix_age_s"))
+                   via_phone=s.get("via_phone"), fix_age_s=s.get("fix_age_s"), in_range=in_bt_range(c))
         return out
 
     @phone_router.post("/collars", response_model=papi.Envelope, responses=ERRORS, openapi_extra=plaintext("collars"),

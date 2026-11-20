@@ -72,6 +72,7 @@ def clearance_m(zones: list[protocol.Zone], lat: float, lon: float) -> float:
 # that strongly (less a margin) for HOME_LEAVE_S.
 HOME_ENTER_S = 20
 HOME_LEAVE_S = 7
+ANCHOR_RANGE_LEAVE_S = 15  # firmware AnchorRange::kLeaveMs
 NO_FIX_AFTER_S = 45  # without a good fix this long the collar reports "no GPS fix" (firmware fixOverdueMs)
 # Roughly what each anchor reads at 1 m, dBm: a typical beacon, and a Meshtastic radio, which
 # transmits louder. Walls, the dog's body and the collar's angle move readings by 10 dB or more.
@@ -433,6 +434,7 @@ class SimCollar:
         self.home = False
         self._near_since: float | None = None
         self._last_near = -1e9
+        self._in_range = False  # as the firmware's AnchorRange: heard at the threshold, for the base to show
 
     # -- settings ---------------------------------------------------------------------------
     def settings(self) -> dict:
@@ -537,6 +539,8 @@ class SimCollar:
             anchor = None
         self.anchor, self.anchor_at = anchor, at
         self._near_since = None
+        self._in_range = False
+        self._report_now = True  # the firmware tells the base where it stands with the new anchor
         if self.home:
             self._leave_home(time.time(), "home anchor changed")
 
@@ -576,13 +580,19 @@ class SimCollar:
 
     def _run_home(self, now: float) -> None:
         """Mirror of the firmware's HomeWatch (Fence.cpp), with the anchor heard whenever the dog
-        is within its range."""
+        is within its range. Also the firmware's AnchorRange: in range at once, out after
+        ANCHOR_RANGE_LEAVE_S without the anchor, reported to the base when that changes."""
         if self._near_anchor():
             self._last_near = now
             if self._near_since is None:
                 self._near_since = now
         elif now - self._last_near > HOME_LEAVE_S:
             self._near_since = None
+        in_range = self.anchor is not None and now - self._last_near <= ANCHOR_RANGE_LEAVE_S
+        if in_range != self._in_range:
+            self._in_range = in_range
+            self._report_now = True
+            self._event("info", "in range of the home anchor" if in_range else "out of range of the home anchor")
         # The anchor alone decides, with no GPS fix needed, except for a dog past a line or lost.
         allowed = (self.anchor is not None and self.engine.zones
                    and self.engine.state in (protocol.CollarState.INSIDE, protocol.CollarState.WARNING)
@@ -721,6 +731,10 @@ class SimCollar:
             "beacon_silenced": self.beacon.silenced,
             "home": self.home,
             "no_fix": no_fix,
+            # A real collar sends this on its own (an Anchor message); the simulator has no signal
+            # strength, only its stand-in for the anchor's range.
+            **({"anchor_heard": {"in_range": self._in_range, "rssi": None, "threshold": self.anchor.rssi}}
+               if self.anchor is not None else {}),
         }
 
     def public(self) -> dict:

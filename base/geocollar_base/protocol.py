@@ -52,6 +52,7 @@ class MsgType(IntEnum):
     CONFIG = 7  # base -> collar: how often to report
     APP_KEYS = 8  # base -> collar: the phones that may connect to the collar with the companion app
     APP_KEYS_ACK = 9  # collar -> base: that list is in force
+    ANCHOR = 10  # collar -> base: whether it hears its home anchor, and how strongly (0.19.16 on)
     # Between the companion app and the collar, over the collar's own Bluetooth (never on the mesh).
     APP_HELLO = 16
     APP_CHALLENGE = 17
@@ -539,6 +540,25 @@ def decode_app_keys_ack(data: bytes) -> dict:
         raise ValueError("not a GeoCollar app key acknowledgement")
     seq, count = struct.unpack_from("<IB", data, 2)
     return {"seq": seq, "count": count}
+
+
+NO_READING = -128  # an anchor report's reading when the collar has not heard the anchor lately
+
+
+def encode_anchor_report(in_range: bool, rssi: int | None, threshold: int) -> bytes:
+    """For tests and simulators: the collar is what sends these."""
+    return bytes([VERSION, MsgType.ANCHOR, 1 if in_range else 0]) + struct.pack(
+        "<bb", NO_READING if rssi is None else rssi, threshold)
+
+
+def decode_anchor_report(data: bytes) -> dict:
+    """{"in_range": bool, "rssi": dBm or None, "threshold": dBm}. In range: the collar hears the
+    anchor at the threshold or stronger (firmware AnchorRange); rssi is its latest reading, None
+    when it has not heard the anchor in the last 15 s."""
+    if len(data) != 5 or data[0] != VERSION or data[1] != MsgType.ANCHOR:
+        raise ValueError("not a GeoCollar anchor report")
+    rssi, threshold = struct.unpack_from("<bb", data, 3)
+    return {"in_range": bool(data[2] & 1), "rssi": None if rssi == NO_READING else rssi, "threshold": threshold}
 
 
 PAIRING_SCHEME = "geocollar"

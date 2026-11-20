@@ -37,6 +37,7 @@ enum class MsgType : uint8_t {
     Config = 7,     // base -> collar: how often to report
     AppKeys = 8,    // base -> collar: the phones that may connect to this collar (see AppLink.h)
     AppKeysAck = 9, // collar -> base: that list is in force
+    Anchor = 10,    // collar -> base: whether the collar hears its home anchor, and how strongly
     // Between the companion app and the collar, over the collar's own Bluetooth (AppLink.h).
     AppHello = 16,
     AppChallenge = 17,
@@ -177,6 +178,23 @@ constexpr size_t kConfigLength = 2 + 2;
 constexpr size_t kAnchorLength = 1 + 6 + 1;
 size_t encodeConfig(uint8_t *out, size_t cap, const CollarConfig &c, uint32_t seq = 0);
 bool decodeConfig(const uint8_t *buf, size_t len, CollarConfig &c, uint32_t &seq);
+
+/// Anchor (collar -> base, 0.19.16 on): [version][10][flags: bit 0 in range][latest reading dBm,
+/// i8, kNoReading if none in AnchorRange::kLeaveMs][threshold dBm, i8]. In range: heard at the
+/// threshold or stronger (see AnchorRange). Sent when that changes, at most every
+/// kAnchorReportGapMs, and with a status report when the last one is older than
+/// kAnchorRefreshMs. Bases before 0.19.16 ignore it, like any message type they don't know.
+struct AnchorReport {
+    bool inRange = false;
+    int8_t rssiDbm = -128; // kNoReading: not heard lately
+    int8_t thresholdDbm = -70;
+};
+constexpr int8_t kNoReading = -128;
+constexpr uint32_t kAnchorReportGapMs = 30 * 1000;     // at most one per change this often
+constexpr uint32_t kAnchorRefreshMs = 5 * 60 * 1000; // and again with a status report after this
+constexpr size_t kAnchorReportLength = 2 + 1 + 1 + 1;
+size_t encodeAnchorReport(uint8_t *out, size_t cap, const AnchorReport &a);
+bool decodeAnchorReport(const uint8_t *buf, size_t len, AnchorReport &a);
 
 /// The collar's Meshtastic names for a dog's name: the long name is the dog's name (cut to fit on a
 /// character boundary), the short name its initials (several words) or first letters (one word),

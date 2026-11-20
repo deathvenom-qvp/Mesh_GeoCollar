@@ -265,6 +265,8 @@ def test_home_mode_in_the_simulator():
     for t in range(1000, 1000 + simmod.HOME_ENTER_S - 1):
         sim.step(1.0, now=t)
     assert not sim.home  # in range, but not for long enough yet
+    # In Bluetooth Range from the first second near the anchor, with no wait: what the base shows.
+    assert sim.report(t)["anchor_heard"] == {"in_range": True, "rssi": None, "threshold": -85}
     for t in range(t + 1, t + 4):
         r = sim.step(1.0, now=t)
     assert sim.home and any("GPS off" in e["text"] for e in sim.events)
@@ -281,6 +283,9 @@ def test_home_mode_in_the_simulator():
         if not sim.home and left is None:
             left = u
     assert left is not None and sim.engine.state == S.INSIDE
+    # Out of range once the anchor has faded for longer still (15 s): the base shows that.
+    assert sim.report(t + 40)["anchor_heard"]["in_range"] is False
+    assert any("out of range of the home anchor" in e["text"] for e in sim.events)
     # The anchor alone decides, even one in a band: the GPS goes off there too.
     edge = (39.9991 + 3 / 111_000, -75.0)  # 3 m inside the south line: the warning band
     sim.set_anchor(anchor, edge)

@@ -39,6 +39,8 @@ class MeshLink:
         self.on_send_error = on_send_error
         # A collar's answer to the list of companion app keys: (node ID, {seq, count, pki, sender_key}).
         self.on_app_ack: Callable[[str, dict], None] | None = None
+        # Whether a collar hears its home anchor: (node ID, {in_range, rssi, threshold, pki, sender_key}).
+        self.on_anchor: Callable[[str, dict], None] | None = None
         self.serial_port = serial_port
         self.host = host
         self.iface = None
@@ -126,6 +128,14 @@ class MeshLink:
             # Checked like a report: it must be a PKI message from the collar's own key.
             ack.update(pki=bool(packet.get("pkiEncrypted")), sender_key=packet.get("publicKey") or "")
             self.on_app_ack(packet.get("fromId") or f"!{packet['from']:08x}", ack)
+            return
+        if kind == protocol.MsgType.ANCHOR and self.on_anchor:
+            try:
+                heard = protocol.decode_anchor_report(data)
+            except ValueError:
+                return
+            heard.update(pki=bool(packet.get("pkiEncrypted")), sender_key=packet.get("publicKey") or "")
+            self.on_anchor(packet.get("fromId") or f"!{packet['from']:08x}", heard)
             return
         if kind not in (protocol.MsgType.STATUS, protocol.MsgType.BREACH):
             return

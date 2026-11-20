@@ -51,7 +51,7 @@ least a second apart; if the two fixes are in different bands, the milder one co
 | Lost (3 good fixes outside) | **Stops all corrections**, sends a breach alert, reports position every 30 s. GPS fix every 60 s while the base (directly or through the mesh) or the phone app can get it, otherwise GPS off and a check for the base every 5 minutes; when the base answers, a fix that goes straight to it. |
 | Outside for 90 s | **Lost beacon**: Bluetooth name "Rex is lost 5551234567" 90 s on / 90 s off, a plain-text "Please help get Rex home. Call …" on the public mesh channel every 5 minutes (with the check for the base, while it is out of reach), GPS as in lost mode. Until back inside or silenced from the base. |
 | Back inside, clear of every band, for 3 fixes | Re-arms. |
-| In Bluetooth Range (home mode, if set up) | Hears the home Bluetooth anchor for 20 s while Inside or near the line: GPS off, the last position kept. Ends when the anchor fades or a fix puts the dog past a line. |
+| In Bluetooth Range (home mode, if set up) | Hears the home Bluetooth anchor while Inside or near the line, and tells the base at once with the signal strength. After 20 s of it: GPS off, the last position kept (home mode). Ends when the anchor fades for 15 s; a fix past a line shows Outside instead. |
 
 Fixes with poor PDOP, or from fewer than 12 satellites, are ignored entirely: no position, no
 correction, no change of state. 12 is strict: under trees or next to the house a fix often has 8 to
