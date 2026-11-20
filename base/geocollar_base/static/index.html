@@ -100,7 +100,7 @@
   .collar.selected { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
   .collar .name { font-weight: 600; }
   .dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; flex: none; background: var(--idle); }
-  .st-INSIDE { --c: var(--ok); } .st-WARNING { --c: var(--warn); } .st-OUTSIDE, .st-LOST { --c: var(--bad); } .st-NO_FENCE, .st-NONE { --c: var(--idle); }
+  .st-INSIDE { --c: var(--ok); } .st-WARNING { --c: var(--warn); } .st-OUTSIDE, .st-LOST { --c: var(--bad); } .st-NO_FENCE, .st-NONE { --c: var(--idle); } .st-HOME { --c: var(--accent); }
   .dot[class*="st-"] { background: var(--c); }
   .state { color: var(--c, var(--idle)); font-weight: 600; font-size: 12px; }
 
@@ -789,7 +789,11 @@ const MIN_SATS = 12; // satellites a GPS fix needs (protocol.MIN_FIX_SATS)
 const gpsInsideLabel = s => s === 0 ? 'second (GPS always on)' : `${s} s`;
 const ago = secs => secs < 90 ? `${Math.round(secs)} s ago` : secs < 5400 ? `${Math.round(secs / 60)} min ago`
   : secs < 172800 ? `${Math.round(secs / 3600)} h ago` : `${Math.round(secs / 86400)} days ago`;
-const stateLabel = s => ({ NO_FENCE: 'No fence', INSIDE: 'Inside', WARNING: 'Near the line', OUTSIDE: 'Outside', LOST: 'Lost' })[s] || 'No report yet';
+const stateLabel = s => ({ NO_FENCE: 'No fence', INSIDE: 'Inside', WARNING: 'Near the line', OUTSIDE: 'Outside', LOST: 'Lost', HOME: 'In Bluetooth Range' })[s] || 'No report yet';
+// The state to show for a report or log entry: "In Bluetooth Range" while the collar hears its home
+// anchor (home mode, GPS off). The collar only goes home from Inside or Near the line, so a dog
+// past a line or lost always shows that instead.
+const shownState = s => !s ? 'NONE' : s.home && (s.state === 'INSIDE' || s.state === 'WARNING') ? 'HOME' : s.state || 'NONE';
 const round7 = x => Math.round(x * 1e7) / 1e7; // the collar stores degrees × 1e7
 
 // Units. Everything is stored and sent in metres (the collar's bands are whole metres); feet are
@@ -1311,14 +1315,14 @@ function renderCollars() {
   const now = Date.now() / 1000;
   for (const id of ids) {
     const c = collars[id], s = c.status;
-    const st = s ? s.state : 'NONE';
+    const st = shownState(s);
     const bits = [];
     if (!s && c.hello) bits.push(`heard ${ago(now - c.hello.seen)}`);
     if (s) {
       bits.push(ago(now - s.received) + (s.via === 'phone' ? ` via ${s.via_phone || 'a phone'}` : ''));
       if (s.battery_pct != null && s.battery_pct !== 255) bits.push(`battery ${s.battery_pct}%`);
       if (s.clearance_m != null && c.fence_version && !s.no_fix && !s.home) bits.push(`${len(Math.abs(s.clearance_m))} ${s.clearance_m < 0 ? 'past' : 'from'} the line`);
-      if (s.home) bits.push('home, GPS off');
+      if (s.home) bits.push('GPS off');
       else if (s.few_sats) bits.push(`only ${s.sats} satellites: fix ignored`);
       else if (s.no_fix) bits.push('no GPS fix');
       if (s.beacon_active) bits.unshift('asking for help');
@@ -1327,7 +1331,7 @@ function renderCollars() {
         onkeydown: e => { if (e.key === 'Enter') select(id); } },
       el('div', { class: 'row spread' },
         el('span', { class: 'row' }, el('span', { class: `dot st-${st}` }), el('span', { class: 'name' }, c.name), c.sim ? el('span', { class: 'pill sim' }, 'Sim') : null),
-        el('span', { class: `state st-${st}` }, stateLabel(s && s.state))),
+        el('span', { class: `state st-${st}` }, stateLabel(st))),
       el('div', { class: 'muted' }, bits.join(' · ') || id)));
   }
 }
@@ -1344,7 +1348,7 @@ function renderDogs() {
       html: `<div class="dog st-${s.state}${stale ? ' stale' : ''}" style="--c:${css({ INSIDE: '--ok', WARNING: '--warn', OUTSIDE: '--bad', LOST: '--bad' }[s.state] || '--idle')}"><div class="pin"></div><div class="label"></div></div>` });
     const m = L.marker([s.lat, s.lon], { icon, pmIgnore: true, snapIgnore: true, zIndexOffset: id === selected ? 1000 : 500, title: c.name, keyboard: false });
     m.on('add', () => { const lab = m.getElement() && m.getElement().querySelector('.label'); if (lab) lab.textContent = c.name; });
-    m.bindTooltip(`${stateLabel(s.state)} · ${ago(now - s.received)}${s.home ? ' · home, GPS off' : s.few_sats ? ` · fix from ${s.sats} satellites ignored, last good position` : s.no_fix ? ' · no GPS fix, last known position' : s.sats ? ` · ${s.sats} sats` : ''}`, { direction: 'bottom', offset: [0, 12] });
+    m.bindTooltip(`${stateLabel(shownState(s))} · ${ago(now - s.received)}${s.home ? ' · GPS off' : s.few_sats ? ` · fix from ${s.sats} satellites ignored, last good position` : s.no_fix ? ' · no GPS fix, last known position' : s.sats ? ` · ${s.sats} sats` : ''}`, { direction: 'bottom', offset: [0, 12] });
     m.on('click', e => { L.DomEvent.stopPropagation(e); select(id); });
     m.addTo(dogLayer);
     if (id === selected && c.sim && c.sim.mode === 'goto' && c.sim.target) {
@@ -1370,11 +1374,11 @@ function renderSelected() {
   const s = c.status;
   const rows = [];
   if (s) {
-    rows.push(['State', stateLabel(s.state)], ['Last report', ago(Date.now() / 1000 - s.received)
+    rows.push(['State', stateLabel(shownState(s))], ['Last report', ago(Date.now() / 1000 - s.received)
       + (s.via === 'phone' ? `, passed on by ${s.via_phone || 'a phone'} over Bluetooth: the collar can't reach the base itself` : '')]);
     if (s.battery_pct != null && s.battery_pct !== 255) rows.push(['Battery', `${s.battery_pct}%`]);
     // Collar firmware 0.16 on says when it has no current fix; its position is then the last one it knew.
-    if (s.home) rows.push(['GPS', 'Off: home, near the anchor. The map shows the last fix']);
+    if (s.home) rows.push(['GPS', 'Off: hears the home anchor. The map shows the last fix']);
     else if (s.few_sats) rows.push(['GPS', `Fix from only ${s.sats} satellites, ${MIN_SATS} needed: ignored. The map shows the last good one`]);
     else if (s.no_fix) rows.push(['GPS', s.lat || s.lon ? 'No fix now: the map shows where it last had one' : 'No fix yet']);
     else if (s.sats) rows.push(['GPS', `${s.sats} sats, PDOP ${s.pdop}`]);
@@ -3292,8 +3296,8 @@ function renderLog() {
     if (logDay(e.t) !== day) { day = logDay(e.t); rows.push(el('tr', { class: 'day' }, el('th', { colspan: 5, scope: 'colgroup' }, day))); }
     rows.push(el('tr', { class: (hasPos(e) ? 'pt' : 'nofix') + (e.k === logPicked ? ' picked' : ''), 'data-k': e.k },
       el('td', {}, logTime(e.t)),
-      el('td', {}, hasPos(e) ? logPos(e) : e.home ? 'Home, GPS off' : e.sats ? `Fix ignored (${e.sats} satellites)` : 'No GPS fix'),
-      el('td', {}, el('span', { class: `dot st-${e.state || 'NONE'}` }), stateLabel(e.state) + (e.home ? ', home' : '')),
+      el('td', {}, hasPos(e) ? logPos(e) : e.home ? 'GPS off' : e.sats ? `Fix ignored (${e.sats} satellites)` : 'No GPS fix'),
+      el('td', {}, el('span', { class: `dot st-${shownState(e)}` }), stateLabel(shownState(e))),
       el('td', {}, logBat(e)),
       el('td', {}, e.sats != null ? String(e.sats) : '')));
   }
@@ -3334,7 +3338,7 @@ function drawLogMap() {
     const newest = i === pts.length - 1;
     const dot = L.circleMarker([e.lat, e.lon], { radius: newest ? 8 : 5, color: '#fff', weight: newest ? 3 : 1.5, fillColor: stateColor(e.state), fillOpacity: 1,
       pmIgnore: true, snapIgnore: true, bubblingMouseEvents: false });
-    dot.bindTooltip(() => `${logTime(e.t)} · ${stateLabel(e.state)}${newest ? ' · newest' : ''}`, { direction: 'top', offset: [0, -6] });
+    dot.bindTooltip(() => `${logTime(e.t)} · ${stateLabel(shownState(e))}${newest ? ' · newest' : ''}`, { direction: 'top', offset: [0, -6] });
     dot.on('click', () => pickLog(e.k, 'map'));
     dot.addTo(logLayer);
     logDots.set(e.k, dot);
@@ -3363,7 +3367,7 @@ function markLogPick(show) {
   const c = collars[logId];
   logPopup.setLatLng([e.lat, e.lon]).setContent(el('div', { class: 'logpop' },
     el('b', {}, c ? c.name : ''), el('br'), `${logDay(e.t)}, ${logTime(e.t)}`, el('br'), logPos(e), el('br'),
-    [stateLabel(e.state), logBat(e) && `battery ${logBat(e)}`, e.sats != null && `${e.sats} sats`].filter(Boolean).join(' · ')));
+    [stateLabel(shownState(e)), logBat(e) && `battery ${logBat(e)}`, e.sats != null && `${e.sats} sats`].filter(Boolean).join(' · ')));
   if (!logMap.hasLayer(logPopup)) logPopup.openOn(logMap);
   if (show && !logMap.getBounds().pad(-0.1).contains([e.lat, e.lon])) logMap.panTo([e.lat, e.lon]);
 }
