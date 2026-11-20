@@ -975,6 +975,39 @@ def test_a_simulated_collar_can_be_linked_for_trying_the_app(tmp_path):
     assert not getattr(link, "app_keys", [])  # nothing goes on the air for a simulated collar
 
 
+def test_in_bluetooth_range_from_the_collars_anchor_reports(tmp_path):
+    client, link = make(tmp_path)
+    client.post("/api/collars", json={"node_id": "!a1b2c3d4", "name": "Rex"})
+    on_status, on_anchor = client.app.state.on_status, link.on_anchor
+    on_status("!a1b2c3d4", GOOD)
+    heard = {"in_range": True, "rssi": -68, "threshold": -75, "pki": True, "sender_key": "a2V5"}
+    # Home mode off: nothing to show, whatever the collar says.
+    on_anchor("!a1b2c3d4", heard)
+    c = client.get("/api/collars").json()["!a1b2c3d4"]
+    assert c["anchor_heard"] is None and c["home_mode"] is False
+
+    client.put("/api/home-anchor", json={"kind": "base", "rssi": -75})
+    c = client.get("/api/collars").json()["!a1b2c3d4"]
+    assert c["home_mode"] is True and c["anchor_heard"]["in_range"] is True and c["anchor_heard"]["rssi"] == -68
+    assert client.get("/api/home-anchor").json()["collars"][0]["in_range"] is True
+    # A report while in range goes in the log as such.
+    on_status("!a1b2c3d4", GOOD)
+    assert client.get("/api/collars/!a1b2c3d4/log").json()["entries"][-1]["in_range"] is True
+    # Not from the collar's own key: ignored.
+    on_anchor("!a1b2c3d4", {**heard, "in_range": False, "pki": False})
+    assert client.get("/api/collars").json()["!a1b2c3d4"]["anchor_heard"]["in_range"] is True
+    on_anchor("!a1b2c3d4", {**heard, "in_range": False, "rssi": -85})
+    assert client.get("/api/collars").json()["!a1b2c3d4"]["anchor_heard"] == {
+        "in_range": False, "rssi": -85, "threshold": -75, "at": pytest.approx(time.time(), abs=5)}
+    # Reports going on long after the last word on the anchor (firmware put back to an older one):
+    # it no longer counts.
+    on_anchor("!a1b2c3d4", heard)
+    store_c = client.app.state.store.collar("!a1b2c3d4")
+    client.app.state.store.set_collar_info("!a1b2c3d4", "anchor_heard", {**store_c["anchor_heard"], "at": time.time() - 3600})
+    on_status("!a1b2c3d4", GOOD)
+    assert client.get("/api/collars").json()["!a1b2c3d4"]["anchor_heard"] is None
+
+
 def test_home_anchor_is_sent_to_collars_and_checked(tmp_path):
     client, link = make(tmp_path)
     client.post("/api/collars", json={"node_id": "!a1b2c3d4", "name": "Rex"})

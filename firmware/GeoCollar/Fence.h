@@ -395,6 +395,39 @@ class HomeWatch
     uint32_t lastStayMs_ = 0; // home: the last reading strong enough to stay
 };
 
+/// Whether the collar is in range of the anchor, for the owner to see (0.19.16): unlike HomeWatch it
+/// does not wait, and holds whatever the GPS, the fences or the dog's state. In range from the
+/// first reading at the threshold or stronger, until no reading in kLeaveMs is within
+/// kStayMarginDb of it. kLeaveMs spans a few of the scans away from home (every 5 s), so one
+/// missed scan does not end it.
+class AnchorRange
+{
+  public:
+    static constexpr uint32_t kLeaveMs = 15 * 1000;
+    static constexpr int kStayMarginDb = HomeWatch::kStayMarginDb;
+
+    void setThreshold(int8_t rssiDbm) { threshold_ = rssiDbm; }
+    int8_t threshold() const { return threshold_; }
+    /// The anchor changed or was turned off: out of range, readings forgotten.
+    void reset();
+    /// A reading of the anchor's signal.
+    void onSighting(int rssiDbm, uint32_t nowMs);
+    /// Call about once a second. Returns true when inRange() changed (here or in reset).
+    bool tick(uint32_t nowMs);
+    bool inRange() const { return inRange_; }
+    /// The latest reading, if it is no older than kLeaveMs; INT8_MIN (-128) otherwise.
+    int8_t latest(uint32_t nowMs) const;
+
+  private:
+    int8_t threshold_ = -70;
+    bool inRange_ = false;
+    bool changed_ = false;
+    bool heard_ = false;
+    int8_t lastRssi_ = -128;
+    uint32_t lastHeardMs_ = 0;
+    uint32_t lastStayMs_ = 0; // the last reading strong enough to stay in range
+};
+
 /// The GPS update interval while home: Meshtastic powers the GPS down and leaves it there.
 constexpr uint32_t kHomeGpsSecs = 3600;
 

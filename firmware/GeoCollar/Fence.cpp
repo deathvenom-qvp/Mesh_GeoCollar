@@ -704,4 +704,44 @@ bool HomeWatch::tick(uint32_t nowMs, bool allowed)
     return changed;
 }
 
+// ---------------------------------------------------------------------------------------------
+
+void AnchorRange::reset()
+{
+    if (inRange_)
+        changed_ = true;
+    inRange_ = false;
+    heard_ = false;
+}
+
+void AnchorRange::onSighting(int rssiDbm, uint32_t nowMs)
+{
+    lastRssi_ = static_cast<int8_t>(rssiDbm < -127 ? -127 : rssiDbm > 127 ? 127 : rssiDbm);
+    lastHeardMs_ = nowMs;
+    heard_ = true;
+    // In range from a reading at the threshold; once in range, one within the margin keeps it.
+    if (rssiDbm >= threshold_ || (inRange_ && rssiDbm >= threshold_ - kStayMarginDb)) {
+        if (!inRange_)
+            changed_ = true;
+        inRange_ = true;
+        lastStayMs_ = nowMs;
+    }
+}
+
+bool AnchorRange::tick(uint32_t nowMs)
+{
+    if (inRange_ && nowMs - lastStayMs_ > kLeaveMs) {
+        inRange_ = false;
+        changed_ = true;
+    }
+    const bool changed = changed_;
+    changed_ = false;
+    return changed;
+}
+
+int8_t AnchorRange::latest(uint32_t nowMs) const
+{
+    return heard_ && nowMs - lastHeardMs_ <= kLeaveMs ? lastRssi_ : static_cast<int8_t>(-128);
+}
+
 } // namespace geocollar

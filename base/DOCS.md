@@ -187,8 +187,11 @@ fixes are ignored the collar cannot tell that the dog has left**, and a lost dog
 moving. The Sats column on the Log tab shows what each collar gets. Needs collar firmware 0.19.11
 or later; older collars use 5, and the base ignores the positions they send from fewer than 12.
 Home mode needs no fix at all: a collar that hears its home anchor turns the GPS off whatever the
-satellites (collar firmware 0.19.14 or later). While it does, the collar's state shows as **In
-Bluetooth Range** on the Map and Log tabs and in the phone app.
+satellites (collar firmware 0.19.14 or later). A collar that hears its home anchor at that strength
+shows as **In Bluetooth Range** on the Map and Log tabs and in the phone app, from the first reading
+(collar firmware 0.19.16 or later; older collars only once home mode has turned the GPS off). Its
+card has a **Home anchor** row with the latest signal strength the collar heard, against the
+threshold you set, so you can see how close "home" is.
 
 ## When a collar has no GPS fix
 

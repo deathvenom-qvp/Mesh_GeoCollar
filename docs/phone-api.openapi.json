@@ -769,6 +769,12 @@
             "default": null,
             "description": "How old the GPS fix was when the report was made, when known",
             "title": "Fix Age S"
+          },
+          "in_range": {
+            "default": false,
+            "description": "The collar hears its home Bluetooth anchor (In Bluetooth Range)",
+            "title": "In Range",
+            "type": "boolean"
           }
         },
         "required": [

@@ -40,10 +40,10 @@ const STATE_TEXT = {
   [State.LOST]: 'Lost',
 };
 const STATE_CLASS = { [State.INSIDE]: 's-inside', [State.WARNING]: 's-warning', [State.OUTSIDE]: 's-outside', [State.LOST]: 's-lost' };
-/// What to call a report's state: "In Bluetooth Range" while the collar hears its home anchor (home
-/// mode, GPS off). A collar only goes home from inside or near the line, so a dog past a line or
-/// lost always shows that instead.
-const stateText = s => (s.home && (s.state === State.INSIDE || s.state === State.WARNING) ? 'In Bluetooth Range' : STATE_TEXT[s.state] || 'Unknown');
+/// What to call a report's state: "In Bluetooth Range" while the collar hears its home anchor (as
+/// the base passes on, or home mode with the GPS off). Only over inside and near the line: a dog
+/// past a line or lost always shows that instead.
+const stateText = s => ((s.home || s.inRange) && (s.state === State.INSIDE || s.state === State.WARNING) ? 'In Bluetooth Range' : STATE_TEXT[s.state] || 'Unknown');
 const PILL = {
   [Link.SEARCHING]: ['Searching…', 'busy'], [Link.PAIRING]: ['Pairing…', 'busy'], [Link.CONNECTING]: ['Connecting…', 'busy'],
   [Link.ONLINE]: ['Connected', 'online'], [Link.WAITING]: ['Not connected', ''], [Link.UNKNOWN]: ['Not linked yet', ''],

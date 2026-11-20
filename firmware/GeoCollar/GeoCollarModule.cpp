@@ -1023,8 +1023,17 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
             home_.reset(); // new fences: GPS on, and the anchor's 20 s start again
         }
         const int rssi = scanner_.poll(anchor_, baseNode_, home_.home());
-        if (rssi != INT_MIN)
+        if (rssi != INT_MIN) {
             home_.onSighting(rssi, now);
+            range_.onSighting(rssi, now);
+        }
+        // In range or not, for the owner to see, whatever the GPS or the dog's state.
+        if (range_.tick(now)) {
+            LOG_INFO("GeoCollar: %s the home anchor", range_.inRange() ? "in range of" : "out of range of");
+            anchorDirty_ = true;
+        }
+        if (anchorDirty_ && (!anchorSent_ || now - anchorSentMs_ >= proto::kAnchorReportGapMs))
+            sendAnchor();
         // The anchor alone decides, whatever the GPS says (no fix needed), except for a dog past a
         // line or lost: that takes fixes clear of the bands to end, so the GPS stays on for it.
         const CollarState st = engine_.state();
@@ -1049,6 +1058,9 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
         anchor_ = a;
         home_.setThreshold(a.rssiDbm);
         home_.reset();
+        range_.setThreshold(a.rssiDbm);
+        range_.reset();
+        anchorDirty_ = true; // the base hears where the collar stands with the new anchor
         saveHome();
         LOG_INFO("GeoCollar: home anchor %s, %d dBm",
                  a.kind == AnchorKind::Beacon ? "beacon" : a.kind == AnchorKind::BaseRadio ? "base radio" : "off",
@@ -1097,6 +1109,31 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
         a.rssiDbm = rssi;
         anchor_ = a;
         home_.setThreshold(rssi);
+        range_.setThreshold(rssi);
+    }
+
+    /// Tells the base whether the collar hears its home anchor, and how strongly (proto::AnchorReport).
+    void sendAnchor()
+    {
+        anchorDirty_ = false;
+        if (!baseNode_)
+            return;
+        meshtastic_MeshPacket *p = allocDataPacket();
+        if (!p)
+            return;
+        const uint32_t now = millis();
+        proto::AnchorReport a;
+        a.inRange = range_.inRange();
+        a.rssiDbm = range_.latest(now);
+        a.thresholdDbm = anchor_.rssiDbm;
+        p->to = baseNode_;
+        p->want_ack = true;
+        p->decoded.payload.size =
+            proto::encodeAnchorReport(p->decoded.payload.bytes, sizeof(p->decoded.payload.bytes), a);
+        service->sendToMesh(p, RX_SRC_LOCAL, false);
+        link_.onSent(now);
+        anchorSentMs_ = now;
+        anchorSent_ = true;
     }
 
     /// The lost-dog beacon: Bluetooth name on and off in 90 s turns, and a plain-text plea on the
@@ -1542,6 +1579,10 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
         lastStatusMs_ = millis();
         bootReported_ = true;
         reportedNoFix_ = fixWatch_.noFix();
+        // With an anchor set, the base hears about it with the reports too, now and then, so a
+        // message lost on the mesh or a base that restarted does not leave it out of date.
+        if (anchor_.kind != AnchorKind::None && (!anchorSent_ || lastStatusMs_ - anchorSentMs_ >= proto::kAnchorRefreshMs))
+            sendAnchor();
     }
 
     // Persistence: [magic u32][format u16][base node u32][fence version u16][blob len u16][blob][Settings]
@@ -1675,6 +1716,10 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
     AnchorScanner scanner_;
     HomeAnchor anchor_;            // from the base (kHomeFile); kind None: home mode off
     HomeWatch home_;
+    AnchorRange range_;          // whether the collar hears the anchor, for the base to show
+    bool anchorDirty_ = false;   // the base has not been told about a change in range_ yet
+    bool anchorSent_ = false;    // sendAnchor() has sent at least once since boot
+    uint32_t anchorSentMs_ = 0;  // when
     uint16_t homeFenceVersion_ = 0; // the fences home_ last saw
     bool gpsHome_ = false;          // applyGpsPacing() has powered the GPS down for home mode
     BaseLink link_;                 // whether the base answers the collar's reports
