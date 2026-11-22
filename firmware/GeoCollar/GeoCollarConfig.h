@@ -15,6 +15,14 @@
 #define GEOCOLLAR_TX_PIN 5
 #endif
 
+// Bench tool: a spare GPIO wired to the collar receiver chip's data output (through a divider if
+// that line goes above 3.3 V), to log what the original remote sends and learn its transmitter ID.
+// Listening only; off (-1) unless set, because the chip's noise keeps the CPU busy. See
+// docs/hardware.md, "Capturing the remote".
+#ifndef GEOCOLLAR_SNIFF_PIN
+#define GEOCOLLAR_SNIFF_PIN -1
+#endif
+
 // Optional switch to ground that disables all corrections in hardware (internal pull-up, so
 // leaving it unconnected means "enabled"). -1 = do not read any pin.
 #ifndef GEOCOLLAR_DISABLE_PIN

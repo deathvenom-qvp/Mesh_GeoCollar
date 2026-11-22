@@ -71,6 +71,88 @@ static void testCaiXianLin()
     CHECK(kFrameUs == 45150);
 }
 
+static void testCaiXianLinDecoder()
+{
+    using namespace caixianlin;
+    Pulse f[kFrameLength];
+    DecodedFrame d{};
+    Decoder dec;
+
+    // A clean frame decodes on its last pulse, and not before.
+    CHECK(buildFrame(f, 0xBEEF, 2, CollarAction::Shock, 37));
+    f[kFrameLength - 1].lowUs = 8000; // the gap after the frame
+    int decoded = 0;
+    for (size_t i = 0; i < kFrameLength; i++)
+        if (dec.feed(f[i].highUs, f[i].lowUs, d))
+            decoded = (int)i;
+    CHECK(decoded == (int)kFrameLength - 1);
+    CHECK(d.transmitterId == 0xBEEF && d.channel == 2 && d.action == CollarAction::Shock && d.intensity == 37);
+    CHECK(std::strcmp(actionName(d.action), "shock") == 0);
+
+    // Receiver-chip distortion: highs stretched by 120 us, lows shortened to match, and noise
+    // before the frame.
+    CHECK(buildFrame(f, 0x0102, 0, CollarAction::Vibrate, 99));
+    dec.reset();
+    CHECK(!dec.feed(40, 90, d));
+    CHECK(!dec.feed(300, 2000, d));
+    bool ok = false;
+    for (size_t i = 0; i < kFrameLength; i++) {
+        const uint32_t hi = f[i].highUs + 120;
+        const uint32_t lo = i == kFrameLength - 1 ? 3000 : f[i].lowUs - 120;
+        ok = dec.feed(hi, lo, d) || ok;
+    }
+    CHECK(ok && d.transmitterId == 0x0102 && d.action == CollarAction::Vibrate && d.intensity == 99);
+
+    // Back-to-back frames, as a remote sends while a button is held: each one decodes.
+    CHECK(buildFrame(f, 0x4743, 1, CollarAction::Beep, 0));
+    dec.reset();
+    int frames = 0;
+    for (int rep = 0; rep < 3; rep++)
+        for (size_t i = 0; i < kFrameLength; i++)
+            frames += dec.feed(f[i].highUs, i == kFrameLength - 1 ? 1500 : f[i].lowUs, d) ? 1 : 0;
+    CHECK(frames == 3 && d.transmitterId == 0x4743 && d.channel == 1 && d.action == CollarAction::Beep);
+
+    // One flipped bit breaks the checksum.
+    CHECK(buildFrame(f, 0x1234, 0, CollarAction::Vibrate, 10));
+    f[20] = f[20].highUs == kOne.highUs ? kZero : kOne;
+    dec.reset();
+    ok = false;
+    for (size_t i = 0; i < kFrameLength; i++)
+        ok = dec.feed(f[i].highUs, i == kFrameLength - 1 ? 5000 : f[i].lowUs, d) || ok;
+    CHECK(!ok);
+
+    // A frame cut short by a noise spike is dropped, and the next frame still decodes.
+    CHECK(buildFrame(f, 0x1234, 0, CollarAction::Vibrate, 10));
+    dec.reset();
+    for (size_t i = 0; i < 10; i++)
+        dec.feed(f[i].highUs, f[i].lowUs, d);
+    CHECK(!dec.feed(30, 30, d));
+    ok = false;
+    for (size_t i = 0; i < kFrameLength; i++)
+        ok = dec.feed(f[i].highUs, i == kFrameLength - 1 ? 5000 : f[i].lowUs, d) || ok;
+    CHECK(ok && d.intensity == 10);
+
+    // The burst recorder keeps a long run of remote-like pulses and drops short noise runs.
+    BurstRecorder rec;
+    for (int i = 0; i < 5; i++)
+        CHECK(!rec.feed(300, 700));
+    CHECK(!rec.feed(20, 40)); // noise: the 5-pulse run is too short to print
+    CHECK(rec.count() == 0);
+    bool printed = false;
+    for (int i = 0; i < 40 && !printed; i++)
+        printed = rec.feed(i == 39 ? 600 : 400, i == 39 ? 20000 : 600);
+    CHECK(printed && rec.count() == 40);
+    CHECK(rec.pulses()[0].highUs == 400 && rec.pulses()[39].highUs == 600 && rec.pulses()[39].lowUs == 20000);
+    rec.clear();
+    printed = false;
+    size_t n = 0;
+    while (!printed && n < 500) {
+        printed = rec.feed(500, 500);
+        n++;
+    }
+    CHECK(printed && rec.count() == BurstRecorder::kMaxPulses && n == BurstRecorder::kMaxPulses);
+}
+
 // --------------------------------------------------------------------------------------------
 // Fence geometry
 // --------------------------------------------------------------------------------------------
@@ -1848,6 +1930,7 @@ static void testZoneWalk()
 int main()
 {
     testCaiXianLin();
+    testCaiXianLinDecoder();
     testGeometry();
     testStateMachine();
     testFenceReload();
