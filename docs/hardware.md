@@ -34,24 +34,140 @@ collar's microcontroller. GeoCollar drives that line directly from `GEOCOLLAR_TX
 default), so the collar's own microcontroller decodes the commands and its built-in limits and
 timeouts still apply. Nothing is transmitted on 433 MHz.
 
-1. Open one receiver and find the receiver chip's data output pin. Confirm it with a logic analyzer
-   while pressing the remote's buttons: you should see a 1400 µs high / 750 µs low sync pulse, then
-   43 bits of 1000 µs each.
-2. Note the logic voltage on that line. The Tracker's GPIOs are 3.3 V; if the collar runs lower,
-   add a level shifter or a resistor divider.
-3. Isolate the receiver chip's output from the line (lift the pin or cut the trace) so the two
-   outputs never fight, then wire the Tracker's GPIO and a common ground to the microcontroller side.
-4. Pair the collar to GeoCollar's transmitter ID (`GEOCOLLAR_TRANSMITTER_ID`, channel
-   `GEOCOLLAR_CHANNEL`). The pairing steps are not documented for this collar; on similar collars
-   you hold the power button until it beeps, then send any command.
+Why this and not the alternatives:
 
-Still to confirm on the bench: the pairing steps, whether shock and vibrate last only while frames
-keep arriving, and the collar's battery voltage.
+- **A 433 MHz transmitter module next to the collar** (wired to the same GPIO, same firmware) would
+  leave the receiver sealed, but adds a board and an antenna, and any matching remote nearby could
+  still trigger the collar. The Tracker's own SX1262 cannot help: it has no OOK mode and its
+  antenna and matching are for 868/915 MHz. Keep it as the fallback if the receiver must stay
+  unopened.
+- **Driving the motor, buzzer and shock transistors directly** bypasses the microcontroller, which
+  is what shapes the shock pulses into the transformer and times them out. Getting that wrong
+  can hold the transformer on, burn the transistor or give a stronger shock than any level on the
+  remote. Not supported.
+
+With the receiver chip's output cut off, only the Tracker can command the collar: the original
+remote stops working, and so does anyone else's.
+
+### H-880B RX V1.4 receiver board
+
+ken's collar (photos in the project thread of 22 November 2026). What is on it:
+
+| Part | What it is |
+| --- | --- |
+| U4, CMT2220LS (SOP-8) with crystal Y1 | 433 MHz OOK receiver. Its data output is the line to tap. |
+| U6, unmarked SOP-16 | The collar's microcontroller. |
+| Transformer (back) | Shock step-up, driven by Q2/Q4 or a transistor near them. |
+| M1 (back) | Vibration motor. |
+| SP1 (back) | Buzzer. |
+| S2 (back) | Power / pairing button. |
+| B+ / B- pads, red and black leads | The collar's single-cell LiPo. |
+| U1, U2, U3, R16 (0.51 Ω) | Charging and regulation, by the look of them; not identified. |
+| LED strip, LED header (back) | The collar's lights. |
+| P1 (back) | Two contacts by the transformer: probably the charge contacts. |
+
+**Finding the data output.** No CMT2220LS pin table could be found. Its sibling, the CMT2210LS
+(same family, SOP-8), has 1 GND, 2 RFIN, 3 VDD, 5 DOUT, 6 SDN, 8 XIN (crystal). That fits this
+board: the crystal sits beside the corner pin nearest it (pin 8) and the antenna's coil and
+capacitors (L1, L4, C9, C1) sit on the other row near pin 2. So DOUT is most likely **pin 5**: with
+the "CMT2220LS" text upright, the top-right pin, the one nearest U6. Confirm before cutting
+anything: it has continuity to a pin of U6, and it shows bursts of pulses on a scope or logic
+analyzer (or in the capture below) while a remote button is held.
+
+**Logic level.** HopeRF lists the CMT2220LS for 3.0 to 5.5 V, so on this board it may run straight
+from the cell, and its output may go as high as 4.2 V. Measure, with the collar switched on:
+the cell (B+ to B-), U4 pin 3, U6's supply pin (one of its corner pins, usually 1 or 16 on an
+SOP-16: whichever reads the highest steady voltage) and the high level of DOUT.
+
+- U6's supply 3.6 V or less: wire GPIO 5 through 1 kΩ straight to it.
+- U6's supply higher (the cell itself, up to 4.2 V): a 3.3 V high may fall short of its input
+  threshold. Put a single-gate level-shifting buffer in between, powered from U6's supply: an
+  SN74LV1T34 (accepts 3.3 V in, outputs at its own supply) or a 74LVC1T45 (A side at the Tracker's
+  3.3 V, B side at U6's supply).
+
+### Wiring plan
+
+| From (Tracker) | To (collar board) | Notes |
+| --- | --- | --- |
+| GPIO 5 (`GEOCOLLAR_TX_PIN`) | U6's side of DOUT: the pad U4 pin 5 sat on, once the pin is lifted | 1 kΩ in series (or the buffer above); 100 kΩ from that pad to ground so the line stays low while the Tracker boots |
+| GPIO 47 (`GEOCOLLAR_SNIFF_PIN`, bench only) | The lifted U4 pin 5 itself | Direct if DOUT stays at 3.3 V or less; otherwise 10 kΩ in series and 22 kΩ to ground |
+| GND | Collar B- | Common ground. Required. |
+| Battery + (the cell, not 3.3 V) | Collar B+ | Only if the boards share one cell, below |
+| GPIO 7 (`GEOCOLLAR_DISABLE_PIN`) | Switch to ground | Hardware off switch for every correction |
+
+1. **Capture the remote first, before cutting anything** (next section): a wire from DOUT,
+   still soldered in place, to GPIO 47 only listens, so the collar and its remote work as before.
+2. Lift U4 pin 5 off its pad: heat it and lift it with a fine needle or tweezers. (Cutting the
+   trace from pin 5 to U6 works too, if one is exposed.) The two outputs must never fight.
+3. Wire GPIO 5 to the pad, as above. The lifted pin can stay wired to GPIO 47 for more captures.
+4. Common ground, and power as below.
+
+### Capturing the remote
+
+Build with `GEOCOLLAR_SNIFF_PIN` set to the GPIO wired to DOUT:
+
+```sh
+PLATFORMIO_BUILD_FLAGS="-DGEOCOLLAR_SNIFF_PIN=47" firmware/build.sh
+```
+
+Then watch the serial log at 115200 baud and press each remote button in turn. For a
+CaiXianLin remote the log shows each frame decoded:
+
+```
+GeoCollar: remote 0x1A2B channel 0 vibrate 35 (CaiXianLin; this collar builds as 0x4743 channel 0)
+```
+
+Anything else that looks like a remote is printed as raw high/low times, 12 pulses a line:
+
+```
+GeoCollar: unknown remote signal, 42 pulses (high/low us):
+GeoCollar:   1390/770 260/740 740/260 ...
+```
+
+Send that output to the project: a remote in another protocol needs its own frame builder before
+the data-line tap can work, and those times are what it is built from. The capture only listens.
+The receiver chip outputs noise between frames, which keeps the CPU busy, so leave the setting off
+(`-1`, the default) in the collar's real build. A logic analyzer on DOUT (any 8-channel USB one with
+PulseView) shows the same thing.
+
+### Pairing
+
+Two ways:
+
+- **Use the remote's ID** (simplest). Build with the transmitter ID and channel the capture logged,
+  `-DGEOCOLLAR_TRANSMITTER_ID=0x1A2B -DGEOCOLLAR_CHANNEL=0`. The collar is already paired to its
+  remote, so it obeys GeoCollar straight away.
+- **Pair to GeoCollar's own ID** (`GEOCOLLAR_TRANSMITTER_ID`, `GEOCOLLAR_CHANNEL`). On similar
+  collars you hold the power button (S2) until it beeps or the light flashes, then send any
+  command: a Beep from the base app. Not confirmed for this collar.
+
+### Bench checks
+
+Do all of these with the shock electrodes unscrewed, or with the test lamp that came with the
+collar across them, never on a person or a dog.
+
+1. The voltages above, and which pin is DOUT.
+2. A capture of every button: beep, vibrate at a low and a high level, shock at a low and a high
+   level, and each channel the remote has.
+3. Whether vibrate and shock last only while frames keep arriving (hold a button, then let go:
+   does it stop at once?) and whether the collar stops on its own after a few seconds of a held
+   button. GeoCollar relies on the first and sends a stop frame after each correction anyway.
+4. After wiring: a Beep, a Vibrate and (shock turned on in the base app, test lamp fitted) a
+   Shock from the base app each do what they say.
+5. Current, from the shared cell: the collar board idle (its receiver chip alone is about 6 mA,
+   all the time), and at a level-99 shock. Watch the Tracker's serial log for a restart during
+   the shock: if it browns out, add 220 to 470 µF across the collar board's B+ and B-.
 
 ## Power and enclosure
 
-- Both boards run from a single-cell LiPo. One larger cell with one charge port is simplest; keep
-  a common ground.
+- Both boards run from a single-cell LiPo. One larger cell with one charge port is simplest: take
+  the collar's own cell off its B+ / B- pads, wire those pads to the Tracker's battery leads (the
+  cell itself, not the Tracker's 3.3 V), and charge only through the Tracker's USB port, never
+  through the collar's charge contacts at the same time. Keeping two cells works too, as long as
+  the grounds are joined. The collar board then needs its own charging, and the line to U6 is
+  driven from a board that may be powered when the collar is not (the 1 kΩ keeps that harmless).
+- Run the transformer's output leads and the electrodes away from the Tracker, the GNSS antenna and
+  the LoRa antenna.
 - Put the GNSS antenna on top of the neck with a view of the sky; keep the LoRa antenna away from
   the shock electrodes.
 - Plan a new sealed enclosure: the Tracker will not fit the original receiver housing.

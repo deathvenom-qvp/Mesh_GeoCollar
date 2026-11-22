@@ -40,9 +40,12 @@
 #endif
 
 #include <Arduino.h>
+#include <atomic>
 #include <cstring>
 #include <esp32-hal-rmt.h>
 #include <esp_random.h>
+#include <esp_timer.h>
+#include <soc/gpio_reg.h>
 
 #if !defined(CONFIG_IDF_TARGET_ESP32S2) && !MESHTASTIC_EXCLUDE_BLUETOOTH
 #include "main.h"
@@ -224,6 +227,142 @@ class CollarTransmitter
     uint32_t stopUntil_ = 0;
     uint32_t frameMs_ = 0; // when the last frame was handed to the RMT driver
     rmt_data_t symbols_[caixianlin::kFrameLength];
+};
+
+/// Edges from the receiver chip's data output, queued by the interrupt for RemoteSniffer. Each
+/// entry is the edge's time in us with bit 0 replaced by the level after it.
+struct SniffRing {
+    static constexpr uint32_t kSize = 1024;
+    int pin = -1;
+    uint32_t entries[kSize];
+    std::atomic<uint32_t> head{0};
+    std::atomic<uint32_t> tail{0};
+    std::atomic<bool> overflow{false};
+};
+
+void IRAM_ATTR sniffEdge(void *arg)
+{
+    auto *r = static_cast<SniffRing *>(arg);
+    const uint32_t in = r->pin < 32 ? REG_READ(GPIO_IN_REG) >> r->pin : REG_READ(GPIO_IN1_REG) >> (r->pin - 32);
+    const uint32_t entry = (static_cast<uint32_t>(esp_timer_get_time()) & ~1u) | (in & 1u);
+    const uint32_t head = r->head.load(std::memory_order_relaxed);
+    const uint32_t next = (head + 1) % SniffRing::kSize;
+    if (next == r->tail.load(std::memory_order_acquire)) {
+        r->overflow.store(true, std::memory_order_relaxed);
+        return;
+    }
+    r->entries[head] = entry;
+    r->head.store(next, std::memory_order_release);
+}
+
+/// Bench tool, off unless GEOCOLLAR_SNIFF_PIN is set: listens to the collar receiver chip's data
+/// output on a spare GPIO and logs what the original remote sends. A CaiXianLin frame is logged
+/// decoded ("remote 0x1A2B channel 0 vibrate 35"), which gives the transmitter ID and channel to
+/// build with; anything else that looks like a remote is logged as raw high/low times, so that
+/// another protocol can be added. It only listens: nothing it hears reaches the collar.
+/// The receiver chip outputs noise between frames, so this takes thousands of interrupts a second:
+/// use it on the bench, not in a build for the dog.
+class RemoteSniffer : private concurrency::OSThread
+{
+  public:
+    explicit RemoteSniffer(int pin) : OSThread("GeoCollarSniff")
+    {
+        ring_.pin = pin;
+        pinMode(pin, INPUT);
+        attachInterruptArg(pin, sniffEdge, &ring_, CHANGE);
+        LOG_INFO("GeoCollar: listening for the collar's remote on GPIO %d", pin);
+    }
+
+  protected:
+    int32_t runOnce() override
+    {
+        if (ring_.overflow.exchange(false)) {
+            dec_.reset();
+            burst_.clear();
+            haveHigh_ = false;
+            haveRise_ = false;
+        }
+        uint32_t tail = ring_.tail.load(std::memory_order_relaxed);
+        const uint32_t head = ring_.head.load(std::memory_order_acquire);
+        while (tail != head) {
+            onEdgeLogged(ring_.entries[tail]);
+            tail = (tail + 1) % SniffRing::kSize;
+        }
+        ring_.tail.store(tail, std::memory_order_release);
+
+        // The low time after a remote's last pulse ends only with the next noise edge, which may be
+        // a while: end it after 6 ms so the last frame is not held back.
+        const uint32_t now = static_cast<uint32_t>(esp_timer_get_time());
+        if (haveHigh_ && now - lastFall_ > 6000) {
+            pulse(highUs_, now - lastFall_);
+            haveHigh_ = false;
+        }
+        return 20;
+    }
+
+  private:
+    /// One edge from the ring: its time (bit 0 cleared) and the level after it (bit 0).
+    void onEdgeLogged(uint32_t entry)
+    {
+        const uint32_t t = entry & ~1u;
+        if (entry & 1u) { // rising: the low before it has ended, and with it the last pulse
+            if (haveHigh_)
+                pulse(highUs_, t - lastFall_);
+            haveHigh_ = false;
+            lastRise_ = t;
+            haveRise_ = true;
+        } else if (haveRise_) { // falling: the high has ended
+            highUs_ = t - lastRise_;
+            lastFall_ = t;
+            haveHigh_ = true;
+            haveRise_ = false;
+        }
+    }
+
+    void pulse(uint32_t highUs, uint32_t lowUs)
+    {
+        const uint32_t nowMs = millis();
+        caixianlin::DecodedFrame f;
+        if (dec_.feed(highUs, lowUs, f)) {
+            lastFrameMs_ = nowMs;
+            const bool same = f.transmitterId == last_.transmitterId && f.channel == last_.channel &&
+                              f.action == last_.action && f.intensity == last_.intensity;
+            if (!same || nowMs - lastLogMs_ > 1000) { // a held button repeats the frame: log it once a second
+                LOG_INFO("GeoCollar: remote 0x%04X channel %u %s %u (CaiXianLin; this collar builds as 0x%04X channel %u)",
+                         (unsigned)f.transmitterId, (unsigned)f.channel, caixianlin::actionName(f.action),
+                         (unsigned)f.intensity, (unsigned)GEOCOLLAR_TRANSMITTER_ID, (unsigned)GEOCOLLAR_CHANNEL);
+                lastLogMs_ = nowMs;
+                last_ = f;
+            }
+        }
+        if (burst_.feed(highUs, lowUs)) {
+            // Print the raw times only when nothing decoded: a CaiXianLin remote is already logged.
+            if (nowMs - lastFrameMs_ > 500 && nowMs - lastRawMs_ > 2000) {
+                lastRawMs_ = nowMs;
+                LOG_INFO("GeoCollar: unknown remote signal, %u pulses (high/low us):", (unsigned)burst_.count());
+                char line[160];
+                size_t len = 0;
+                for (size_t i = 0; i < burst_.count(); i++) {
+                    const Pulse &p = burst_.pulses()[i];
+                    len += snprintf(line + len, sizeof(line) - len, " %u/%u", (unsigned)p.highUs, (unsigned)p.lowUs);
+                    if ((i % 12) == 11 || i + 1 == burst_.count()) {
+                        LOG_INFO("GeoCollar:  %s", line);
+                        len = 0;
+                    }
+                }
+            }
+            burst_.clear();
+        }
+    }
+
+    SniffRing ring_;
+
+    bool haveRise_ = false, haveHigh_ = false;
+    uint32_t lastRise_ = 0, lastFall_ = 0, highUs_ = 0;
+    caixianlin::Decoder dec_;
+    BurstRecorder burst_;
+    caixianlin::DecodedFrame last_{0, 0xFF, CollarAction::Beep, 0};
+    uint32_t lastFrameMs_ = 0, lastLogMs_ = 0, lastRawMs_ = 0;
 };
 
 /// The Bluetooth half of the lost beacon. It borrows Meshtastic's own BLE advertising instead of
@@ -508,6 +647,8 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
         if (GEOCOLLAR_DISABLE_PIN >= 0)
             pinMode(GEOCOLLAR_DISABLE_PIN, INPUT_PULLUP);
         tx_.begin();
+        if (GEOCOLLAR_SNIFF_PIN >= 0)
+            sniffer_ = new RemoteSniffer(GEOCOLLAR_SNIFF_PIN); // lives as long as the module
         loadState();
         loadHome();
         applyPowerSettings();
@@ -1681,6 +1822,7 @@ class GeoCollarModule : public SinglePortModule, private concurrency::OSThread
     FenceEngine engine_;
     CorrectionPulser pulser_;
     CollarTransmitter tx_;
+    RemoteSniffer *sniffer_ = nullptr; // bench tool, GEOCOLLAR_SNIFF_PIN
     LostBeacon beacon_;
     BeaconAdvertiser ble_;
     proto::OwnerInfo owner_;

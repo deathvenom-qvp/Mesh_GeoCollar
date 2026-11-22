@@ -178,7 +178,10 @@ any hardware.
 
 ## What is not done yet
 
-- Not yet run on hardware: the data-line tap, the RMT timing and pairing need bench testing.
+- Not yet run on hardware: the data-line tap, the RMT timing and pairing need bench testing. The
+  first collar opened (an H-880B RX V1.4 receiver) is not yet confirmed to speak CaiXianLin: a
+  capture of its remote (`GEOCOLLAR_SNIFF_PIN`, see [docs/hardware.md](docs/hardware.md#capturing-the-remote))
+  will say.
 - The lost beacon's Bluetooth advertising is written against Meshtastic's BLE stack and
   untested on hardware.
 - GPS pacing is written and compiles but is untested on hardware. Only the interval inside the
